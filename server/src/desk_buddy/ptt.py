@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import threading
 from collections.abc import Callable
+
+log = logging.getLogger(__name__)
+
+_user32 = ctypes.WinDLL("user32")
+_user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_user32.GetAsyncKeyState.restype = ctypes.c_short
 
 # Virtual-key codes: https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes
 VK_CODES: dict[str, int] = {
@@ -37,7 +44,7 @@ def parse_key(name: str) -> int:
 
 def is_key_pressed(vk: int) -> bool:
     """True while the key is physically held, whichever window has focus."""
-    return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
 
 
 class EdgeDetector:
@@ -72,18 +79,27 @@ class KeyWatcher:
         self._read_key = read_key
         self._interval = interval
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="ptt", daemon=True)
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="ptt", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1)
 
     def _run(self) -> None:
         detector = EdgeDetector()
         while not self._stop.wait(self._interval):
-            event = detector.update(self._read_key(self._vk))
-            if event:
-                self._on_event(event)
+            try:
+                event = detector.update(self._read_key(self._vk))
+                if event:
+                    self._on_event(event)
+            except Exception:
+                log.exception("push-to-talk poll failed")

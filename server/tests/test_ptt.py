@@ -39,3 +39,38 @@ def test_key_watcher_emits_down_then_up():
     assert done.wait(timeout=2)
     watcher.stop()
     assert events == ["down", "up"]
+
+
+def test_key_watcher_survives_on_event_error():
+    readings = iter([True, False])
+    events: list[str] = []
+    done = threading.Event()
+
+    def on_event(ev: str) -> None:
+        events.append(ev)
+        if ev == "down":
+            raise RuntimeError("boom")
+        done.set()
+
+    watcher = KeyWatcher(0xA3, on_event, read_key=lambda vk: next(readings, False), interval=0.001)
+    watcher.start()
+    assert done.wait(timeout=2)
+    watcher.stop()
+    assert events == ["down", "up"]
+
+
+def test_key_watcher_stop_before_start_and_twice():
+    watcher = KeyWatcher(0xA3, lambda ev: None, read_key=lambda vk: False, interval=0.001)
+    watcher.stop()
+    watcher.start()
+    watcher.stop()
+    watcher.stop()
+
+
+def test_key_watcher_thread_ends_after_stop():
+    watcher = KeyWatcher(0xA3, lambda ev: None, read_key=lambda vk: False, interval=0.001)
+    watcher.start()
+    thread = watcher._thread
+    assert thread is not None and thread.is_alive()
+    watcher.stop()
+    assert not thread.is_alive()
