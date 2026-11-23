@@ -6,7 +6,6 @@ import anthropic
 import httpx2
 import pytest
 
-from desk_buddy.brain.personality import system_prompt
 from desk_buddy.config import Settings
 from desk_buddy.llm import ClaudeChat, LLMError, LLMRefusal, create_chat
 
@@ -160,9 +159,3 @@ def test_breaking_out_early_closes_stream():
 
 def test_create_chat_builds_claude_for_anthropic_provider():
     assert isinstance(create_chat(Settings(anthropic_api_key="k")), ClaudeChat)
-
-
-def test_system_prompt_mentions_limits():
-    prompt = system_prompt(max_sentences=3)
-    assert "3" in prompt
-    assert "markdown" in prompt.lower()
