@@ -28,10 +28,15 @@ The server must also run with the PC's own mic and speaker (no robot connected),
 ## Repo layout
 
 ```
-server/     Python brain (uv-managed)
-firmware/   ESP32-S3 firmware (PlatformIO, Arduino framework)
-docs/       protocol.md, wiring.md, decisions.md
+server/                 Python brain (uv-managed, src layout)
+  src/desk_buddy/       the single importable package
+  tests/                pytest
+firmware/               ESP32-S3 firmware (PlatformIO, Arduino framework)
+docs/                   protocol.md, wiring.md, decisions.md, plans/
 ```
+
+- Decisions log: `docs/decisions.md` — add an entry whenever a decision is made or changed.
+- Server commands (run inside `server/`): `uv sync`, `uv run pytest`, `uv run ruff check`, `uv run ruff format`.
 
 ## Server stack (decided)
 
@@ -47,7 +52,7 @@ docs/       protocol.md, wiring.md, decisions.md
 ## Personality
 
 - Original character (name TBD — placeholder **Buddy**). Do not use existing fictional characters or voice clones.
-- One system prompt in `server/brain/personality.py`, plus canned lines for wake, sleep, errors.
+- One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines for wake, sleep, errors.
 - Every reply starts with an emotion tag: `[neutral] [happy] [sad] [surprised] [sleepy] [thinking] [curious]`. The server strips it from speech and sends it to the robot's eyes.
 - Replies are short by default (configurable max sentences). Spoken style: no markdown, no lists.
 
