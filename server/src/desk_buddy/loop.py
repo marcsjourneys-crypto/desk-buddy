@@ -35,8 +35,9 @@ class Mic(Protocol):
 
 
 class Player(Protocol):
-    def play(self, pcm: bytes) -> None: ...
+    def play(self, pcm: bytes, token: int) -> None: ...
     def stop(self) -> None: ...
+    def current_token(self) -> int: ...
 
 
 class Orchestrator:
@@ -112,6 +113,9 @@ class Orchestrator:
                 await turn
 
     async def _run_turn(self, pcm: bytes) -> None:
+        # Runs on the event loop after any _interrupt() has called stop(), so this
+        # token is fresh; plays from older turns hold stale tokens and write nothing.
+        token = self.speaker.current_token()
         try:
             text = await asyncio.to_thread(self.transcriber.transcribe, pcm)
             log.info("STT %.0f ms", self._ms())
@@ -122,7 +126,7 @@ class Orchestrator:
             queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._produce(text, queue))
-                tg.create_task(self._consume(queue))
+                tg.create_task(self._consume(queue, token))
         except Exception:
             log.exception("Turn failed")
         finally:
@@ -158,9 +162,9 @@ class Orchestrator:
     async def _enqueue(self, sentence: str, queue: asyncio.Queue[bytes | None]) -> None:
         await queue.put(await asyncio.to_thread(self.synthesizer.synthesize, sentence))
 
-    async def _consume(self, queue: asyncio.Queue[bytes | None]) -> None:
+    async def _consume(self, queue: asyncio.Queue[bytes | None], token: int) -> None:
         while (pcm := await queue.get()) is not None:
             if self.state is not State.SPEAKING:
                 log.info("First audio %.0f ms", self._ms())
                 self._set_state(State.SPEAKING)
-            await asyncio.to_thread(self.speaker.play, pcm)
+            await asyncio.to_thread(self.speaker.play, pcm, token)

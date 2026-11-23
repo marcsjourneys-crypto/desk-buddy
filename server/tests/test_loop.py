@@ -48,13 +48,18 @@ class FakeSynth:
 class FakeSpeaker:
     def __init__(self, block: bool = False):
         self.played: list[str] = []
+        self.tokens: list[int] = []
         self.stops = 0
         self.block = block
         self.started = threading.Event()
         self._release = threading.Event()
 
-    def play(self, pcm: bytes) -> None:
+    def current_token(self) -> int:
+        return self.stops
+
+    def play(self, pcm: bytes, token: int) -> None:
         self.played.append(pcm.decode())
+        self.tokens.append(token)
         self.started.set()
         if self.block:
             self._release.wait(timeout=5)
@@ -90,6 +95,24 @@ def test_normal_turn():
     assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]
     assert parts["chat"].prompts == ["hi buddy"]
     assert parts["speaker"].played == ["Hello there.", "How are you?"]
+    assert parts["speaker"].tokens == [0, 0]
+
+
+def test_turn_after_interrupt_uses_new_token():
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")  # interrupt -> stop() bumps the token
+        speaker.block = False
+        await orch.handle("up")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert speaker.tokens == [0, 1, 1]
 
 
 def test_short_tap_is_ignored():
