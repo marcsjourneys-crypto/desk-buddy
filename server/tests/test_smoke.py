@@ -1,5 +1,6 @@
 """Smoke tests: the package installs, and .env.example stays secret-free."""
 
+import re
 from pathlib import Path
 
 import desk_buddy
@@ -24,15 +25,26 @@ REQUIRED_KEYS = {
 }
 
 
+# A commented-out assignment with a value, e.g. "# ANTHROPIC_API_KEY=sk-ant-...".
+COMMENTED_ASSIGNMENT = re.compile(r"^#\s*[A-Z][A-Z0-9_]*\s*=\s*\S")
+
+
 def _parse_env_example() -> dict[str, str]:
     entries: dict[str, str] = {}
     for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line:
+            continue
+        if line.startswith("#"):
+            assert not COMMENTED_ASSIGNMENT.match(line), (
+                f"Commented-out value in .env.example (possible secret): {line.split('=')[0]}="
+            )
             continue
         key, sep, value = line.partition("=")
         assert sep, f"Malformed line in .env.example: {line!r}"
-        entries[key.strip()] = value.strip()
+        key = key.strip()
+        assert key not in entries, f"Duplicate key in .env.example: {key}"
+        entries[key] = value.strip()
     return entries
 
 

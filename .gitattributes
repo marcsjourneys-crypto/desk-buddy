@@ -1,5 +1,5 @@
-# Store text with LF in the repo; Git checks out native line endings.
-* text=auto eol=lf
+# Store text with LF in the repo; Git checks out native line endings (CRLF on Windows).
+* text=auto
 
 *.png binary
 *.jpg binary

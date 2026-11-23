@@ -1,5 +1,5 @@
-# Secrets
-.env
+# Secrets (any .env variant except the committed example)
+.env*
 !.env.example
 
 # Python
