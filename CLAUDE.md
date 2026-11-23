@@ -1,0 +1,108 @@
+# Desk Buddy — project brief for Claude Code
+
+A retro tin-toy desk robot that listens, talks, has a personality, takes dictation into my Obsidian vault, and (later) controls my computer. Built from scratch: my own server, my own firmware. Inspired by cgro00/desk-robot (MIT), but no code is copied from it.
+
+## How we work
+
+- Work one milestone at a time (see Roadmap). Start each in plan mode; show me the plan before writing code.
+- Small commits with clear messages. Run tests before every commit.
+- Ask before adding a new dependency. Prefer the standard library when it's reasonable.
+- Secrets live in `server/.env` (gitignored). Commit a `.env.example` with every key listed, values blank.
+- Keep this file current: when a decision changes, update it in the same commit.
+- I'm on a Mac Mini M4 Pro (48 GB). The server targets macOS / Apple Silicon only.
+
+## Architecture
+
+Thin robot, smart server. The robot streams audio and button presses; the server does all the thinking.
+
+```
+ESP32-S3 robot  <── WebSocket over Wi-Fi (token auth) ──>  Mac server (Python)
+  mic, speaker, 2 round eyes,                               VAD → STT → Claude → TTS
+  2 servos, antenna LED, touch                              tools: notes, music, apps
+                                                            dashboard (localhost)
+```
+
+The server must also run with the Mac's own mic and speaker (no robot connected), so the whole voice loop can be built and tested before the hardware works.
+
+## Repo layout
+
+```
+server/     Python brain (uv-managed)
+firmware/   ESP32-S3 firmware (PlatformIO, Arduino framework)
+docs/       protocol.md, wiring.md, decisions.md
+```
+
+## Server stack (decided)
+
+- Python 3.12+, managed with uv. Tests with pytest.
+- Async core: asyncio + websockets (or FastAPI if the dashboard needs it — decide in M4).
+- VAD: Silero VAD.
+- STT: mlx-whisper (Apple Silicon optimized). Start with a small English model; make it configurable.
+- LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done.
+- TTS: start with macOS `say` (zero setup), then Piper (local) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
+- Obsidian: write markdown files directly into the vault folder (path in `.env`). No plugin needed.
+
+## Personality
+
+- Original character (name TBD — placeholder **Buddy**). Do not use existing fictional characters or voice clones.
+- One system prompt in `server/brain/personality.py`, plus canned lines for wake, sleep, errors.
+- Every reply starts with an emotion tag: `[neutral] [happy] [sad] [surprised] [sleepy] [thinking] [curious]`. The server strips it from speech and sends it to the robot's eyes.
+- Replies are short by default (configurable max sentences). Spoken style: no markdown, no lists.
+
+## Tools the LLM can call
+
+Every tool is a plain Python function with a JSON schema, registered in one place.
+
+- `take_note(text, kind)` — `note` appends a timestamped line to today's daily note; `idea` creates a new file in `Ideas/` with frontmatter (date, tags). Vault folder names configurable.
+- `read_notes(day)` — reads back today's (or a given day's) captured notes.
+- Later: `play_music`, `media`, `open_app`, `open_website`, `computer_volume`, `show_weather`.
+
+## Safety rules for computer-control tools (non-negotiable)
+
+Anyone (or any TV) near the robot can talk to it.
+
+- Off by default; a setting turns it on.
+- Allowlists only. The model chooses a name from a list; the server builds every command and URL. Never pass model text into a shell or command string. Always use argument lists, never `shell=True`.
+- Rate limits: max 3 actions per question, 8 per minute.
+- Anything powerful (e.g. Apple Shortcuts) requires a spoken "yes" on the next turn, checked by code.
+- Every action is logged and shown on the dashboard.
+
+## Robot ↔ server protocol (draft — finalize in docs/protocol.md during M4)
+
+- One WebSocket. Text frames = JSON control messages. Binary frames = audio.
+- Audio up: 16 kHz, 16-bit mono PCM, ~20 ms chunks. Audio down: 16 kHz 16-bit mono PCM (revisit if quality is poor).
+- Robot → server: `hello {token, fw_version}`, `button {down|up}`, `touch {}`, `stats {...}`.
+- Server → robot: `state {idle|listening|thinking|speaking|sleeping}`, `emotion {name}`, `look {pan, tilt, speed}`, `led {mode}`, `audio_start`, `audio_end`, `volume {level}`.
+- Server stays the source of truth for state. Robot is dumb and reconnects automatically.
+
+## Hardware (ordered)
+
+- Hosyond ESP32-S3 DevKit N16R8 (16 MB flash, 8 MB octal PSRAM, two USB-C ports)
+- 2× GC9A01 1.28" 240×240 round TFT (SPI, shared bus, separate CS) — the eyes
+- INMP441 I2S MEMS mic (L/R pin to GND)
+- NULLLAB MAX98357A I2S amp + small 3 W speaker
+- 2× MG90S servos (pan, tilt), 608ZZ bearing for the neck
+- WS2812B LED in a brass-tube antenna, copper-foil touch pad on the head, tactile button backup
+- 5 V 3 A USB-C supply, 1000 µF cap across servo power
+
+## Firmware constraints
+
+- Do NOT use GPIO 35, 36, 37 (octal PSRAM on N16R8).
+- Avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20 for peripherals. GPIO 48 is the onboard RGB LED.
+- Servos powered from 5 V, not 3.3 V; common ground; stop sending PWM when a servo reaches its target (kills jitter and noise).
+- Freeze servos while listening so the mic doesn't hear them.
+- Servo motion always eased (no snapping); pan limit about ±60°.
+- Pin map lives in `firmware/include/pins.h` and `docs/wiring.md` — keep them in sync.
+
+## Roadmap
+
+- **M0 – Repo setup.** Monorepo layout, uv project, pytest, `.env.example`, `docs/decisions.md`.
+- **M1 – Voice loop on the Mac.** Mac mic → VAD → STT → Claude (streaming) → TTS → Mac speaker. Push-to-talk via keyboard first.
+- **M2 – Personality.** System prompt, emotion tags parsed and logged, short spoken replies, conversation memory for the session.
+- **M3 – Obsidian dictation.** `take_note` / `read_notes` tools, tests against a temp vault.
+- **M4 – Robot link.** WebSocket server, token auth, `docs/protocol.md`, and a fake-robot Python client for tests.
+- **M5 – Firmware bring-up** (can run in parallel with M1–M4): blink + PSRAM check, one eye, two eyes, mic levels, speaker tone, record/playback loopback, servo sweep with easing.
+- **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state.
+- **M7 – Mac computer control.** Spotify search (free dev key) + AppleScript playback, media keys, allowlisted apps/sites, volume. All safety rules above.
+- **M8 – Dashboard.** Local web page: live state, transcript, last actions, settings (incl. computer-control switch).
+- **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, Windows "hands" agent, Raspberry Pi 7" console base.
