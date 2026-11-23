@@ -9,12 +9,15 @@ ENV_EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
 
 REQUIRED_KEYS = {
     "ANTHROPIC_API_KEY",
+    "LLM_PROVIDER",
     "LLM_MODEL",
+    "LLM_EFFORT",
     "STT_MODEL",
     "STT_DEVICE",
     "STT_COMPUTE_TYPE",
     "TTS_ENGINE",
     "MAX_SENTENCES",
+    "PTT_KEY",
     "OBSIDIAN_VAULT_PATH",
     "OBSIDIAN_DAILY_FOLDER",
     "OBSIDIAN_IDEAS_FOLDER",
