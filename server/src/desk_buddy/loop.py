@@ -67,7 +67,11 @@ class Orchestrator:
 
     async def run(self, events: asyncio.Queue[str]) -> None:
         while True:
-            await self.handle(await events.get())
+            event = await events.get()
+            try:
+                await self.handle(event)
+            except Exception:
+                log.exception("Failed to handle %r event", event)
 
     async def handle(self, event: str) -> None:
         if event == "down":
@@ -109,14 +113,18 @@ class Orchestrator:
             log.info("Interrupted")
             turn.cancel()
             self.speaker.stop()
-            with contextlib.suppress(asyncio.CancelledError):
-                await turn
+            # wait() returns when the turn is done without re-raising its CancelledError,
+            # but a cancel aimed at *this* task (Ctrl+C) still propagates.
+            await asyncio.wait([turn])
 
     async def _run_turn(self, pcm: bytes) -> None:
         # Runs on the event loop after any _interrupt() has called stop(), so this
         # token is fresh; plays from older turns hold stale tokens and write nothing.
         token = self.speaker.current_token()
         try:
+            # An interrupt during THINKING cancels this await but not the transcribe
+            # thread: it runs to completion, its result is discarded, and it may briefly
+            # compete for CPU with the next turn. Accepted for M1.
             text = await asyncio.to_thread(self.transcriber.transcribe, pcm)
             log.info("STT %.0f ms", self._ms())
             if not text:
@@ -152,9 +160,11 @@ class Orchestrator:
                 await self._enqueue(sentence, queue)
         except LLMRefusal:
             log.warning("Claude refused")
+            reply.append(CANNED_REFUSAL)
             await self._enqueue(CANNED_REFUSAL, queue)
         except LLMError as exc:
             log.warning("LLM error: %s", exc)
+            reply.append(CANNED_ERROR)
             await self._enqueue(CANNED_ERROR, queue)
         log.info("Buddy: %s", " ".join(reply))
         await queue.put(None)

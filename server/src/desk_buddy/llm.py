@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any, Protocol
 
 import anthropic
@@ -105,7 +105,7 @@ class LLMRefusal(LLMError):
 class Chat(Protocol):
     """What the voice loop needs from any LLM provider."""
 
-    def stream_reply(self, user_text: str) -> AsyncIterator[str]: ...
+    def stream_reply(self, user_text: str) -> AsyncGenerator[str, None]: ...
 
 
 class ClaudeChat:
@@ -118,7 +118,7 @@ class ClaudeChat:
         self._effort = effort
         self._system = system
 
-    async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
+    async def stream_reply(self, user_text: str) -> AsyncGenerator[str, None]:
         """Yield text deltas as they arrive.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
