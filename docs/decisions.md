@@ -16,3 +16,17 @@ Format: **Decision** — why · alternatives considered.
 - **Code review: `python-reviewer` agent adapted from everything-claude-code (MIT), plus `/code-review`.** Gets a focused Python checklist plus Desk Buddy safety checks without the whole ECC plugin's many auto-triggering agents and hooks. Attribution in `THIRD_PARTY_NOTICES.md`. · Alternatives: install the full ECC plugin.
 - **Text files stored with LF** (`.gitattributes`). · Alternatives: let Git use CRLF per platform.
 - **Use uv-managed Python only** (`python-preference = "only-managed"` in `server/pyproject.toml`). The venv had been built on the Microsoft Store Python, whose app package has no microphone capability: every mic failed on MME, DirectSound and WASAPI, while uv's standalone CPython opens them all. · Alternatives: WDM-KS capture (exclusive, native rates only, skips Windows mic processing); a python.org install.
+
+## 2026-11-23 — M1 voice loop
+
+- **Audio I/O: sounddevice confirmed.** The mic input stream stays open and only buffers while the key is held. One long-lived output stream plays sentences without gaps. · Alternatives: PyAudio.
+- **SAPI via comtypes on a dedicated COM thread.** It renders to an in-memory 16 kHz stream with `SVSFIsNotXML`. · Alternatives: PowerShell subprocess, pywin32, pyttsx3.
+- **VAD: faster-whisper's bundled Silero ONNX (`vad_filter=True`).** No PyTorch. · Alternatives: silero-vad package.
+- **Push-to-talk: a global hold key via `GetAsyncKeyState` (ctypes).** `PTT_KEY` defaults to Right Ctrl. · Alternatives: Enter toggle, tap + VAD end.
+- **Interrupts: pressing the key mid-turn cancels the turn task and stops playback.**
+- **LLM effort `low` by default (`LLM_EFFORT`)** for latency on Haiku 5.5. Measured on the i7-1355U laptop, counted from key release, for a 5 s question: STT 666 ms, first token 1245 ms, first audio 1815 ms. · Alternatives: default `medium`.
+- **Whisper `beam_size=1`** (greedy) for CPU latency.
+- **LLM provider seam: `LLM_PROVIDER` (only `anthropic` for now) + `llm.create_chat()`.** The loop depends only on `stream_reply()`. OpenAI-compatible providers (Kimi, OpenRouter, Ollama) are planned after M3, once tool calling is settled. · Alternatives: Kimi support in M1; no seam.
+- **New `.env` keys:** `LLM_PROVIDER`, `LLM_EFFORT` (default `low`), `PTT_KEY` (default `right_ctrl`).
+- **`anthropic` SDK 2.x uses `httpx2`**, not `httpx`.
+- **Async tests use `asyncio.run`**, so no pytest-asyncio.

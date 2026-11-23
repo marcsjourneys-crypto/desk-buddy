@@ -37,16 +37,18 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 
 - Decisions log: `docs/decisions.md` — add an entry whenever a decision is made or changed.
 - Server commands (run inside `server/`): `uv sync`, `uv run pytest`, `uv run ruff check`, `uv run ruff format`.
+- Integration tests (real audio/COM/models/network) are marked and skipped by default: `uv run pytest -m integration`.
 
 ## Server stack (decided)
 
 - Python 3.12+, managed with uv. Tests with pytest.
 - Async core: asyncio + websockets (or FastAPI if the dashboard needs it — decide in M4).
-- VAD: Silero VAD.
-- Audio I/O: sounddevice (PortAudio) for the PC mic/speaker — confirm in M1.
+- Python comes from uv's own builds only (`python-preference = "only-managed"`). The Microsoft Store Python can't open microphones.
+- VAD: Silero VAD — the ONNX model bundled with faster-whisper (`vad_filter`), no PyTorch.
+- Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
 - STT: faster-whisper (CTranslate2), int8 on CPU. Start with `base.en`; model size, device (cpu/cuda) and compute type configurable in `.env`.
-- LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done.
-- TTS: start with the built-in Windows SAPI voices (zero setup; pick the library in M1), then Piper (local, runs on Windows) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
+- LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done. Provider is pluggable via `LLM_PROVIDER` (only `anthropic` today); OpenAI-compatible providers such as Kimi are planned after M3.
+- TTS: start with the built-in Windows SAPI voices (via comtypes), then Piper (local, runs on Windows) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
 - Obsidian: write markdown files directly into the vault folder (path in `.env`). No plugin needed.
 
 ## Personality

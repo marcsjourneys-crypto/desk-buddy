@@ -2,7 +2,19 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
-## 2026-11-23 — M1 (voice loop on the PC): code done, manual check blocked
+## 2026-11-23 — M1 voice loop working end to end
+
+First live run: the user asked about owls and Buddy answered out loud. STT 666 ms, first token 1245 ms, first audio 1815 ms (from key release). Startup, reply and the "Bye" on exit are confirmed. Decisions, `CLAUDE.md` and `server/README.md` are updated.
+
+**Still to check by hand before calling M1 closed** (Task 11, Step 1):
+- Pressing the key mid-reply stops speech and logs "Interrupted".
+- A quick tap logs "Ignored … tap".
+- Holding the key in silence for 2 s logs "No speech detected".
+- It works while another window has focus.
+
+**Next after that:** M2 (personality).
+
+## Earlier on 2026-11-23 — M1 (voice loop on the PC): code done, manual check blocked
 
 **Done** (all pushed to `main`, up to `95ddefd`):
 - M0 repo setup.
