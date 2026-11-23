@@ -16,6 +16,11 @@ dependencies = [
 requires = ["uv_build>=0.13.9,<0.14"]
 build-backend = "uv_build"
 
+[tool.uv]
+# The Microsoft Store Python can't open microphones (its app package has no
+# mic capability), so always use uv's own standalone Python builds.
+python-preference = "only-managed"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -m 'not integration'"

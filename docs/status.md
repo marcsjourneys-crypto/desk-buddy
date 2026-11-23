@@ -18,7 +18,9 @@ Where the project stands, so work can resume after a break. Update this when a m
   - Silence is rejected in <10 ms.
   - The SAPI voice renders correctly at 16 kHz.
 
-**Blocked: the PC mic can't be opened.**
+**Mic fixed (later on 2026-11-23).** The cause was the Microsoft Store Python, not the driver: its app package has no mic capability. `server/pyproject.toml` now forces uv's own Python. After rebuilding `.venv`, every mic opens and all tests pass. If the mic fails again, check `uv run python -c "import sys; print(sys._base_executable)"` isn't under `WindowsApps`. The notes below are kept for history.
+
+**Was blocked: the PC mic can't be opened.**
 - **Symptom:** opening the built-in "Microphone Array (Intel® Smart Sound)" fails in every host API (MME error 1, DirectSound E_FAIL, WASAPI invalid device), every format, including its native one. Output works.
 - **Ruled out:**
   - the sample rate or format
