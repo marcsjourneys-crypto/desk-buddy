@@ -3,8 +3,10 @@ import logging
 import threading
 
 from desk_buddy.audio import BYTES_PER_SECOND
+from desk_buddy.brain.memory import Conversation
+from desk_buddy.brain.personality import ERROR_LINE, FORGET_LINE, REFUSAL_LINE
 from desk_buddy.llm import LLMError, LLMRefusal
-from desk_buddy.loop import CANNED_ERROR, CANNED_REFUSAL, Orchestrator, State
+from desk_buddy.loop import Orchestrator, State
 
 ONE_SECOND = b"\x00" * BYTES_PER_SECOND
 
@@ -79,10 +81,13 @@ def make(**overrides):
         "chat": FakeChat(),
         "synthesizer": FakeSynth(),
         "speaker": FakeSpeaker(),
+        "conversation": Conversation(),
     }
     parts.update(overrides)
     states: list[State] = []
-    orch = Orchestrator(**parts, on_state=states.append)
+    emotions: list[str] = []
+    orch = Orchestrator(**parts, on_state=states.append, on_emotion=emotions.append)
+    parts["emotions"] = emotions
     return orch, parts, states
 
 
@@ -135,20 +140,20 @@ def test_no_speech_goes_idle_without_calling_claude():
 def test_api_error_speaks_canned_line():
     orch, parts, states = make(chat=FakeChat(deltas=(), error=LLMError("boom")))
     asyncio.run(talk(orch))
-    assert parts["speaker"].played == [CANNED_ERROR]
+    assert parts["speaker"].played == [ERROR_LINE.text]
     assert states[-1] is State.IDLE
 
 
 def test_error_after_partial_reply_keeps_spoken_part():
     orch, parts, _ = make(chat=FakeChat(deltas=("First. ",), error=LLMError("boom")))
     asyncio.run(talk(orch))
-    assert parts["speaker"].played == ["First.", CANNED_ERROR]
+    assert parts["speaker"].played == ["First.", ERROR_LINE.text]
 
 
 def test_refusal_speaks_refusal_line():
     orch, parts, _ = make(chat=FakeChat(deltas=(), error=LLMRefusal("no")))
     asyncio.run(talk(orch))
-    assert parts["speaker"].played == [CANNED_REFUSAL]
+    assert parts["speaker"].played == [REFUSAL_LINE.text]
 
 
 def test_up_without_down_is_ignored():
@@ -274,4 +279,94 @@ def test_reply_log_includes_canned_line(caplog):
     caplog.set_level(logging.INFO, logger="desk_buddy.loop")
     orch, _, _ = make(chat=FakeChat(deltas=("First. ",), error=LLMError("boom")))
     asyncio.run(talk(orch))
-    assert f"Buddy: First. {CANNED_ERROR}" in caplog.messages
+    assert f"Buddy [neutral]: First. {ERROR_LINE.text}" in caplog.messages
+
+
+def test_second_turn_sees_first_turn_in_history():
+    orch, parts, _ = make()
+
+    async def scenario():
+        await talk(orch)
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert parts["chat"].histories[0] == []
+    assert parts["chat"].histories[1] == [
+        {"role": "user", "content": "hi buddy"},
+        {"role": "assistant", "content": "[neutral] Hello there. How are you?"},
+    ]
+
+
+def test_emotion_tag_is_reported_stripped_and_remembered():
+    orch, parts, _ = make(chat=FakeChat(deltas=("[hap", "py] Hi", " there.")))
+    asyncio.run(talk(orch))
+    assert parts["emotions"] == ["happy"]
+    assert parts["speaker"].played == ["Hi there."]
+    assert parts["conversation"].messages()[1]["content"] == "[happy] Hi there."
+
+
+def test_interrupt_remembers_only_what_started_playing():
+    speaker = FakeSpeaker(block=True)
+    orch, parts, _ = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")  # interrupt during "Hello there."
+
+    asyncio.run(scenario())
+    assert parts["conversation"].messages()[1]["content"] == "[neutral] Hello there. (interrupted)"
+
+
+class SlowChat:
+    """Never yields; records that it was called."""
+
+    def __init__(self):
+        self.called = asyncio.Event()
+
+    async def stream_reply(self, history, text):
+        self.called.set()
+        await asyncio.Event().wait()
+        yield ""  # pragma: no cover
+
+
+def test_interrupt_before_any_speech_remembers_nothing():
+    async def scenario():
+        chat = SlowChat()
+        orch, parts, _ = make(chat=chat)
+        await orch.handle("down")
+        await orch.handle("up")
+        await asyncio.wait_for(chat.called.wait(), 2)
+        await orch.handle("down")  # interrupt while thinking
+        return parts
+
+    parts = asyncio.run(scenario())
+    assert len(parts["conversation"]) == 0
+
+
+def test_failed_turn_is_not_remembered_and_looks_sad():
+    orch, parts, _ = make(chat=FakeChat(deltas=("First. ",), error=LLMError("boom")))
+    asyncio.run(talk(orch))
+    assert len(parts["conversation"]) == 0
+    assert parts["emotions"] == ["neutral", "sad"]
+
+
+def test_refusal_is_not_remembered():
+    orch, parts, _ = make(chat=FakeChat(deltas=(), error=LLMRefusal("no")))
+    asyncio.run(talk(orch))
+    assert len(parts["conversation"]) == 0
+
+
+def test_forget_phrase_clears_memory_without_calling_claude():
+    conversation = Conversation()
+    conversation.add("tell me about labs", "[happy] Labs are great.")
+    orch, parts, states = make(
+        transcriber=FakeTranscriber(text="Buddy, new topic."), conversation=conversation
+    )
+    asyncio.run(talk(orch))
+    assert parts["chat"].prompts == []
+    assert len(conversation) == 0
+    assert parts["speaker"].played == [FORGET_LINE.text]
+    assert parts["emotions"] == [FORGET_LINE.emotion]
+    assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]

@@ -7,10 +7,20 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
 from desk_buddy.audio import duration_seconds
+from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
+from desk_buddy.brain.memory import Conversation, is_forget_command
+from desk_buddy.brain.personality import (
+    ERROR_LINE,
+    FORGET_LINE,
+    INTERRUPTED,
+    REFUSAL_LINE,
+    Line,
+)
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
 from desk_buddy.tts import Synthesizer
@@ -18,8 +28,6 @@ from desk_buddy.tts import Synthesizer
 log = logging.getLogger(__name__)
 
 MIN_CLIP_SECONDS = 0.3
-CANNED_ERROR = "Sorry, I can't reach my brain right now."
-CANNED_REFUSAL = "Hmm, I'd better not answer that one."
 
 
 class State(StrEnum):
@@ -40,6 +48,17 @@ class Player(Protocol):
     def current_token(self) -> int: ...
 
 
+@dataclass
+class _Turn:
+    """What happened in one turn, for deciding what to remember."""
+
+    user: str
+    emotion: str | None = None
+    spoken: list[str] = field(default_factory=list)  # sentences that started playing
+    failed: bool = False
+    complete: bool = False
+
+
 class Orchestrator:
     """State machine. One asyncio.Task per turn; a key press mid-turn cancels it."""
 
@@ -51,7 +70,9 @@ class Orchestrator:
         chat: Chat,
         synthesizer: Synthesizer,
         speaker: Player,
+        conversation: Conversation | None = None,
         on_state: Callable[[State], None] = lambda state: None,
+        on_emotion: Callable[[str], None] = lambda emotion: None,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -59,7 +80,9 @@ class Orchestrator:
         self.synthesizer = synthesizer
         self.speaker = speaker
         self.state = State.IDLE
+        self.conversation = Conversation() if conversation is None else conversation
         self._on_state = on_state
+        self._on_emotion = on_emotion
         self._turn: asyncio.Task[None] | None = None
         self._t0 = 0.0
 
@@ -121,6 +144,7 @@ class Orchestrator:
         # Runs on the event loop after any _interrupt() has called stop(), so this
         # token is fresh; plays from older turns hold stale tokens and write nothing.
         token = self.speaker.current_token()
+        turn: _Turn | None = None
         try:
             # An interrupt during THINKING cancels this await but not the transcribe
             # thread: it runs to completion, its result is discarded, and it may briefly
@@ -131,50 +155,104 @@ class Orchestrator:
                 log.info("No speech detected")
                 return
             log.info("You: %s", text)
-            queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=2)
+            if is_forget_command(text):
+                self.conversation.forget()
+                log.info("Memory cleared")
+                await self._say(FORGET_LINE, token)
+                return
+            turn = _Turn(user=text)
+            queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._produce(text, queue))
-                tg.create_task(self._consume(queue, token))
+                tg.create_task(self._produce(turn, queue))
+                tg.create_task(self._consume(queue, token, turn.spoken))
+            turn.complete = True
         except Exception:
+            # A TaskGroup failure arrives as an ExceptionGroup, which is an Exception.
             log.exception("Turn failed")
+            if turn:
+                turn.failed = True
         finally:
+            # Also runs when the turn is cancelled by an interrupt.
+            if turn:
+                self._remember(turn)
             if not asyncio.current_task().cancelling():
                 self._set_state(State.IDLE)
 
-    async def _produce(self, text: str, queue: asyncio.Queue[bytes | None]) -> None:
-        """Claude deltas -> sentences -> PCM, into the queue. None marks the end."""
+    def _remember(self, turn: _Turn) -> None:
+        """Keep what the user actually heard; drop failed turns and silent ones."""
+        if turn.failed or not turn.spoken:
+            return
+        reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken)
+        if not turn.complete:
+            reply += f" {INTERRUPTED}"
+        self.conversation.add(turn.user, reply)
+
+    async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
+        """Claude deltas -> emotion + sentences -> PCM, into the queue. None marks the end."""
+        parser = EmotionParser()
         splitter = SentenceSplitter()
         reply: list[str] = []
         first_token = True
+
+        async def speak(sentences: list[str]) -> None:
+            for sentence in sentences:
+                reply.append(sentence)
+                await self._enqueue(sentence, queue)
+
         try:
-            async with contextlib.aclosing(self.chat.stream_reply([], text)) as deltas:
+            history = self.conversation.messages()
+            async with contextlib.aclosing(self.chat.stream_reply(history, turn.user)) as deltas:
                 async for delta in deltas:
                     if first_token:
                         log.info("First token %.0f ms", self._ms())
                         first_token = False
-                    for sentence in splitter.feed(delta):
-                        reply.append(sentence)
-                        await self._enqueue(sentence, queue)
-            for sentence in splitter.flush():
-                reply.append(sentence)
-                await self._enqueue(sentence, queue)
+                    text = parser.feed(delta)
+                    self._note_emotion(turn, parser.emotion)
+                    await speak(splitter.feed(text))
+            text = parser.flush()
+            self._note_emotion(turn, parser.emotion)
+            await speak(splitter.feed(text) + splitter.flush())
         except LLMRefusal:
             log.warning("Claude refused")
-            reply.append(CANNED_REFUSAL)
-            await self._enqueue(CANNED_REFUSAL, queue)
+            turn.failed = True
+            self._emit_emotion(REFUSAL_LINE.emotion)
+            await speak([REFUSAL_LINE.text])
         except LLMError as exc:
             log.warning("LLM error: %s", exc)
-            reply.append(CANNED_ERROR)
-            await self._enqueue(CANNED_ERROR, queue)
-        log.info("Buddy: %s", " ".join(reply))
+            turn.failed = True
+            self._emit_emotion(ERROR_LINE.emotion)
+            await speak([ERROR_LINE.text])
+        log.info("Buddy [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
         await queue.put(None)
 
-    async def _enqueue(self, sentence: str, queue: asyncio.Queue[bytes | None]) -> None:
-        await queue.put(await asyncio.to_thread(self.synthesizer.synthesize, sentence))
+    def _note_emotion(self, turn: _Turn, emotion: str | None) -> None:
+        if emotion and turn.emotion is None:
+            turn.emotion = emotion
+            self._emit_emotion(emotion)
 
-    async def _consume(self, queue: asyncio.Queue[bytes | None], token: int) -> None:
-        while (pcm := await queue.get()) is not None:
+    def _emit_emotion(self, emotion: str) -> None:
+        self._on_emotion(emotion)
+
+    async def _say(self, line: Line, token: int) -> None:
+        """Speak one canned line (no Claude, nothing remembered)."""
+        self._emit_emotion(line.emotion)
+        log.info("Buddy [%s]: %s", line.emotion, line.text)
+        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+        await self._enqueue(line.text, queue)
+        await queue.put(None)
+        await self._consume(queue, token, [])
+
+    async def _enqueue(self, sentence: str, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
+        pcm = await asyncio.to_thread(self.synthesizer.synthesize, sentence)
+        await queue.put((sentence, pcm))
+
+    async def _consume(
+        self, queue: asyncio.Queue[tuple[str, bytes] | None], token: int, spoken: list[str]
+    ) -> None:
+        while (item := await queue.get()) is not None:
+            sentence, pcm = item
             if self.state is not State.SPEAKING:
                 log.info("First audio %.0f ms", self._ms())
                 self._set_state(State.SPEAKING)
+            spoken.append(sentence)  # before play: an interrupt mid-sentence still counts it
             await asyncio.to_thread(self.speaker.play, pcm, token)
