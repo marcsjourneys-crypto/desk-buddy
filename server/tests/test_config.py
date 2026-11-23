@@ -23,6 +23,7 @@ def test_defaults_apply_when_only_api_key_is_set():
     assert s.stt_compute_type == "int8"
     assert s.tts_engine == "sapi"
     assert s.max_sentences == 2
+    assert s.history_turns == 20
     assert s.ptt_key == "right_ctrl"
 
 
@@ -65,6 +66,8 @@ def test_missing_api_key_is_a_clear_error():
         ("LLM_PROVIDER", "kimi"),
         ("MAX_SENTENCES", "zero"),
         ("MAX_SENTENCES", "0"),
+        ("HISTORY_TURNS", "0"),
+        ("HISTORY_TURNS", "lots"),
         ("LLM_EFFORT", "turbo"),
         ("STT_DEVICE", "gpu"),
         ("TTS_ENGINE", "piper"),
@@ -138,3 +141,8 @@ def test_effort_is_case_insensitive():
 def test_choice_error_shows_the_value_as_typed():
     with pytest.raises(ConfigError, match="'GPU'"):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "STT_DEVICE": "GPU"})
+
+
+def test_history_turns_is_read(tmp_path):
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "HISTORY_TURNS": "5"})
+    assert s.history_turns == 5

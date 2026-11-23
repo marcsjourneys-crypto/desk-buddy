@@ -23,6 +23,7 @@ ENV_KEYS = (
     "STT_COMPUTE_TYPE",
     "TTS_ENGINE",
     "MAX_SENTENCES",
+    "HISTORY_TURNS",
     "PTT_KEY",
 )
 
@@ -52,6 +53,7 @@ class Settings:
     stt_compute_type: str = "int8"
     tts_engine: str = "sapi"
     max_sentences: int = 2
+    history_turns: int = 20
     ptt_key: str = "right_ctrl"
 
 
@@ -104,15 +106,8 @@ def load_settings(
             "ANTHROPIC_API_KEY is not set. Copy server/.env.example to server/.env and fill it in."
         )
 
-    raw_sentences = get("MAX_SENTENCES", str(Settings.max_sentences))
-    try:
-        max_sentences = int(raw_sentences)
-    except ValueError:
-        raise ConfigError(
-            f"MAX_SENTENCES must be a whole number >= 1, got {raw_sentences!r}"
-        ) from None
-    if max_sentences < 1:
-        raise ConfigError(f"MAX_SENTENCES must be a whole number >= 1, got {raw_sentences!r}")
+    max_sentences = _positive_int(get, "MAX_SENTENCES", Settings.max_sentences)
+    history_turns = _positive_int(get, "HISTORY_TURNS", Settings.history_turns)
 
     provider = _choice(get, "LLM_PROVIDER", Settings.llm_provider, LLM_PROVIDERS)
     effort = _choice(get, "LLM_EFFORT", Settings.llm_effort, EFFORT_LEVELS)
@@ -135,8 +130,20 @@ def load_settings(
         stt_compute_type=get("STT_COMPUTE_TYPE", Settings.stt_compute_type),
         tts_engine=engine,
         max_sentences=max_sentences,
+        history_turns=history_turns,
         ptt_key=ptt_key,
     )
+
+
+def _positive_int(get: Callable[[str, str], str], key: str, default: int) -> int:
+    raw = get(key, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ConfigError(f"{key} must be a whole number >= 1, got {raw!r}")
+    return value
 
 
 def _choice(
