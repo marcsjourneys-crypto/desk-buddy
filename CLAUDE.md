@@ -9,20 +9,21 @@ A retro tin-toy desk robot that listens, talks, has a personality, takes dictati
 - Ask before adding a new dependency. Prefer the standard library when it's reasonable.
 - Secrets live in `server/.env` (gitignored). Commit a `.env.example` with every key listed, values blank.
 - Keep this file current: when a decision changes, update it in the same commit.
-- I'm on a Mac Mini M4 Pro (48 GB). The server targets macOS / Apple Silicon only.
+- The server runs on a Windows 11 PC and targets Windows only. Current machine: Intel i7-1355U laptop, 16 GB RAM, no discrete GPU — so everything must run well on CPU; CUDA is an optional speed-up, never a requirement.
+- (Changed 2026-11-23: the server was originally planned for a Mac Mini. All Mac-specific choices — mlx-whisper, `say`, AppleScript — were replaced with Windows equivalents.)
 
 ## Architecture
 
 Thin robot, smart server. The robot streams audio and button presses; the server does all the thinking.
 
 ```
-ESP32-S3 robot  <── WebSocket over Wi-Fi (token auth) ──>  Mac server (Python)
+ESP32-S3 robot  <── WebSocket over Wi-Fi (token auth) ──>   PC server (Python) 
   mic, speaker, 2 round eyes,                               VAD → STT → Claude → TTS
   2 servos, antenna LED, touch                              tools: notes, music, apps
                                                             dashboard (localhost)
 ```
 
-The server must also run with the Mac's own mic and speaker (no robot connected), so the whole voice loop can be built and tested before the hardware works.
+The server must also run with the PC's own mic and speaker (no robot connected), so the whole voice loop can be built and tested before the hardware works.
 
 ## Repo layout
 
@@ -37,9 +38,10 @@ docs/       protocol.md, wiring.md, decisions.md
 - Python 3.12+, managed with uv. Tests with pytest.
 - Async core: asyncio + websockets (or FastAPI if the dashboard needs it — decide in M4).
 - VAD: Silero VAD.
-- STT: mlx-whisper (Apple Silicon optimized). Start with a small English model; make it configurable.
+- Audio I/O: sounddevice (PortAudio) for the PC mic/speaker — confirm in M1.
+- STT: faster-whisper (CTranslate2), int8 on CPU. Start with `base.en`; model size, device (cpu/cuda) and compute type configurable in `.env`.
 - LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done.
-- TTS: start with macOS `say` (zero setup), then Piper (local) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
+- TTS: start with the built-in Windows SAPI voices (zero setup; pick the library in M1), then Piper (local, runs on Windows) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
 - Obsidian: write markdown files directly into the vault folder (path in `.env`). No plugin needed.
 
 ## Personality
@@ -64,7 +66,7 @@ Anyone (or any TV) near the robot can talk to it.
 - Off by default; a setting turns it on.
 - Allowlists only. The model chooses a name from a list; the server builds every command and URL. Never pass model text into a shell or command string. Always use argument lists, never `shell=True`.
 - Rate limits: max 3 actions per question, 8 per minute.
-- Anything powerful (e.g. Apple Shortcuts) requires a spoken "yes" on the next turn, checked by code.
+- Anything powerful (e.g. running an allowlisted script, sleep/shutdown) requires a spoken "yes" on the next turn, checked by code.
 - Every action is logged and shown on the dashboard.
 
 ## Robot ↔ server protocol (draft — finalize in docs/protocol.md during M4)
@@ -73,6 +75,7 @@ Anyone (or any TV) near the robot can talk to it.
 - Audio up: 16 kHz, 16-bit mono PCM, ~20 ms chunks. Audio down: 16 kHz 16-bit mono PCM (revisit if quality is poor).
 - Robot → server: `hello {token, fw_version}`, `button {down|up}`, `touch {}`, `stats {...}`.
 - Server → robot: `state {idle|listening|thinking|speaking|sleeping}`, `emotion {name}`, `look {pan, tilt, speed}`, `led {mode}`, `audio_start`, `audio_end`, `volume {level}`.
+- The server listens on the LAN; Windows Firewall needs an inbound rule for the WebSocket port on Private networks only (document the exact command in docs/protocol.md).
 - Server stays the source of truth for state. Robot is dumb and reconnects automatically.
 
 ## Hardware (ordered)
@@ -97,12 +100,12 @@ Anyone (or any TV) near the robot can talk to it.
 ## Roadmap
 
 - **M0 – Repo setup.** Monorepo layout, uv project, pytest, `.env.example`, `docs/decisions.md`.
-- **M1 – Voice loop on the Mac.** Mac mic → VAD → STT → Claude (streaming) → TTS → Mac speaker. Push-to-talk via keyboard first.
+- **M1 – Voice loop on the PC.** PC mic → VAD → STT → Claude (streaming) → TTS → PC speaker. Push-to-talk via keyboard first.
 - **M2 – Personality.** System prompt, emotion tags parsed and logged, short spoken replies, conversation memory for the session.
 - **M3 – Obsidian dictation.** `take_note` / `read_notes` tools, tests against a temp vault.
 - **M4 – Robot link.** WebSocket server, token auth, `docs/protocol.md`, and a fake-robot Python client for tests.
 - **M5 – Firmware bring-up** (can run in parallel with M1–M4): blink + PSRAM check, one eye, two eyes, mic levels, speaker tone, record/playback loopback, servo sweep with easing.
 - **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state.
-- **M7 – Mac computer control.** Spotify search (free dev key) + AppleScript playback, media keys, allowlisted apps/sites, volume. All safety rules above.
+- **M7 – PC computer control.** Spotify search via Web API (free dev key) and playback via `spotify:` URIs / Web API (remote playback control needs Premium), media keys via Win32 `SendInput` (ctypes), allowlisted apps (launched by full exe path, argument lists) and sites, master volume. All safety rules above.
 - **M8 – Dashboard.** Local web page: live state, transcript, last actions, settings (incl. computer-control switch).
-- **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, Windows "hands" agent, Raspberry Pi 7" console base.
+- **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.
