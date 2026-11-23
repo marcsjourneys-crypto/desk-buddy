@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -11,50 +10,81 @@ import anthropic
 
 from desk_buddy.config import Settings
 
-log = logging.getLogger(__name__)
-
-_SENTENCE_END = re.compile(r"[.!?]+[\"')\]]*")
+# Boundary candidates, in buffer order: a newline, or sentence-ending punctuation
+# plus any closing quotes, brackets or markdown emphasis.
+_BOUNDARY = re.compile(r"(?P<nl>\n)|(?P<end>[.!?\u2026]+[\"')\]\u201d\u2019*_]*)")
+_CLOSERS = "\"')]\u201d\u2019*_"
+_OPENERS = "\"'([\u201c\u2018*_"
+_CLAUSE_BREAKS = ",;:"
 _ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "st", "vs", "etc", "e.g", "i.e", "jr", "sr", "prof"}
+
+
+def _speakable(text: str) -> bool:
+    return any(c.isalnum() for c in text)
 
 
 class SentenceSplitter:
     """Buffers streamed text and releases complete sentences.
 
-    A sentence ends at . ! or ? (plus any closing quotes or brackets) followed by whitespace.
-    Text at the end of the buffer is held until more arrives or flush() is called.
+    A sentence ends at . ! ? or … (plus any closing quotes, brackets or markdown emphasis)
+    followed by whitespace, or at a newline. A "." after an abbreviation, a number or a
+    single letter does not end a sentence. Pieces with no letters or digits are never
+    released on their own; they join the next sentence. If the buffer passes max_chars
+    with no boundary, it is cut at the last , ; : or whitespace before the cap (hard cut
+    as a last resort). The output does not depend on how the text is chunked.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_chars: int = 200) -> None:
         self._buf = ""
+        self._max_chars = max_chars
 
     def feed(self, text: str) -> list[str]:
         self._buf += text
         sentences: list[str] = []
         while (cut := self._find_boundary()) is not None:
             sentence, self._buf = self._buf[:cut].strip(), self._buf[cut:]
-            if sentence:
+            if _speakable(sentence):
                 sentences.append(sentence)
         return sentences
 
     def flush(self) -> list[str]:
         rest, self._buf = self._buf.strip(), ""
-        return [rest] if rest else []
+        return [rest] if _speakable(rest) else []
 
     def _find_boundary(self) -> int | None:
-        for match in _SENTENCE_END.finditer(self._buf):
-            end = match.end()
-            if end >= len(self._buf):
+        for match in _BOUNDARY.finditer(self._buf):
+            cut = match.start() if match.group("nl") else match.end()
+            if cut > self._max_chars:
+                break  # past the cap: same decision however the text was chunked
+            if not _speakable(self._buf[:cut]):
+                continue  # nothing to say yet; let it join the next sentence
+            if match.group("nl"):
+                return cut
+            if cut >= len(self._buf):
                 return None  # wait for the next chunk to confirm
-            if not self._buf[end].isspace():
+            if not self._buf[cut].isspace():
                 continue  # "3.5", "e.g" mid-token, "example.com"
-            if match.group() == "." and self._last_word(match.start()) in _ABBREVIATIONS:
+            if match.group("end").rstrip(_CLOSERS) == "." and self._is_non_final_dot(match.start()):
                 continue
-            return end
+            return cut
+        if len(self._buf) > self._max_chars:
+            return self._cap_cut()
         return None
 
+    def _is_non_final_dot(self, pos: int) -> bool:
+        word = self._last_word(pos)
+        return word in _ABBREVIATIONS or word.isdigit() or (len(word) == 1 and word.isalpha())
+
+    def _cap_cut(self) -> int:
+        head = self._buf[: self._max_chars]
+        for i in range(len(head) - 1, 0, -1):
+            if (head[i] in _CLAUSE_BREAKS or head[i].isspace()) and _speakable(head[: i + 1]):
+                return i + 1
+        return self._max_chars  # hard cut (dropped by feed if it has nothing speakable)
+
     def _last_word(self, pos: int) -> str:
-        words = self._buf[:pos].split()
-        return words[-1].lower().lstrip("\"'([") if words else ""
+        words = self._buf[max(0, pos - 20) : pos].split()
+        return words[-1].lower().lstrip(_OPENERS) if words else ""
 
 
 MAX_TOKENS = 2048  # thinking counts toward this; spoken replies are short
