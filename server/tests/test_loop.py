@@ -316,6 +316,7 @@ def test_interrupt_remembers_only_what_started_playing():
         await orch.handle("down")  # interrupt during "Hello there."
 
     asyncio.run(scenario())
+    assert len(parts["conversation"]) == 1  # remembered exactly once
     assert parts["conversation"].messages()[1]["content"] == "[neutral] Hello there. (interrupted)"
 
 

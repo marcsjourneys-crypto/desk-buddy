@@ -8,6 +8,7 @@ import logging
 import sys
 
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
+from desk_buddy.brain.memory import Conversation
 from desk_buddy.config import ConfigError, Settings, load_settings
 from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator
@@ -74,7 +75,12 @@ async def _run(settings: Settings) -> None:
         stack.callback(speaker.close)
         chat = create_chat(settings)
         orchestrator = Orchestrator(
-            mic=mic, transcriber=transcriber, chat=chat, synthesizer=synthesizer, speaker=speaker
+            mic=mic,
+            transcriber=transcriber,
+            chat=chat,
+            synthesizer=synthesizer,
+            speaker=speaker,
+            conversation=Conversation(settings.history_turns),
         )
         stack.push_async_callback(orchestrator.shutdown)
 
