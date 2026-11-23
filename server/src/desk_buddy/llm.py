@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol
 
 import anthropic
 
+from desk_buddy.brain.personality import system_prompt
 from desk_buddy.config import Settings
+
+log = logging.getLogger(__name__)
 
 # Boundary candidates, in buffer order: a newline, or sentence-ending punctuation
 # plus any closing quotes, brackets or markdown emphasis.
@@ -98,6 +102,12 @@ class LLMRefusal(LLMError):
     """Claude declined the request (stop_reason == 'refusal')."""
 
 
+class Chat(Protocol):
+    """What the voice loop needs from any LLM provider."""
+
+    def stream_reply(self, user_text: str) -> AsyncIterator[str]: ...
+
+
 class ClaudeChat:
     """One-turn streaming chat. Session memory arrives in M2."""
 
@@ -109,7 +119,11 @@ class ClaudeChat:
         self._system = system
 
     async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
-        """Yield text deltas as they arrive. Raises LLMError / LLMRefusal."""
+        """Yield text deltas as they arrive.
+
+        Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
+        after some text was already yielded, so callers must handle a partial reply.
+        """
         try:
             async with self._client.messages.stream(
                 model=self._model,
@@ -123,18 +137,23 @@ class ClaudeChat:
                 message = await stream.get_final_message()
         except anthropic.RateLimitError as exc:
             raise LLMError("rate limited by the API") from exc
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+            raise LLMError("API key rejected (check ANTHROPIC_API_KEY)") from exc
         except anthropic.APIStatusError as exc:
-            raise LLMError(f"API error {exc.status_code}") from exc
+            # status 200 here means an error event arrived mid-stream; type names it
+            raise LLMError(f"API error {exc.status_code} ({getattr(exc, 'type', None)})") from exc
         except anthropic.APIConnectionError as exc:
             raise LLMError("can't reach the API") from exc
+        except anthropic.APIError as exc:
+            raise LLMError(f"unexpected API error ({type(exc).__name__})") from exc
         if message.stop_reason == "refusal":
             raise LLMRefusal("Claude declined to answer")
+        if message.stop_reason == "max_tokens":
+            log.warning("reply truncated: stop_reason=max_tokens (MAX_TOKENS=%d)", MAX_TOKENS)
 
 
-def create_chat(settings: Settings) -> ClaudeChat:
+def create_chat(settings: Settings) -> Chat:
     """Build the chat client for settings.llm_provider. Add new providers here."""
-    from desk_buddy.brain.personality import system_prompt
-
     if settings.llm_provider == "anthropic":
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
