@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import AsyncIterator
+from typing import Any
+
+import anthropic
+
+from desk_buddy.config import Settings
+
+log = logging.getLogger(__name__)
 
 _SENTENCE_END = re.compile(r"[.!?]+[\"')\]]*")
 _ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "st", "vs", "etc", "e.g", "i.e", "jr", "sr", "prof"}
@@ -46,3 +55,61 @@ class SentenceSplitter:
     def _last_word(self, pos: int) -> str:
         words = self._buf[:pos].split()
         return words[-1].lower().lstrip("\"'([") if words else ""
+
+
+MAX_TOKENS = 2048  # thinking counts toward this; spoken replies are short
+
+
+class LLMError(Exception):
+    """Claude could not produce a reply (network, API error). Already retried by the SDK."""
+
+
+class LLMRefusal(LLMError):
+    """Claude declined the request (stop_reason == 'refusal')."""
+
+
+class ClaudeChat:
+    """One-turn streaming chat. Session memory arrives in M2."""
+
+    def __init__(self, client: Any, *, model: str, effort: str, system: str) -> None:
+        # client: anthropic.AsyncAnthropic (typed Any so tests can pass a fake)
+        self._client = client
+        self._model = model
+        self._effort = effort
+        self._system = system
+
+    async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
+        """Yield text deltas as they arrive. Raises LLMError / LLMRefusal."""
+        try:
+            async with self._client.messages.stream(
+                model=self._model,
+                max_tokens=MAX_TOKENS,
+                system=self._system,
+                output_config={"effort": self._effort},
+                messages=[{"role": "user", "content": user_text}],
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
+                message = await stream.get_final_message()
+        except anthropic.RateLimitError as exc:
+            raise LLMError("rate limited by the API") from exc
+        except anthropic.APIStatusError as exc:
+            raise LLMError(f"API error {exc.status_code}") from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMError("can't reach the API") from exc
+        if message.stop_reason == "refusal":
+            raise LLMRefusal("Claude declined to answer")
+
+
+def create_chat(settings: Settings) -> ClaudeChat:
+    """Build the chat client for settings.llm_provider. Add new providers here."""
+    from desk_buddy.brain.personality import system_prompt
+
+    if settings.llm_provider == "anthropic":
+        return ClaudeChat(
+            anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
+            model=settings.llm_model,
+            effort=settings.llm_effort,
+            system=system_prompt(settings.max_sentences),
+        )
+    raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")
