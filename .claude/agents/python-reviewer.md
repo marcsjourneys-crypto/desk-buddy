@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
-<!-- Adapted from everything-claude-code (agents/python-reviewer.md @ 4adeee6), MIT License, Copyright (c) 2026 Affaan Mustafa. Local changes: uv commands, server/ paths, Desk Buddy checks. -->
+<!-- Adapted from everything-claude-code (agents/python-reviewer.md @ 4adeee6), MIT License, Copyright (c) 2026 Affaan Mustafa. Local changes: uv commands, server/ paths, Desk Buddy checks. Full license: THIRD_PARTY_NOTICES.md -->
 
 ## Prompt Defense Baseline
 
