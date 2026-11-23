@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import threading
+from collections.abc import Callable
+
 # Virtual-key codes: https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes
 VK_CODES: dict[str, int] = {
     "right_ctrl": 0xA3,
@@ -29,3 +33,57 @@ def parse_key(name: str) -> int:
                 return code
     names = ", ".join(sorted(VK_CODES))
     raise ValueError(f"unknown key {name!r}; use one of {names}, or a hex code like 0xA3")
+
+
+def is_key_pressed(vk: int) -> bool:
+    """True while the key is physically held, whichever window has focus."""
+    return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+class EdgeDetector:
+    """Turns a stream of pressed/not-pressed readings into 'down'/'up' events."""
+
+    def __init__(self) -> None:
+        self._pressed = False
+
+    def update(self, pressed: bool) -> str | None:
+        if pressed == self._pressed:
+            return None
+        self._pressed = pressed
+        return "down" if pressed else "up"
+
+
+class KeyWatcher:
+    """Polls one key on a daemon thread and calls on_event('down' | 'up') on changes.
+
+    on_event runs on the watcher thread; use loop.call_soon_threadsafe to reach asyncio.
+    """
+
+    def __init__(
+        self,
+        vk: int,
+        on_event: Callable[[str], None],
+        *,
+        read_key: Callable[[int], bool] = is_key_pressed,
+        interval: float = 0.02,
+    ) -> None:
+        self._vk = vk
+        self._on_event = on_event
+        self._read_key = read_key
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="ptt", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+    def _run(self) -> None:
+        detector = EdgeDetector()
+        while not self._stop.wait(self._interval):
+            event = detector.update(self._read_key(self._vk))
+            if event:
+                self._on_event(event)
