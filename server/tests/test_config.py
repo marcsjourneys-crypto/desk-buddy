@@ -85,3 +85,56 @@ def test_every_settings_key_is_in_env_example():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     listed = set(parse_env_file(text))
     assert set(ENV_KEYS) <= listed
+
+
+def test_utf8_bom_is_ignored(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b"\xef\xbb\xbfANTHROPIC_API_KEY=k\n")
+    s = load_settings(env_path=env, environ={})
+    assert s.anthropic_api_key == "k"
+
+
+def test_parse_env_file_strips_export_prefix():
+    assert parse_env_file("export A=1\n") == {"A": "1"}
+
+
+def test_parse_env_file_cuts_inline_comments_on_unquoted_values():
+    assert parse_env_file("B=3  # note\n") == {"B": "3"}
+
+
+def test_parse_env_file_keeps_hash_inside_quotes():
+    assert parse_env_file('C="x # y"\n') == {"C": "x # y"}
+
+
+def test_parse_env_file_ignores_empty_keys():
+    assert parse_env_file("=v\n") == {}
+
+
+def test_blank_process_env_value_does_not_override_env_file(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_API_KEY=k\nSTT_MODEL=small.en\n")
+    s = load_settings(env_path=env, environ={"STT_MODEL": ""})
+    assert s.stt_model == "small.en"
+
+
+def test_whitespace_only_api_key_is_missing():
+    with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "   "})
+
+
+def test_config_error_does_not_leak_api_key():
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings(
+            env_path=None, environ={"ANTHROPIC_API_KEY": "sk-secret", "MAX_SENTENCES": "zero"}
+        )
+    assert "sk-secret" not in str(excinfo.value)
+
+
+def test_effort_is_case_insensitive():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "LLM_EFFORT": "HIGH"})
+    assert s.llm_effort == "high"
+
+
+def test_choice_error_shows_the_value_as_typed():
+    with pytest.raises(ConfigError, match="'GPU'"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "STT_DEVICE": "GPU"})

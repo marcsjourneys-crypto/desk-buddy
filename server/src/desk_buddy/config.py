@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +34,9 @@ STT_DEVICES = ("cpu", "cuda")
 TTS_ENGINES = ("sapi",)  # "piper" arrives later behind the same interface
 
 
+_INLINE_COMMENT = re.compile(r"\s#")
+
+
 class ConfigError(Exception):
     """A setting is missing or invalid. The message names the key."""
 
@@ -52,7 +56,13 @@ class Settings:
 
 
 def parse_env_file(text: str) -> dict[str, str]:
-    """Parse KEY=VALUE lines. Ignores blanks, comments and malformed lines; strips quotes."""
+    """Parse KEY=VALUE lines.
+
+    Ignores blank lines, comment lines, lines without "=" and lines with an empty key.
+    Strips a leading "export " from the key. A value wrapped in matching quotes is
+    unquoted and kept as is; an unquoted value is cut at whitespace followed by "#"
+    (an inline comment).
+    """
     values: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -61,10 +71,17 @@ def parse_env_file(text: str) -> dict[str, str]:
         key, sep, value = line.partition("=")
         if not sep:
             continue
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export ") :].strip()
+        if not key:
+            continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        values[key.strip()] = value
+        else:
+            value = _INLINE_COMMENT.split(value, maxsplit=1)[0].strip()
+        values[key] = value
     return values
 
 
@@ -74,7 +91,7 @@ def load_settings(
 ) -> Settings:
     merged: dict[str, str] = {}
     if env_path is not None and env_path.is_file():
-        merged.update(parse_env_file(env_path.read_text(encoding="utf-8")))
+        merged.update(parse_env_file(env_path.read_text(encoding="utf-8-sig")))
     env = os.environ if environ is None else environ
     merged.update({k: env[k] for k in ENV_KEYS if env.get(k, "").strip()})
 
@@ -91,7 +108,9 @@ def load_settings(
     try:
         max_sentences = int(raw_sentences)
     except ValueError:
-        max_sentences = 0
+        raise ConfigError(
+            f"MAX_SENTENCES must be a whole number >= 1, got {raw_sentences!r}"
+        ) from None
     if max_sentences < 1:
         raise ConfigError(f"MAX_SENTENCES must be a whole number >= 1, got {raw_sentences!r}")
 
@@ -120,8 +139,11 @@ def load_settings(
     )
 
 
-def _choice(get, key: str, default: str, allowed: tuple[str, ...]) -> str:
-    value = get(key, default).lower()
+def _choice(
+    get: Callable[[str, str], str], key: str, default: str, allowed: tuple[str, ...]
+) -> str:
+    raw = get(key, default)
+    value = raw.lower()
     if value not in allowed:
-        raise ConfigError(f"{key} must be one of {', '.join(allowed)}; got {value!r}")
+        raise ConfigError(f"{key} must be one of {', '.join(allowed)}; got {raw!r}")
     return value
