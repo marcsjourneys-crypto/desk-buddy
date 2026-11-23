@@ -23,6 +23,6 @@ def test_live_streaming_reply():
     )
 
     async def run():
-        return "".join([d async for d in chat.stream_reply("Say just the word pineapple.")])
+        return "".join([d async for d in chat.stream_reply([], "Say just the word pineapple.")])
 
     assert "pineapple" in asyncio.run(run()).lower()

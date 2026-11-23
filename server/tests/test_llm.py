@@ -52,9 +52,9 @@ class FakeClient:
         return self._s
 
 
-def collect(chat: ClaudeChat, text: str) -> list[str]:
+def collect(chat: ClaudeChat, text: str, history=()) -> list[str]:
     async def run():
-        return [d async for d in chat.stream_reply(text)]
+        return [d async for d in chat.stream_reply(list(history), text)]
 
     return asyncio.run(run())
 
@@ -77,6 +77,20 @@ def test_streams_text_and_sends_settings():
     assert call["system"] == "sys"
     assert call["output_config"] == {"effort": "low"}
     assert call["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_history_is_sent_before_the_new_message():
+    chat, client = make_chat(FakeStream(["ok"]))
+    history = [
+        {"role": "user", "content": "tell me about labs"},
+        {"role": "assistant", "content": "[happy] Labs are great."},
+    ]
+    collect(chat, "are they good hunters?", history)
+    assert client.calls[0]["messages"] == [
+        *history,
+        {"role": "user", "content": "are they good hunters?"},
+    ]
+    assert len(history) == 2  # caller's list is not modified
 
 
 def test_refusal_raises_llm_refusal():
@@ -136,7 +150,7 @@ def test_error_mid_stream_after_text():
     got: list[str] = []
 
     async def run():
-        async for d in chat.stream_reply("hi"):
+        async for d in chat.stream_reply([], "hi"):
             got.append(d)
 
     with pytest.raises(LLMError):
@@ -149,7 +163,7 @@ def test_breaking_out_early_closes_stream():
     chat, _ = make_chat(stream)
 
     async def run():
-        async with contextlib.aclosing(chat.stream_reply("hi")) as agen:
+        async with contextlib.aclosing(chat.stream_reply([], "hi")) as agen:
             async for _ in agen:
                 break
 

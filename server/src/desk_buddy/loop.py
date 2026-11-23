@@ -147,7 +147,7 @@ class Orchestrator:
         reply: list[str] = []
         first_token = True
         try:
-            async with contextlib.aclosing(self.chat.stream_reply(text)) as deltas:
+            async with contextlib.aclosing(self.chat.stream_reply([], text)) as deltas:
                 async for delta in deltas:
                     if first_token:
                         log.info("First token %.0f ms", self._ms())

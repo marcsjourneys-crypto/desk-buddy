@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Any, Protocol
 
 import anthropic
@@ -105,11 +105,13 @@ class LLMRefusal(LLMError):
 class Chat(Protocol):
     """What the voice loop needs from any LLM provider."""
 
-    def stream_reply(self, user_text: str) -> AsyncGenerator[str, None]: ...
+    def stream_reply(
+        self, history: Sequence[Mapping[str, str]], user_text: str
+    ) -> AsyncGenerator[str, None]: ...
 
 
 class ClaudeChat:
-    """One-turn streaming chat. Session memory arrives in M2."""
+    """Streaming chat. The caller owns the history (see brain.memory)."""
 
     def __init__(self, client: Any, *, model: str, effort: str, system: str) -> None:
         # client: anthropic.AsyncAnthropic (typed Any so tests can pass a fake)
@@ -118,7 +120,9 @@ class ClaudeChat:
         self._effort = effort
         self._system = system
 
-    async def stream_reply(self, user_text: str) -> AsyncGenerator[str, None]:
+    async def stream_reply(
+        self, history: Sequence[Mapping[str, str]], user_text: str
+    ) -> AsyncGenerator[str, None]:
         """Yield text deltas as they arrive.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
@@ -130,7 +134,7 @@ class ClaudeChat:
                 max_tokens=MAX_TOKENS,
                 system=self._system,
                 output_config={"effort": self._effort},
-                messages=[{"role": "user", "content": user_text}],
+                messages=[*history, {"role": "user", "content": user_text}],
             ) as stream:
                 async for text in stream.text_stream:
                     yield text

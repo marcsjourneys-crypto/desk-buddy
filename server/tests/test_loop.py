@@ -32,9 +32,11 @@ class FakeTranscriber:
 class FakeChat:
     def __init__(self, deltas=("Hello there. ", "How are you?"), error: Exception | None = None):
         self.deltas, self.error, self.prompts = deltas, error, []
+        self.histories = []
 
-    async def stream_reply(self, text: str):
+    async def stream_reply(self, history, text: str):
         self.prompts.append(text)
+        self.histories.append(list(history))
         for d in self.deltas:
             yield d
         if self.error:
@@ -192,7 +194,7 @@ class HoldingChat:
         self.cancelled = asyncio.Event()
         self.hold = asyncio.Event()
 
-    async def stream_reply(self, text: str):
+    async def stream_reply(self, history, text: str):
         yield "Hello there. "
         try:
             await asyncio.Event().wait()
