@@ -11,8 +11,13 @@
 namespace {
 
 constexpr size_t kBlock = dsp::kRate / 50;  // 20 ms
-I2SClass speaker;
+// Explicit ports, so the speaker and mic never compete for one.
+I2SClass speaker(I2S_NUM_0);
 bool speakerOk = false;
+I2SClass mic(I2S_NUM_1);
+bool micOk = false;
+constexpr size_t kMicDmaFrames = 6 * 240;  // ESP_I2S: 6 DMA buffers of 240 frames (90 ms)
+int32_t micRaw[kBlock];
 int vol = 20;
 uint32_t errors = 0;
 
@@ -41,6 +46,42 @@ bool beginSpeaker() {
   if (speakerOk) writeSilence(100);  // a clean start clears the amp's power-on pop
   return speakerOk;
 }
+
+bool beginMic() {
+  mic.setPins(pins::kMicSck, pins::kMicWs, -1, pins::kMicSd);
+  // INMP441 with L/R to GND: 24-bit samples in 32-bit slots, left slot only.
+  micOk = mic.begin(I2S_MODE_STD, dsp::kRate, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO,
+                    I2S_STD_SLOT_LEFT);
+  return micOk;
+}
+
+size_t readMic(int16_t* out, size_t n) {
+  if (!micOk) return 0;
+  size_t done = 0;
+  while (done < n) {
+    const size_t want = std::min(kBlock, n - done);
+    const size_t got = mic.readBytes(reinterpret_cast<char*>(micRaw), want * sizeof(int32_t)) /
+                       sizeof(int32_t);
+    if (got == 0) break;
+    for (size_t j = 0; j < got; j++) out[done + j] = dsp::micTo16(micRaw[j]);
+    done += got;
+  }
+  return done;
+}
+
+void flushMic() {
+  if (!micOk) return;
+  // The DMA keeps recording while nobody reads; drop that stale audio (up to ~100 ms).
+  for (size_t done = 0; done < kMicDmaFrames;) {
+    const size_t want = std::min(kBlock, kMicDmaFrames - done);
+    const size_t got = mic.readBytes(reinterpret_cast<char*>(micRaw), want * sizeof(int32_t)) /
+                       sizeof(int32_t);
+    if (got == 0) break;
+    done += got;
+  }
+}
+
+bool speakerReady() { return speakerOk; }
 
 void setVolume(int percent) { vol = std::clamp(percent, 0, 100); }
 

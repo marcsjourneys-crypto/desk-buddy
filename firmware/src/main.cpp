@@ -1,7 +1,11 @@
 // Desk Buddy firmware, M5 bring-up: a serial test menu for every part of the robot.
 #include <Arduino.h>
 
+#include <algorithm>
+#include <iterator>
+
 #include "audio.h"
+#include "dsp.h"
 #include "eyes.h"
 #include "pins.h"
 
@@ -47,6 +51,86 @@ void printHelp() {
   Serial.println("  fps                       eye frame rate over 3 s");
   Serial.println("  tone [50-7900]            1 s test tone in Hz (440 default)");
   Serial.println("  vol <0-100>               speaker volume (starts at 20)");
+  Serial.println("  mic                       mic levels for 10 s");
+  Serial.println("  rec / play                record 3 s, play it back");
+}
+
+// Any typed character stops a running test. CR/LF don't count, by design: they are left
+// over from the command line, so Enter alone never stops anything.
+bool keyPressed() {
+  bool any = false;
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c != '\r' && c != '\n') any = true;
+  }
+  return any;
+}
+
+constexpr size_t kRecSamples = dsp::kRate * 3;  // 3 s = 96 KB, in PSRAM
+int16_t* recording = nullptr;
+size_t recorded = 0;
+
+void runMicLevels() {
+  static int16_t buf[dsp::kRate / 10];  // 100 ms
+  Serial.println("Mic levels for 10 s (press any letter to stop)");
+  audio::flushMic();
+  const uint32_t start = millis();
+  while (millis() - start < 10000 && !keyPressed()) {
+    const size_t n = audio::readMic(buf, std::size(buf));
+    if (n == 0) {
+      Serial.println("Mic: no data (not started)");
+      return;
+    }
+    if (dsp::isFlat(buf, n)) {
+      Serial.println("Mic: no signal (all samples equal) - is it wired and soldered?");
+      return;
+    }
+    const dsp::Level lv = dsp::level(buf, n);
+    const int bars = constrain(static_cast<int>((lv.rms_db + 60) / 2), 0, 30);  // -60..0 dBFS
+    Serial.printf("%6.1f dBFS  peak %6.1f  |%-30.*s|\n", lv.rms_db, lv.peak_db, bars,
+                  "##############################");
+    eyes::update(millis());
+  }
+}
+
+void runRecord() {
+  if (recording == nullptr) {
+    recording = static_cast<int16_t*>(ps_malloc(kRecSamples * sizeof(int16_t)));
+  }
+  if (recording == nullptr) {
+    Serial.println("rec: no memory");
+    return;
+  }
+  audio::flushMic();
+  Serial.println("Recording 3 s... speak now");
+  recorded = 0;
+  while (recorded < kRecSamples) {
+    const size_t n = audio::readMic(recording + recorded,
+                                    std::min<size_t>(dsp::kRate / 50, kRecSamples - recorded));
+    if (n == 0) break;
+    recorded += n;
+  }
+  if (recorded == 0) {
+    Serial.println("Mic: no data (not started)");
+    return;
+  }
+  const dsp::Level lv = dsp::level(recording, recorded);
+  Serial.printf("Recorded %.1f s, level %.1f dBFS, peak %.1f dBFS. Type 'play'.\n",
+                recorded / static_cast<float>(dsp::kRate), lv.rms_db, lv.peak_db);
+}
+
+void runPlay() {
+  if (recorded == 0) {
+    Serial.println("Nothing recorded yet: type 'rec' first");
+    return;
+  }
+  if (!audio::speakerReady()) {
+    Serial.println("Speaker: not started");
+    return;
+  }
+  Serial.printf("Playing %.1f s at volume %d\n", recorded / static_cast<float>(dsp::kRate),
+                audio::volume());
+  audio::play(recording, recorded);
 }
 
 void handle(char* cmd) {
@@ -87,6 +171,12 @@ void handle(char* cmd) {
       audio::setVolume(static_cast<int>(v < 0 ? 0 : (v > 100 ? 100 : v)));
     }
     Serial.printf("Volume %d\n", audio::volume());
+  } else if (!strcmp(name, "mic")) {
+    runMicLevels();
+  } else if (!strcmp(name, "rec")) {
+    runRecord();
+  } else if (!strcmp(name, "play")) {
+    runPlay();
   } else {
     Serial.printf("Unknown command '%s'\n", name);
     printHelp();
@@ -127,6 +217,7 @@ void setup() {
   printInfo();
   if (!eyes::begin()) Serial.println("Eyes: not started");
   if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
+  if (!audio::beginMic()) Serial.println("Mic: not started");
   Serial.println("Type 'help' for commands.");
 }
 
