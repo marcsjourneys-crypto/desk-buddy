@@ -1,6 +1,7 @@
 // Desk Buddy firmware, M5 bring-up: a serial test menu for every part of the robot.
 #include <Arduino.h>
 
+#include "eyes.h"
 #include "pins.h"
 
 namespace {
@@ -39,16 +40,22 @@ void printHelp() {
   Serial.println("Commands:");
   Serial.println("  help                      this list");
   Serial.println("  info                      chip, flash, PSRAM, memory, uptime");
+  Serial.println("  eyes idle|happy|sleep|blink|test");
+  Serial.println("  fps                       eye frame rate over 3 s");
 }
 
 void handle(char* cmd) {
   char* name = strtok(cmd, " ");
-  [[maybe_unused]] char* arg = strtok(nullptr, " ");
+  char* arg = strtok(nullptr, " ");
   if (name == nullptr) return;
   if (!strcmp(name, "help")) {
     printHelp();
   } else if (!strcmp(name, "info")) {
     printInfo();
+  } else if (!strcmp(name, "eyes")) {
+    if (arg == nullptr || !eyes::show(arg)) Serial.println("Usage: eyes idle|happy|sleep|blink|test");
+  } else if (!strcmp(name, "fps")) {
+    Serial.printf("Eyes: %.1f fps (both eyes)\n", eyes::measureFps(3000));
   } else {
     Serial.printf("Unknown command '%s'\n", name);
     printHelp();
@@ -78,10 +85,12 @@ void setup() {
   delay(200);
   blinkLed();
   printInfo();
+  if (!eyes::begin()) Serial.println("Eyes: not started");
   Serial.println("Type 'help' for commands.");
 }
 
 void loop() {
+  eyes::update(millis());
   pollSerial();
   delay(1);
 }
