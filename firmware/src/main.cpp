@@ -48,7 +48,8 @@ void printHelp() {
   Serial.println("Commands:");
   Serial.println("  help                      this list");
   Serial.println("  info                      chip, flash, PSRAM, memory, uptime");
-  Serial.println("  eyes idle|happy|sleep|blink|test");
+  Serial.println("  eyes <look>               idle happy sleep blink surprised wink skeptical");
+  Serial.println("                            left right up down test");
   Serial.println("  fps                       eye frame rate over 3 s");
   Serial.println("  tone [50-7900]            1 s test tone in Hz (440 default)");
   Serial.println("  vol <0-100>               speaker volume (starts at 20)");
@@ -150,7 +151,7 @@ void handle(char* cmd) {
   } else if (!strcmp(name, "info")) {
     printInfo();
   } else if (!strcmp(name, "eyes")) {
-    if (arg == nullptr || !eyes::show(arg)) Serial.println("Usage: eyes idle|happy|sleep|blink|test");
+    if (arg == nullptr || !eyes::show(arg)) Serial.println("Usage: eyes <look> (see help)");
   } else if (!strcmp(name, "fps")) {
     Serial.printf("Eyes: %.1f fps (both eyes)\n", eyes::measureFps(3000));
   } else if (!strcmp(name, "tone")) {

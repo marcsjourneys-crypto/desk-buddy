@@ -179,17 +179,38 @@ bool show(const char* name) {
     testMode = true;
     return true;
   }
-  eye::Params target;
+  namespace ps = eye::presets;
+  constexpr float kLook = 28;  // px; fitInSprite() keeps it inside the sprite
+  eye::Params left, right;
   uint32_t ms = 250;
   bool blinks = true;
   if (!strcmp(name, "idle")) {
-    target = eye::presets::idle();
+    left = right = ps::idle();
   } else if (!strcmp(name, "happy")) {
-    target = eye::presets::happy();
+    left = right = ps::happy();
   } else if (!strcmp(name, "sleep")) {
-    target = eye::presets::sleep();
+    left = right = ps::sleep();
     ms = 600;
     blinks = false;
+  } else if (!strcmp(name, "surprised")) {
+    left = right = ps::surprised();
+    ms = 150;
+  } else if (!strcmp(name, "left")) {  // as you look at the robot
+    left = right = ps::look(-kLook, 0);
+  } else if (!strcmp(name, "right")) {
+    left = right = ps::look(kLook, 0);
+  } else if (!strcmp(name, "up")) {
+    left = right = ps::look(0, -kLook);
+  } else if (!strcmp(name, "down")) {
+    left = right = ps::look(0, kLook);
+  } else if (!strcmp(name, "wink")) {
+    left = ps::happy();
+    right = ps::closedLine();
+    ms = 180;
+    blinks = false;  // a blink would reopen the winking eye
+  } else if (!strcmp(name, "skeptical")) {
+    left = right = ps::skeptical();
+    ms = 400;
   } else {
     return false;
   }
@@ -199,7 +220,8 @@ bool show(const char* name) {
   // A fresh schedule: after a long sleep, the old one could be stale enough to wrap.
   if (blinks) blinker.schedule(now, 3000 + esp_random() % 3000);
   dirty = true;
-  for (auto& t : tweens) t.to(target, now, ms);
+  tweens[0].to(left, now, ms);
+  tweens[1].to(right, now, ms);
   return true;
 }
 

@@ -245,6 +245,23 @@ void test_servo_motion_across_millis_wrap() {
   TEST_ASSERT_TRUE(m.done(start + 1000));
 }
 
+// Every preset (with the largest look offset) stays inside the 200 px sprite, stroke
+// included, so fitInSprite() never has to move it.
+void test_presets_fit_sprite() {
+  namespace ps = eye::presets;
+  const eye::Params looks[] = {ps::idle(), ps::happy(), ps::sleep(), ps::surprised(),
+                               ps::look(-28, 0), ps::look(28, 0), ps::look(0, -28),
+                               ps::look(0, 28), ps::closedLine(), ps::skeptical()};
+  for (const auto& p : looks) {
+    const float w = p.thickness / 2 + 1;
+    TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, fabsf(p.gaze_x) + p.radius + w);
+    const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w - p.gaze_y;
+    const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w + p.gaze_y;
+    TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, up);
+    TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, down);
+  }
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -258,6 +275,7 @@ void setup() {
   RUN_TEST(test_tween_retarget_starts_from_current);
   RUN_TEST(test_tween_set_and_settle);
   RUN_TEST(test_blinker);
+  RUN_TEST(test_presets_fit_sprite);
   RUN_TEST(test_blinker_default_is_not_blinking);
   RUN_TEST(test_blinker_symmetric);
   RUN_TEST(test_blinker_survives_millis_wrap);

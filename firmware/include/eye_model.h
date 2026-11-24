@@ -62,6 +62,33 @@ inline Params sleep() {
   p.lower = 0.35f;
   return p;
 }
+inline Params surprised() {
+  Params p;
+  p.radius = 84;
+  p.thickness = 12;
+  return p;
+}
+// Slightly smaller eyes so the gaze has room to move inside the 200 px sprite.
+inline Params look(float x, float y) {
+  Params p;
+  p.radius = 62;
+  p.gaze_x = x;
+  p.gaze_y = y;
+  return p;
+}
+inline Params closedLine() {
+  Params p;
+  p.upper = 0.08f;
+  p.lower = 0.08f;
+  return p;
+}
+inline Params skeptical() {  // flattened top lid
+  Params p;
+  p.upper = -0.15f;
+  p.lower = 0.85f;
+  p.gaze_y = -10;
+  return p;
+}
 }  // namespace presets
 
 // Blends from whatever is showing to a target over `duration` ms, eased.
