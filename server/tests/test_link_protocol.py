@@ -67,6 +67,18 @@ def test_error_text_never_contains_the_token():
     assert "s3cret" not in str(info.value)
 
 
+def test_token_that_is_not_valid_utf8_is_rejected():
+    # json.loads accepts a lone surrogate; it can't be encoded for compare_digest.
+    with pytest.raises(ProtocolError):
+        parse('{"type": "hello", "token": "\\ud800abc"}')
+
+
+def test_fw_version_that_is_not_valid_utf8_is_sanitized():
+    msg = parse('{"type": "hello", "token": "t", "fw_version": "\\ud8001.0"}')
+    assert msg.data["fw_version"] == "?1.0"
+    msg.data["fw_version"].encode()  # safe to log and encode
+
+
 def test_hello_repr_masks_the_token():
     msg = parse('{"type": "hello", "token": "s3cret-s3cret-s3cret", "fw_version": "0.1"}')
     text = repr(msg)

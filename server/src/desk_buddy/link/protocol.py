@@ -50,9 +50,14 @@ def parse(text: str) -> Message:
         token, fw = obj.get("token"), obj.get("fw_version", "")
         if not isinstance(token, str) or not 0 < len(token) <= MAX_TOKEN_CHARS:
             raise ProtocolError("hello needs a token string")
+        try:
+            token.encode()  # json.loads lets lone surrogates through
+        except UnicodeEncodeError:
+            raise ProtocolError("token is not valid UTF-8") from None
         if not isinstance(fw, str):
             raise ProtocolError("fw_version must be a string")
-        return Message(kind, {"token": token, "fw_version": fw[:64]})
+        fw = fw[:64].encode("utf-8", "replace").decode()
+        return Message(kind, {"token": token, "fw_version": fw})
     if kind == "button":
         action = obj.get("action")
         if action not in BUTTON_ACTIONS:

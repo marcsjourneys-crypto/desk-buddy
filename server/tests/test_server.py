@@ -7,9 +7,11 @@ import time
 
 import pytest
 
+import desk_buddy.server as server_module
 from desk_buddy.audio import BYTES_PER_SECOND
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.fake_robot import FakeRobot
+from desk_buddy.link.robot import RobotLink
 from desk_buddy.link.switch import DeviceSwitch
 from desk_buddy.loop import Orchestrator, State
 from desk_buddy.server import (
@@ -250,6 +252,120 @@ def test_busy_port_is_a_clear_error():
                 await start_server(app, "127.0.0.1", port)
 
     asyncio.run(run())
+
+
+def test_unencodable_token_is_closed_4002_cleanly(caplog):
+    # A lone surrogate survives json.loads but can't be UTF-8 encoded: the hello is
+    # malformed, so it is treated like no hello (4002), not as a wrong token.
+    async def run():
+        async with running() as (url, switch, _):
+            hostile = FakeRobot(url, TOKEN)
+            await hostile.connect(hello=False)
+            await hostile.ws.send('{"type": "hello", "token": "\\ud800"}')
+            assert await hostile.recv() is None
+            assert hostile.close_code == CLOSE_NO_HELLO
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            assert await robot.recv() == {"type": "welcome"}
+            await robot.close()
+
+    asyncio.run(run())
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_stopping_the_server_closes_a_connected_robot_quickly():
+    async def run():
+        switch = DeviceSwitch(NullMic(), NullPlayer())
+        app = create_app(
+            token=TOKEN, switch=switch, events=asyncio.Queue(), current_state=lambda: "idle"
+        )
+        server = await start_server(app, "127.0.0.1", 0)
+        robot = FakeRobot(f"ws://127.0.0.1:{server.port}/robot", TOKEN)
+        await robot.connect()
+        await robot.recv_until("state")
+        started = time.monotonic()
+        await asyncio.wait_for(server.stop(), 10)
+        assert time.monotonic() - started < 3
+        assert await robot.recv(timeout=2) is None
+        assert switch.robot is None
+
+    asyncio.run(run())
+
+
+def test_a_closed_link_ignores_a_frame_that_arrives_late():
+    events: asyncio.Queue[str] = asyncio.Queue()
+
+    class LateWebSocket:
+        """Its first receive() returns a button press after the link was replaced."""
+
+        def __init__(self):
+            self.link = None
+
+        async def receive(self):
+            await self.link.close(CLOSE_REPLACED)
+            return {"type": "websocket.receive", "text": '{"type": "button", "action": "down"}'}
+
+        async def close(self, code=1000):
+            pass
+
+    async def run():
+        ws = LateWebSocket()
+        ws.link = RobotLink(ws, asyncio.get_running_loop())
+        await asyncio.wait_for(server_module._receive_loop(ws, ws.link, events), 2)
+
+    asyncio.run(run())
+    assert events.empty()
+
+
+def test_a_failed_startup_cancels_serving_and_closes_the_socket(monkeypatch):
+    seen = {}
+
+    async def broken_serve(self, sockets=None):
+        seen["sockets"] = sockets
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server_module._Server, "serve", broken_serve)
+
+    async def run():
+        app = create_app(
+            token=TOKEN,
+            switch=DeviceSwitch(NullMic(), NullPlayer()),
+            events=asyncio.Queue(),
+            current_state=lambda: "idle",
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            await start_server(app, "127.0.0.1", 0)
+
+    asyncio.run(run())
+    assert seen["sockets"][0].fileno() == -1  # closed
+
+
+def test_a_cancelled_startup_cancels_serving_and_closes_the_socket(monkeypatch):
+    seen = {"cancelled": False}
+
+    async def stuck_serve(self, sockets=None):
+        seen["sockets"] = sockets
+        try:
+            await asyncio.sleep(60)  # never sets started
+        except asyncio.CancelledError:
+            seen["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(server_module._Server, "serve", stuck_serve)
+
+    async def run():
+        app = create_app(
+            token=TOKEN,
+            switch=DeviceSwitch(NullMic(), NullPlayer()),
+            events=asyncio.Queue(),
+            current_state=lambda: "idle",
+        )
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(start_server(app, "127.0.0.1", 0), 0.2)
+
+    asyncio.run(run())
+    assert seen["cancelled"]
+    assert seen["sockets"][0].fileno() == -1
 
 
 # --- A real Orchestrator (fake STT, LLM and TTS) behind the server ---

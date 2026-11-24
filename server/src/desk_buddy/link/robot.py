@@ -10,6 +10,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from fastapi import WebSocketDisconnect
+
 from desk_buddy.audio import BYTES_PER_SECOND, CHUNK_BYTES, PcmBuffer
 from desk_buddy.link import protocol
 
@@ -164,8 +166,13 @@ class RobotLink:
                     await self._ws.send_bytes(item)
                 else:
                     await self._ws.send_json(item)
+        except WebSocketDisconnect as exc:  # the robot went away: a normal disconnect
+            log.debug("Send to robot failed, robot disconnected (%s)", exc.code)
+            await self.close()
         except Exception as exc:
-            if not self.closed:
+            if self.closed:  # the socket is closing anyway
+                log.debug("Send to robot failed while closing: %s", exc)
+            else:
                 log.warning("Send to robot failed: %s", exc)
                 await self.close(1011)
 

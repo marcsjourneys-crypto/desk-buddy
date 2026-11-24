@@ -25,6 +25,7 @@ CLOSE_NO_HELLO = 4002
 CLOSE_REPLACED = 4003
 MAX_FRAME_BYTES = 64 * 1024
 PING_SECONDS = 20.0
+SHUTDOWN_SECONDS = 5  # bound on uvicorn's graceful shutdown
 
 
 class ServerStartError(Exception):
@@ -67,14 +68,17 @@ def create_app(
             if old is not None:
                 log.info("New robot connection replaces the old one")
                 await old.close(CLOSE_REPLACED)
-            log.info("Robot connected (firmware %s)", link.fw_version or "unknown")
+            log.info("Robot connected (firmware %r)", link.fw_version or "unknown")
             await _receive_loop(ws, link, events)
         finally:
-            await link.close()
-            await sender
-            if switch.detach(link):
-                log.info("Robot disconnected")
-                events.put_nowait("reset")
+            try:
+                await link.close()
+                await sender
+            finally:
+                sender.cancel()  # no-op if it finished; never leak it if we were cancelled
+                if switch.detach(link):
+                    log.info("Robot disconnected")
+                    events.put_nowait("reset")
 
     return app
 
@@ -106,8 +110,8 @@ async def _receive_loop(ws: WebSocket, link: RobotLink, events: asyncio.Queue[st
             frame = await ws.receive()
         except Exception:  # socket closed under us (e.g. replaced)
             return
-        if frame["type"] == "websocket.disconnect":
-            return
+        if frame["type"] == "websocket.disconnect" or link.closed:
+            return  # a replaced link must not push a stale down/up
         if (data := frame.get("bytes")) is not None:
             link.mic.feed(data)
             continue
@@ -166,12 +170,20 @@ async def start_server(app: FastAPI, host: str, port: int) -> RunningServer:
         ws_max_size=MAX_FRAME_BYTES,
         ws_ping_interval=PING_SECONDS,
         ws_ping_timeout=PING_SECONDS,
+        timeout_graceful_shutdown=SHUTDOWN_SECONDS,
     )
     server = _Server(config)
     task = asyncio.create_task(server.serve(sockets=[sock]))
-    while not server.started:
-        if task.done():
-            task.result()  # re-raise why it stopped
-            raise ServerStartError("server stopped during startup")
-        await asyncio.sleep(0.01)
+    try:
+        while not server.started:
+            if task.done():
+                task.result()  # re-raise why it stopped
+                raise ServerStartError("server stopped during startup")
+            await asyncio.sleep(0.01)
+    except BaseException:  # failed or cancelled (e.g. Ctrl+C): don't leave it half-running
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        sock.close()
+        raise
     return RunningServer(server, task, sock.getsockname()[1])

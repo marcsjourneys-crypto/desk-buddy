@@ -1,18 +1,22 @@
 import asyncio
+import logging
 import threading
+
+from fastapi import WebSocketDisconnect
 
 from desk_buddy.audio import BYTES_PER_SECOND, CHUNK_BYTES
 from desk_buddy.link.robot import RobotLink, RobotMic, RobotPlayer
 
 
 class FakeWebSocket:
-    def __init__(self, fail_after: int | None = None):
+    def __init__(self, fail_after: int | None = None, error: Exception | None = None):
         self.sent, self.closed_with = [], None
         self.fail_after = fail_after
+        self.error = error or ConnectionError("socket gone")
 
     async def _record(self, item):
         if self.fail_after is not None and len(self.sent) >= self.fail_after:
-            raise ConnectionError("socket gone")
+            raise self.error
         self.sent.append(item)
 
     async def send_bytes(self, data):
@@ -243,3 +247,20 @@ def test_a_failed_send_closes_the_link():
     assert link.closed
     assert ws.sent == [{"type": "welcome"}]
     assert ws.closed_with == 1011
+
+
+def test_a_send_to_a_disconnected_robot_is_not_a_warning(caplog):
+    ws = FakeWebSocket(fail_after=0, error=WebSocketDisconnect(1001))
+
+    async def run():
+        link = RobotLink(ws, asyncio.get_running_loop())
+        sender = asyncio.create_task(link.run_sender())
+        link.send({"type": "welcome"})
+        await asyncio.wait_for(sender, 2)
+        return link
+
+    with caplog.at_level(logging.DEBUG, logger="desk_buddy"):
+        link = asyncio.run(run())
+    assert link.closed
+    robot_logs = [r for r in caplog.records if r.name.startswith("desk_buddy")]
+    assert robot_logs and all(r.levelno == logging.DEBUG for r in robot_logs)
