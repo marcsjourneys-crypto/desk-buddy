@@ -1,6 +1,7 @@
 // Desk Buddy firmware, M5 bring-up: a serial test menu for every part of the robot.
 #include <Arduino.h>
 
+#include "audio.h"
 #include "eyes.h"
 #include "pins.h"
 
@@ -43,6 +44,8 @@ void printHelp() {
   Serial.println("  info                      chip, flash, PSRAM, memory, uptime");
   Serial.println("  eyes idle|happy|sleep|blink|test");
   Serial.println("  fps                       eye frame rate over 3 s");
+  Serial.println("  tone [hz]                 1 s test tone (440 Hz default)");
+  Serial.println("  vol <0-100>               speaker volume (starts at 20)");
 }
 
 void handle(char* cmd) {
@@ -57,6 +60,17 @@ void handle(char* cmd) {
     if (arg == nullptr || !eyes::show(arg)) Serial.println("Usage: eyes idle|happy|sleep|blink|test");
   } else if (!strcmp(name, "fps")) {
     Serial.printf("Eyes: %.1f fps (both eyes)\n", eyes::measureFps(3000));
+  } else if (!strcmp(name, "tone")) {
+    const float hz = arg ? atof(arg) : 440;
+    if (hz < 50 || hz > 8000) {
+      Serial.println("Usage: tone [50-8000]");
+    } else {
+      Serial.printf("Tone %.0f Hz at volume %d\n", hz, audio::volume());
+      audio::playTone(hz, 1000);
+    }
+  } else if (!strcmp(name, "vol")) {
+    if (arg) audio::setVolume(atoi(arg));
+    Serial.printf("Volume %d\n", audio::volume());
   } else {
     Serial.printf("Unknown command '%s'\n", name);
     printHelp();
@@ -96,6 +110,7 @@ void setup() {
   blinkLed();
   printInfo();
   if (!eyes::begin()) Serial.println("Eyes: not started");
+  if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
   Serial.println("Type 'help' for commands.");
 }
 
