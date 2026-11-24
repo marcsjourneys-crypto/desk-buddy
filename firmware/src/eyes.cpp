@@ -11,9 +11,14 @@ namespace {
 
 constexpr uint16_t kCyan = 0x2F3C;  // RGB565 of #2EE6E6, the expression guide's cyan
 constexpr uint16_t kBlack = 0x0000;
-constexpr int kSize = 240;
+constexpr int kSize = 240;  // panel
 constexpr int kCenter = kSize / 2;
-constexpr int kSegments = 24;  // straight pieces per lid curve
+// One sprite in internal RAM (80 KB) draws both eyes in turn: drawing in PSRAM was the
+// bottleneck. It covers the middle of each panel; the border is cleared once.
+constexpr int kSprite = 200;
+constexpr int kSpriteCenter = kSprite / 2;
+constexpr int kSpriteOffset = (kSize - kSprite) / 2;
+constexpr int kSegments = 16;  // straight pieces per lid curve (24 looks smoother: 22 fps)
 constexpr int kRotation = 0;   // 0 = arc at the pin edge; change once the head is built
 
 // One GC9A01 on the shared SPI2 bus. Only the left panel drives the shared reset line:
@@ -55,10 +60,8 @@ class Panel : public lgfx::LGFX_Device {
 
 Panel leftPanel(pins::kEyeCsLeft, pins::kEyeRst);
 Panel rightPanel(pins::kEyeCsRight, -1);
-LGFX_Sprite leftSprite(&leftPanel);
-LGFX_Sprite rightSprite(&rightPanel);
 Panel* panels[2] = {&leftPanel, &rightPanel};
-LGFX_Sprite* sprites[2] = {&leftSprite, &rightSprite};
+LGFX_Sprite sprite(&leftPanel);  // shared; always pushed to an explicit panel
 
 eye::Tween tweens[2];
 eye::Params drawn[2];
@@ -70,8 +73,8 @@ bool testMode = false;
 
 // One lid: a half-ellipse from the left corner to the right, as thick anti-aliased segments.
 void drawLid(LGFX_Sprite& s, const eye::Params& p, float bulge) {
-  const float cx = kCenter + p.gaze_x;
-  const float cy = kCenter + p.gaze_y;
+  const float cx = kSpriteCenter + p.gaze_x;
+  const float cy = kSpriteCenter + p.gaze_y;
   const float w = p.thickness / 2;
   float px = 0, py = 0;
   for (int i = 0; i <= kSegments; i++) {
@@ -84,26 +87,50 @@ void drawLid(LGFX_Sprite& s, const eye::Params& p, float bulge) {
   }
 }
 
-void draw(int side, const eye::Params& p) {
-  LGFX_Sprite& s = *sprites[side];
-  s.fillScreen(kBlack);
-  drawLid(s, p, p.upper);
-  if (fabsf(p.lower - p.upper) > 0.02f) drawLid(s, p, p.lower);
-  s.pushSprite(0, 0);
+// Moves the gaze back so the whole shape (stroke included) stays inside the sprite.
+eye::Params fitInSprite(eye::Params p) {
+  const float w = p.thickness / 2 + 1;
+  const float maxX = fmaxf(0, kSpriteCenter - p.radius - w);
+  p.gaze_x = fminf(fmaxf(p.gaze_x, -maxX), maxX);
+  const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w;    // extent above cy
+  const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w;  // extent below cy
+  p.gaze_y = fminf(fmaxf(p.gaze_y, up - kSpriteCenter), kSpriteCenter - down);
+  return p;
+}
+
+// Drawing the lids is the slow part (~23 ms; a push is ~8 ms), so when both eyes look the
+// same, the second one reuses what is already in the sprite.
+eye::Params inSprite;
+bool spriteValid = false;
+
+void draw(int side, const eye::Params& params) {
+  const eye::Params p = fitInSprite(params);
+  if (!spriteValid || !eye::same(p, inSprite)) {
+    sprite.fillScreen(kBlack);
+    drawLid(sprite, p, p.upper);
+    if (fabsf(p.lower - p.upper) > 0.02f) drawLid(sprite, p, p.lower);
+    inSprite = p;
+    spriteValid = true;
+  }
+  sprite.pushSprite(panels[side], kSpriteOffset, kSpriteOffset);
+}
+
+void clearPanels() {
+  for (auto* panel : panels) panel->fillScreen(kBlack);
 }
 
 // "L" and "R" inside a ring, so you can tell the eyes apart and see the panel edges.
+// A one-off, so it draws straight on the panels (the ring is outside the sprite).
 void drawTest() {
   const char* labels[2] = {"L", "R"};
   for (int i = 0; i < 2; i++) {
-    LGFX_Sprite& s = *sprites[i];
+    Panel& s = *panels[i];
     s.fillScreen(kBlack);
     s.fillSmoothCircle(kCenter, kCenter, 118, kCyan);
     s.fillSmoothCircle(kCenter, kCenter, 112, kBlack);
     s.setTextColor(kCyan);
     s.setTextSize(8);
     s.drawString(labels[i], kCenter - s.textWidth(labels[i]) / 2, kCenter - s.fontHeight() / 2);
-    s.pushSprite(0, 0);
   }
 }
 
@@ -116,13 +143,14 @@ bool begin() {
   rightPanel.init();
   for (int i = 0; i < 2; i++) {
     panels[i]->setRotation(kRotation);
-    sprites[i]->setPsram(true);
-    sprites[i]->setColorDepth(16);
-    if (sprites[i]->createSprite(kSize, kSize) == nullptr) {
-      Serial.println("Eyes: no memory for the frame buffers (is PSRAM on?)");
-      return false;
-    }
     tweens[i].set(eye::presets::idle());
+  }
+  clearPanels();
+  sprite.setPsram(false);
+  sprite.setColorDepth(16);
+  if (sprite.createSprite(kSprite, kSprite) == nullptr) {
+    Serial.println("Eyes: no memory for the frame buffer");
+    return false;
   }
   blinker.schedule(millis(), 2000);
   ready = true;
@@ -156,6 +184,7 @@ bool show(const char* name) {
   } else {
     return false;
   }
+  if (testMode) clearPanels();  // the test ring is outside the sprite
   testMode = false;
   autoBlink = blinks;
   dirty = true;
