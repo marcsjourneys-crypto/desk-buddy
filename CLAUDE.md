@@ -30,6 +30,9 @@ The server must also run with the PC's own mic and speaker (no robot connected),
 ```
 server/                 Python brain (uv-managed, src layout)
   src/desk_buddy/       the single importable package
+    link/               robot link: protocol, RobotLink, DeviceSwitch
+    server.py           FastAPI app (/robot WebSocket)
+    fake_robot.py       fake robot client (tests + voice tool)
   tests/                pytest
 firmware/               ESP32-S3 firmware (PlatformIO, Arduino framework)
 docs/                   protocol.md, wiring.md, decisions.md, plans/
@@ -42,7 +45,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 ## Server stack (decided)
 
 - Python 3.12+, managed with uv. Tests with pytest.
-- Async core: asyncio + websockets, or FastAPI if the dashboard needs it — decide in M4. FastAPI is likely, since the planned web UI covers settings, personality and expressions.
+- Async core: asyncio, with FastAPI + uvicorn running in the same event loop as the voice loop (decided in M4). The same app will host the dashboard (M8) and expression library (M9).
 - Python comes from uv's own builds only (`python-preference = "only-managed"`). The Microsoft Store Python can't open microphones.
 - VAD: Silero VAD — the ONNX model bundled with faster-whisper (`vad_filter`), no PyTorch.
 - Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
@@ -82,13 +85,16 @@ Anyone (or any TV) near the robot can talk to it.
 - Anything powerful (e.g. running an allowlisted script, sleep/shutdown) requires a spoken "yes" on the next turn, checked by code.
 - Every action is logged and shown on the dashboard.
 
-## Robot ↔ server protocol (draft — finalize in docs/protocol.md during M4)
+## Robot ↔ server protocol (final: `docs/protocol.md`)
 
-- One WebSocket. Text frames = JSON control messages. Binary frames = audio.
-- Audio up: 16 kHz, 16-bit mono PCM, ~20 ms chunks. Audio down: 16 kHz 16-bit mono PCM (revisit if quality is poor).
-- Robot → server: `hello {token, fw_version}`, `button {down|up}`, `touch {}`, `stats {...}`.
-- Server → robot: `state {idle|listening|thinking|speaking|sleeping}`, `emotion {name}`, `look {pan, tilt, speed}`, `led {mode}`, `audio_start`, `audio_end`, `volume {level}`.
-- The server listens on the LAN; Windows Firewall needs an inbound rule for the WebSocket port on Private networks only (document the exact command in docs/protocol.md).
+`docs/protocol.md` is the source of truth; keep it in sync with `link/protocol.py` and `server.py`. In short:
+
+- One WebSocket at `/robot`. Text frames = JSON control messages. Binary frames = audio, 16 kHz 16-bit mono PCM in ~20 ms chunks, both ways.
+- The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token, 4002 no valid hello, 4003 replaced by a newer connection (the newest wins).
+- Robot → server: `hello`, `button {action: down|up}`, `touch`, `stats {data}`; `wake` reserved.
+- Server → robot: `welcome`, `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved for M6.
+- While a robot is connected it owns the mic, speaker and button (`DeviceSwitch`); the PC key is ignored. Speech is paced at real time, ~200 ms ahead.
+- Localhost by default (`SERVER_HOST`, `SERVER_PORT`). In M6 the server moves to the LAN with a Private-only firewall rule (exact command in `docs/protocol.md`).
 - Server stays the source of truth for state. Robot is dumb and reconnects automatically.
 
 ## Hardware (ordered)

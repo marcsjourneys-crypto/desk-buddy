@@ -2,6 +2,20 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-24 — M4 robot link done
+
+- **Built:**
+  - A FastAPI `/robot` WebSocket in the same loop as the voice loop (`server.py`), with token auth (`ROBOT_TOKEN`; blank means off).
+  - `link/`: the protocol, `RobotLink` with `RobotMic` and `RobotPlayer`, and `DeviceSwitch`, which hands the mic, speaker and button to the robot while it is connected.
+  - The fake robot: `python -m desk_buddy.fake_robot` (a test client and a voice tool).
+  - `docs/protocol.md`, the final protocol, including the M6 LAN and firewall steps.
+- **Plan:** `docs/plans/2026-11-23-m4-robot-link.md` (design: `…-m4-robot-link-design.md`).
+- **Tests:** 377 unit tests pass, including a real loopback server driven by the fake robot. Integration tests are unchanged (13).
+- **Voice check by the user:** a question, an interrupt and a disconnect through the fake robot. The follow-up after an interrupt no longer mentions it (the M2 fix, now checked).
+- **Not checked by hand:** Right Ctrl after the robot disconnects (covered by tests).
+- **Deferred to M6:** auth-failure throttling, a connection cap, button-flood limits, bounded queues.
+- **Next:** M5 (firmware bring-up) and then M6 (the robot joins the link). Before M7, mark `read_notes` output as untrusted.
+
 ## 2026-11-23 — M3 Obsidian dictation done
 
 - **Built:**

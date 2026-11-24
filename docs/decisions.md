@@ -59,3 +59,18 @@ Format: **Decision** — why · alternatives considered.
 - **To do before M7:** text that `read_notes` returns comes from files, not from the user. Before computer-control tools exist, it must be marked as untrusted so a planted note can't steer Buddy (prompt injection).
 - **Known minor issue:** in the voice check, Buddy repeated the prompt's example confirmation ("Noted: pick up dog food.") word for word. Harmless; vary the example if it becomes repetitive.
 - **Voice check passed (user):** a daily note, an idea file whose misheard title was cleaned up, and a read-back summary. First audio took 2.5–3.8 s with a tool round, against about 1.8 s without one.
+
+## 2026-11-24 — M4 robot link
+
+- **FastAPI and uvicorn, in the same asyncio loop as the voice loop.** One process; Ctrl+C stops both. uvicorn's own signal handling is turned off, and the socket is bound first so a busy port is a clear startup error. FastAPI will also host the M8 dashboard and M9 expression library. · Alternatives: the plain `websockets` library; a separate server process.
+- **The robot takes over the devices.** While a robot is connected, its mic, speaker and button are used and the PC key is ignored. `DeviceSwitch` sits behind the orchestrator's existing `Mic` and `Player` interfaces, so the core loop only gained a `reset` event. · Alternatives: PC and robot both active.
+- **The newest authenticated connection replaces the old one (close code `4003`).** A dead Wi-Fi socket can linger for up to 40 s before pings catch it; refusing the reconnect would leave the robot deaf for that long. · Alternatives: refuse while one is connected.
+- **Localhost by default** (`SERVER_HOST=127.0.0.1`, `SERVER_PORT=8765`). LAN binding and the Private-only firewall rule are documented in `docs/protocol.md` and switched on in M6.
+- **`ROBOT_TOKEN` of at least 16 characters; blank turns the link off.** Compared with `hmac.compare_digest` on bytes and never logged (the hello message's repr masks it). A token that isn't valid UTF-8 closes with `4002`, not a server error.
+- **Speech to the robot is paced at real time with about 200 ms of lead.** It keeps "only what was heard is remembered" accurate, keeps the robot's buffer small and lets `audio_stop` take effect quickly. Known: up to ~200 ms of already-queued audio can arrive after `audio_stop`, so the robot drops audio until the next `audio_start`.
+- **Robot mic recording follows the button, not the orchestrator.** The link starts and ends the clip on `button down`/`up`, so a fast re-press can't lose the start of the next clip.
+- **Tests run a real uvicorn server on a loopback port** with the fake robot client, instead of FastAPI's `TestClient`. That exercises the real socket, ping and close-code paths, and avoids adding `httpx`. · Alternatives: `TestClient` (needs `httpx`).
+- **The fake robot is a test helper and a voice tool** (`python -m desk_buddy.fake_robot`), so the link can be voice-checked before the hardware works.
+- **`wake {}` is reserved** for an on-robot wake word ("Later" on the roadmap). The server accepts and ignores it.
+- **Deferred to M6** (when the server listens on the LAN): throttling failed auth attempts, a cap on open connections, limits on button floods, and bounded send queues.
+- **Voice check passed (user):** a question, an interrupt mid-reply and a disconnect through the fake robot. The follow-up after the interrupt didn't mention it (the M2 fix, now checked). Not checked by hand: Right Ctrl after the robot disconnects (covered by tests).
