@@ -85,3 +85,23 @@ def test_type_error_inside_a_tool_is_a_crash_not_bad_arguments(caplog):
     outcome = registry(buggy).run("buggy", {"word": "x"})
     assert outcome == ToolOutcome("The tool failed unexpectedly.", is_error=True)
     assert "crashed" in caplog.text
+
+
+def test_long_results_are_not_logged_in_full(caplog):
+    secret = "my private note " * 20
+
+    def read(word: str) -> str:
+        return secret
+
+    caplog.set_level(logging.DEBUG, logger="desk_buddy.tools.registry")
+    assert registry(read).run("read", {"word": "x"}).text == secret
+    assert "Tool read -> my private note" in caplog.text
+    assert secret not in caplog.text
+    assert all(len(m) < 120 for m in caplog.messages)
+
+
+def test_bad_arguments_log_keys_not_values(caplog):
+    caplog.set_level(logging.DEBUG, logger="desk_buddy.tools.registry")
+    assert registry(echo).run("echo", {"wrong": "private words"}).is_error
+    assert "wrong" in caplog.text
+    assert "private words" not in caplog.text

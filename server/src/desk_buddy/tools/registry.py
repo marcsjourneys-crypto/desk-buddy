@@ -10,6 +10,13 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+LOG_PREVIEW = 80  # results can hold private notes; log only their start
+
+
+def _preview(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= LOG_PREVIEW else text[:LOG_PREVIEW] + "..."
+
 
 class ToolError(Exception):
     """A tool couldn't do what was asked. The message is sent back to Claude."""
@@ -59,7 +66,8 @@ class ToolRegistry:
             # Check the arguments first, so a TypeError inside the tool counts as a crash.
             inspect.signature(tool.func).bind(**args)
         except TypeError as exc:
-            log.warning("Tool %s: bad arguments %r (%s)", name, dict(args), exc)
+            # Keys only: values can be private note text.
+            log.warning("Tool %s: bad arguments %s (%s)", name, sorted(args), exc)
             return ToolOutcome("The tool was called with the wrong arguments.", is_error=True)
         try:
             text = tool.func(**args)
@@ -69,7 +77,7 @@ class ToolRegistry:
         except Exception:
             log.exception("Tool %s crashed", name)
             return ToolOutcome("The tool failed unexpectedly.", is_error=True)
-        log.info("Tool %s -> %s", name, text)
+        log.info("Tool %s -> %s", name, _preview(text))
         return ToolOutcome(text)
 
     def __len__(self) -> int:

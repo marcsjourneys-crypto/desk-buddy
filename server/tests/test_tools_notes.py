@@ -152,3 +152,73 @@ def test_read_notes_caps_long_days(vault):
     for i in range(400):
         vault.take_note(f"note number {i} " + "x" * 40, "note", "")
     assert len(vault.read_notes("2026-11-23")) <= 4000
+
+
+def test_idea_text_starting_with_a_hash_reads_back(vault):
+    vault.take_note("# 1 priority is X", "idea", "h")
+    assert vault.read_notes("2026-11-23").endswith("- h: # 1 priority is X")
+
+
+def test_hand_edited_idea_keeps_heading_lines_in_its_body(vault, tmp_path):
+    ideas = tmp_path / "Ideas"
+    ideas.mkdir()
+    (ideas / "2026-11-23 Plan.md").write_text(
+        "---\r\ndate: 2026-11-23\r\n---\r\n# Plan\r\n\r\nStep one.\r\n# Later\r\nStep two.\r\n",
+        encoding="utf-8",
+    )
+    assert vault.read_notes("2026-11-23").endswith("- Plan: Step one. # Later Step two.")
+
+
+def test_note_appends_to_a_non_utf8_daily_file(vault, tmp_path):
+    daily = tmp_path / "Daily"
+    daily.mkdir()
+    (daily / "2026-11-23.md").write_bytes(b"# Caf\xe9")  # cp1252, no trailing newline
+    assert vault.take_note("x", "note", "") == "Saved to Daily/2026-11-23.md"
+    assert (daily / "2026-11-23.md").read_bytes() == b"# Caf\xe9\n- 16:38 x\n"
+
+
+def test_read_notes_survives_non_utf8_files(vault, tmp_path):
+    (tmp_path / "Daily").mkdir()
+    (tmp_path / "Daily" / "2026-11-23.md").write_bytes(b"- 09:00 caf\xe9\n")
+    (tmp_path / "Ideas").mkdir()
+    (tmp_path / "Ideas" / "2026-11-23 Bad.md").write_bytes(b"# Bad\n\nna\xefve\n")
+    text = vault.read_notes("2026-11-23")
+    assert "- 09:00 caf�" in text
+    assert "- Bad: na�ve" in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("a#b^c[d]e", "a b c d e"),
+        ("ab​c", "abc"),  # zero-width space (Cf)
+        ("evil‮txt.md", "eviltxt.md"),  # right-to-left override (Cf)
+        ("x\x7fy\x85z", "xyz"),  # DEL and NEL (Cc)
+    ],
+)
+def test_safe_title_drops_obsidian_and_invisible_characters(raw, expected):
+    assert safe_title(raw) == expected
+
+
+def test_concurrent_notes_are_all_saved(vault, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda i: vault.take_note(f"n{i}", "note", ""), range(200)))
+    lines = (tmp_path / "Daily" / "2026-11-23.md").read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == ["# Monday 23 November 2026", ""]
+    assert sorted(lines[2:]) == sorted(f"- 16:38 n{i}" for i in range(200))
+
+
+def test_reading_while_writing_never_fails(vault):
+    # Regression: Path.resolve() on Windows could return a \\?\ path for a file another
+    # thread had open, which the vault check then refused.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def work(i):
+        if i % 2:
+            return vault.read_notes("2026-11-23")
+        return vault.take_note(f"n{i}", "note" if i % 4 else "idea", f"t{i}")
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(work, range(200)))

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import os
 import re
+import threading
+import unicodedata
 from collections.abc import Callable
-from datetime import date, datetime
 from pathlib import Path
 
 from desk_buddy.tools.registry import Tool, ToolError
@@ -12,28 +15,44 @@ from desk_buddy.tools.registry import Tool, ToolError
 KINDS = ("note", "idea")
 MAX_TITLE = 60
 MAX_READ = 4000
-_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Windows-illegal filename characters, plus #^[] which break Obsidian links.
+_UNSAFE = re.compile(r'[<>:"/\\|?*#^\[\]\x00-\x1f]')
 
 
 def safe_title(raw: str) -> str:
-    """A title that is safe as part of a Windows filename (may be empty)."""
-    title = " ".join(_UNSAFE.sub(" ", raw).split())
+    """A title that is safe as part of a Windows filename and an Obsidian link (may be empty)."""
+    title = _UNSAFE.sub(" ", raw)
+    title = "".join(ch for ch in title if unicodedata.category(ch) not in ("Cc", "Cf"))
+    title = " ".join(title.split())
     title = re.sub(r"\.{2,}", "", title).strip(" .")
     return title[:MAX_TITLE].rstrip(" .")
 
 
-def day_heading(day: date) -> str:
+def day_heading(day: dt.date) -> str:
     return f"{day:%A} {day.day} {day:%B %Y}"
 
 
 def _idea_body(content: str) -> str:
-    """The idea's text without frontmatter or heading, on one line."""
+    """The idea's text without frontmatter or its title heading, on one line."""
+    content = content.replace("\r\n", "\n")
     if content.startswith("---\n"):
         end = content.find("\n---\n", 4)
         if end != -1:
             content = content[end + 5 :]
-    lines = [ln for ln in content.splitlines() if not ln.startswith("# ")]
+    lines = content.lstrip("\n").split("\n")
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]  # only the title heading; later "# " lines are body text
     return " ".join(" ".join(lines).split())
+
+
+def _ends_with_newline(path: Path) -> bool:
+    """Checked on bytes, so a file in another encoding can't break appending."""
+    with path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return True
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) == b"\n"
 
 
 class NoteVault:
@@ -43,12 +62,13 @@ class NoteVault:
         *,
         daily_folder: str = "Daily",
         ideas_folder: str = "Ideas",
-        now: Callable[[], datetime] = datetime.now,
+        now: Callable[[], dt.datetime] = dt.datetime.now,
     ) -> None:
         self._root = Path(root).resolve()
         self._daily = daily_folder
         self._ideas = ideas_folder
         self._now = now
+        self._write_lock = threading.Lock()  # tools run in worker threads
 
     # --- take_note ---
 
@@ -58,25 +78,26 @@ class NoteVault:
             raise ToolError("There's nothing to note.")
         if kind not in KINDS:
             raise ToolError(f"kind must be one of {', '.join(KINDS)}.")
-        now = self._now()
-        if kind == "note":
-            return self._append_note(now, text)
-        return self._create_idea(now, text, title)
+        with self._write_lock:
+            now = self._now()
+            if kind == "note":
+                return self._append_note(now, text)
+            return self._create_idea(now, text, title)
 
-    def _append_note(self, now: datetime, text: str) -> str:
+    def _append_note(self, now: dt.datetime, text: str) -> str:
         name = f"{now.date().isoformat()}.md"
         path = self._inside(self._daily, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         prefix = ""
         if not path.exists():
             prefix = f"# {day_heading(now.date())}\n\n"
-        elif not path.read_text(encoding="utf-8").endswith("\n"):
+        elif not _ends_with_newline(path):
             prefix = "\n"
         with path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(f"{prefix}- {now:%H:%M} {text}\n")
         return f"Saved to {self._daily}/{name}"
 
-    def _create_idea(self, now: datetime, text: str, title: str) -> str:
+    def _create_idea(self, now: dt.datetime, text: str, title: str) -> str:
         title = safe_title(title) or safe_title(" ".join(text.split()[:6])) or "Idea"
         day = now.date().isoformat()
         body = f"---\ndate: {day}\ntags: [idea, buddy]\n---\n# {title}\n\n{text}\n"
@@ -96,7 +117,7 @@ class NoteVault:
 
     def read_notes(self, date: str) -> str:
         try:
-            day = datetime.strptime(date, "%Y-%m-%d").date()
+            day = dt.datetime.strptime(date, "%Y-%m-%d").date()
         except ValueError:
             raise ToolError("date must look like 2026-11-23.") from None
         iso = day.isoformat()
@@ -105,7 +126,7 @@ class NoteVault:
         if daily.is_file():
             notes = [
                 line
-                for line in daily.read_text(encoding="utf-8").splitlines()
+                for line in daily.read_text(encoding="utf-8", errors="replace").splitlines()
                 if line.startswith("- ")
             ]
         ideas: list[str] = []
@@ -113,7 +134,8 @@ class NoteVault:
         if ideas_dir.is_dir():
             for path in sorted(ideas_dir.glob(f"{iso} *.md")):
                 title = path.stem[len(iso) + 1 :]
-                ideas.append(f"- {title}: {_idea_body(path.read_text(encoding='utf-8'))}")
+                content = path.read_text(encoding="utf-8", errors="replace")
+                ideas.append(f"- {title}: {_idea_body(content)}")
         if not notes and not ideas:
             return f"Nothing noted on {day_heading(day)}."
         parts = [f"Notes for {day_heading(day)}:", *notes]
@@ -127,7 +149,9 @@ class NoteVault:
     # --- paths ---
 
     def _inside(self, folder: str, name: str) -> Path:
-        path = (self._root / folder / name).resolve()
+        # Lexical, not resolve(): on Windows, resolving a file another thread has open can
+        # return a \\?\-prefixed path that wrongly fails the check. Symlinks are out of scope.
+        path = Path(os.path.abspath(self._root / folder / name))
         if not path.is_relative_to(self._root):
             raise ToolError("That would be outside the notes folder.")
         return path
