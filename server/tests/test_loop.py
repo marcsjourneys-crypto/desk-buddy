@@ -13,12 +13,13 @@ ONE_SECOND = b"\x00" * BYTES_PER_SECOND
 
 class FakeMic:
     def __init__(self, pcm: bytes = ONE_SECOND):
-        self.pcm, self.starts = pcm, 0
+        self.pcm, self.starts, self.stops = pcm, 0, 0
 
     def start(self):
         self.starts += 1
 
     def stop(self) -> bytes:
+        self.stops += 1
         return self.pcm
 
 
@@ -378,3 +379,41 @@ def test_forget_phrase_clears_memory_without_calling_claude():
     assert parts["speaker"].played == [FORGET_LINE.text]
     assert parts["emotions"] == [FORGET_LINE.emotion]
     assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]
+
+
+def test_reset_interrupts_a_turn_and_goes_idle():
+    speaker = FakeSpeaker(block=True)
+    orch, _, states = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("reset")
+
+    asyncio.run(scenario())
+    assert speaker.stops == 1
+    assert orch.state is State.IDLE
+    assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]
+
+
+def test_reset_while_listening_stops_the_mic():
+    mic = FakeMic()
+    orch, _, states = make(mic=mic)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("reset")
+
+    asyncio.run(scenario())
+    assert mic.stops == 1
+    assert states == [State.LISTENING, State.IDLE]
+
+
+def test_reset_when_idle_does_nothing():
+    mic = FakeMic()
+    orch, parts, states = make(mic=mic)
+    asyncio.run(orch.handle("reset"))
+    assert mic.stops == 0
+    assert parts["speaker"].stops == 0
+    assert states == []

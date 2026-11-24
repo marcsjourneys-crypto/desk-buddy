@@ -88,6 +88,7 @@ class Orchestrator:
     # --- events ---
 
     async def run(self, events: asyncio.Queue[str]) -> None:
+        """Handle events from the queue forever: "down", "up" and "reset"."""
         while True:
             event = await events.get()
             try:
@@ -96,6 +97,8 @@ class Orchestrator:
                 log.exception("Failed to handle %r event", event)
 
     async def handle(self, event: str) -> None:
+        """Events: "down" and "up" are the talk button; "reset" (a robot attached or
+        detached) interrupts any turn, stops the mic if it was listening, and goes idle."""
         if event == "down":
             await self._interrupt()
             self.mic.start()
@@ -110,6 +113,12 @@ class Orchestrator:
             self._set_state(State.THINKING)
             self._t0 = time.perf_counter()
             self._turn = asyncio.create_task(self._run_turn(pcm))
+        elif event == "reset":
+            # A robot attached or detached: drop whatever was happening and wait.
+            await self._interrupt()
+            if self.state is State.LISTENING:
+                self.mic.stop()
+            self._set_state(State.IDLE)
 
     async def wait_idle(self) -> None:
         if self._turn:
