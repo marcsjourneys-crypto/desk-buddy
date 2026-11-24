@@ -6,13 +6,16 @@ import asyncio
 import contextlib
 import logging
 import sys
+from collections.abc import Callable
 
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.config import ConfigError, Settings, load_settings
+from desk_buddy.link.switch import DeviceSwitch
 from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator
 from desk_buddy.ptt import KeyWatcher, parse_key
+from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tts import SapiSynthesizer
@@ -80,26 +83,60 @@ async def _run(settings: Settings) -> None:
             f"on ({settings.obsidian_vault_path})" if tools else "off (no OBSIDIAN_VAULT_PATH)",
         )
         chat = create_chat(settings, tools)
+        # A connected robot takes over the mic, speaker and button; else the PC's are used.
+        switch = DeviceSwitch(mic, speaker)
         orchestrator = Orchestrator(
-            mic=mic,
+            mic=switch.mic,
             transcriber=transcriber,
             chat=chat,
             synthesizer=synthesizer,
-            speaker=speaker,
+            speaker=switch.player,
             conversation=Conversation(settings.history_turns),
+            on_state=switch.send_state,
+            on_emotion=switch.send_emotion,
         )
         stack.push_async_callback(orchestrator.shutdown)
 
-        loop = asyncio.get_running_loop()
         events: asyncio.Queue[str] = asyncio.Queue()
+        if settings.robot_token:
+            app = create_app(
+                token=settings.robot_token,
+                switch=switch,
+                events=events,
+                current_state=lambda: orchestrator.state.value,
+            )
+            try:
+                server = await start_server(app, settings.server_host, settings.server_port)
+            except ServerStartError as exc:
+                raise StartupError(str(exc)) from exc
+            stack.push_async_callback(server.stop)
+            log.info(
+                "Robot link: on (ws://%s:%d/robot)", settings.server_host, settings.server_port
+            )
+        else:
+            log.info("Robot link: off (no ROBOT_TOKEN)")
+
+        loop = asyncio.get_running_loop()
+        on_key = key_handler(switch, events)
         watcher = KeyWatcher(
             parse_key(settings.ptt_key),
-            lambda event: loop.call_soon_threadsafe(events.put_nowait, event),
+            lambda event: loop.call_soon_threadsafe(on_key, event),
         )
         watcher.start()
         stack.callback(watcher.stop)
         log.info("Ready. Hold %s to talk, Ctrl+C to quit.", settings.ptt_key)
         await orchestrator.run(events)
+
+
+def key_handler(switch: DeviceSwitch, events: asyncio.Queue[str]) -> Callable[[str], None]:
+    """The push-to-talk key's handler (runs on the event loop). Ignored while a robot is
+    connected: the robot takes over the button."""
+
+    def on_key(event: str) -> None:
+        if switch.robot is None:
+            events.put_nowait(event)
+
+    return on_key
 
 
 if __name__ == "__main__":
