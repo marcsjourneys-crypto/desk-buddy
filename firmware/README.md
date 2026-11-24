@@ -14,7 +14,7 @@ ESP32-S3 firmware for the Desk Buddy robot: PlatformIO, Arduino core 3.x (pioard
 |---|---|
 | Build | `pio run` |
 | Flash | `pio run -t upload` |
-| Serial monitor (type `help`) | `pio device monitor` |
+| Serial monitor (type `help`) | `pio device monitor -p COM9` (naming the port stops it grabbing a Bluetooth COM port when the board is missing) |
 | Unit tests (they run on the board) | `pio test` |
 
 Close the serial monitor before flashing or testing; only one program can use the port.

@@ -74,3 +74,17 @@ Format: **Decision** — why · alternatives considered.
 - **`wake {}` is reserved** for an on-robot wake word ("Later" on the roadmap). The server accepts and ignores it.
 - **Deferred to M6** (when the server listens on the LAN): throttling failed auth attempts, a cap on open connections, limits on button floods, and bounded send queues.
 - **Voice check passed (user):** a question, an interrupt mid-reply and a disconnect through the fake robot. The follow-up after the interrupt didn't mention it (the M2 fix, now checked). Not checked by hand: Right Ctrl after the robot disconnects (covered by tests).
+
+## 2026-11-24 — M5 firmware bring-up
+
+- **Arduino core 3.x via pioarduino, pinned to `55.03.312-1` (core 3.3.12, ESP-IDF 5.5.5),** on the ready-made `esp32-s3-devkitc1-n16r8` board definition (16 MB flash, octal PSRAM). Core 4.0 was days old; the official PlatformIO platform is frozen at core 2.x with the legacy I2S driver. · Alternatives: core 2.x on the official platform.
+- **Windows setup it needed:** PlatformIO Core 6.2 via `pioarduino==6.2.0` (PlatformIO's semver check reads `.post1` as a pre-release), installed while PlatformIO isn't running; long paths turned on; `pio` run from PowerShell only. Written up in `firmware/README.md`.
+- **LovyanGFX 1.2.36 for the eyes.** It has anti-aliased circles and `drawWedgeLine`, but no smooth arc, so curves are drawn as thick wedge segments. · Alternatives: TFT_eSPI (core-3.x/S3 issues), Arduino_GFX (no anti-aliasing).
+- **The eye model is two lid bulge values plus size, thickness and gaze.** A ring, `∩`, `‿` and a closed line all come from it, and every blend is a plain lerp. M9's editor can store the same numbers. · Alternatives: bitmaps per expression.
+- **One 200×200 sprite in internal RAM, drawn once and pushed to both eyes when they match, redrawn only while something moves.** Measured: 10.9 fps with two 240×240 PSRAM sprites, 25.7 fps now; 16 segments per curve (24 gives 22 fps; the user found 16 smooth). The wedge-line drawing is the cost, not PSRAM. Free heap with everything running: 229 KB.
+- **One app with a serial test menu,** and the pure logic in header-only files tested with Unity on the board (no C++ compiler on the PC). 28 tests.
+- **The PSRAM strip-drawing fallback was dropped:** PSRAM is confirmed (8 MB octal).
+- **Audio:** speaker on I2S port 0 with mono data on both slots; mic on port 1 (INMP441, 24-bit in 32-bit slots, left). The mic gets +12 dB (`kMicShift = 14`); speech peaked near −4 dBFS close up, so this may come down. The idle level read −28 to −38 dBFS, probably room noise plus the INMP441's DC offset; M6 should remove DC before streaming. Stale DMA audio is flushed before each recording. Volume starts at 20.
+- **The board's 5V pin gives no USB power** (the IN-OUT jumper is open), so the amp runs on 3.3 V for now; the 5 V 3 A supply will feed the amp and servos in the final wiring. Don't bridge IN-OUT while an external 5 V supply can be connected.
+- **Servos: attached once, eased at 90 °/s, and stopped with duty 0 after a 200 ms settle** instead of detaching the pin, which could cut a pulse short and twitch the servo. Pan ±60°, tilt ±20° (provisional). The first move after power-on jumps to centre.
+- **Hardware checks passed (user):** LED and PSRAM, both eyes (expressions, blink, smoothness), the tone and volume, mic levels and the record/playback loopback. **Pending:** the servo sweep, once the servos are wired to the 5 V supply.

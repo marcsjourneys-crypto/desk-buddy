@@ -35,6 +35,10 @@ server/                 Python brain (uv-managed, src layout)
     fake_robot.py       fake robot client (tests + voice tool)
   tests/                pytest
 firmware/               ESP32-S3 firmware (PlatformIO, Arduino framework)
+  include/              pins.h + pure-logic headers (ease, eye_model, dsp, servo_math)
+  src/                  main.cpp (serial test menu), eyes, audio, servos
+  test/                 Unity tests — they run on the board (`pio test`)
+  scripts/serial_cmd.py reset the board, send one command, print the output
 docs/                   protocol.md, wiring.md, decisions.md, plans/
 ```
 
@@ -109,7 +113,10 @@ Anyone (or any TV) near the robot can talk to it.
 
 ## Firmware constraints
 
-- Do NOT use GPIO 35, 36, 37 (octal PSRAM on N16R8).
+- Stack (decided in M5): pioarduino platform `55.03.312-1` (Arduino core 3.3.12), board `esp32-s3-devkitc1-n16r8`, LovyanGFX 1.2.36, `ESP_I2S` and LEDC from the core. Versions are pinned in `platformio.ini`.
+- Run `pio` from PowerShell, never Git Bash (ESP-IDF refuses MSYS). Windows setup notes are in `firmware/README.md`.
+- The board's 5V pin gives no USB power (its IN-OUT jumper is open). The amp runs on 3.3 V until the 5 V supply is wired.
+- Do NOT use GPIO 26–37 (SPI flash and octal PSRAM on N16R8; 35–37 are the octal lines).
 - Avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20 for peripherals. GPIO 48 is the onboard RGB LED.
 - Servos powered from 5 V, not 3.3 V; common ground; stop sending PWM when a servo reaches its target (kills jitter and noise).
 - Freeze servos while listening so the mic doesn't hear them.

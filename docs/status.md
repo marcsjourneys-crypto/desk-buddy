@@ -2,6 +2,19 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-24 — M5 firmware bring-up (servo check pending)
+
+- **Built** (`firmware/`): one ESP32-S3 app with a serial test menu (`help`, `info`, `eyes idle|happy|sleep|blink|test`, `fps`, `tone`, `vol`, `mic`, `rec`/`play`, `servo`).
+  - Eyes: parametric two-lid model, blending, idle blinks, 25.7 fps on both GC9A01s.
+  - Audio: I2S speaker and INMP441 mic, 16 kHz 16-bit mono, record/playback loopback.
+  - Servos: eased, speed-limited moves with no PWM at rest.
+- **Plan:** `docs/plans/2026-11-24-m5-firmware-bringup.md` (design: `…-m5-firmware-bringup-design.md`). Pin map: `docs/wiring.md`.
+- **Tests:** 28 Unity tests pass on the board; the server's 377 still pass.
+- **Hardware checks by the user, passed:** LED and PSRAM (8 MB), both eyes, tone and volume, mic levels, record/playback.
+- **Pending:** wire the servos to the 5 V supply (with the 1000 µF cap and a common ground), centre the horns by hand, then run `servo`.
+- **Wiring notes:** the amp is on 3.3 V because the board's 5V pin gives no USB power; it moves to the 5 V supply later. Use `pio device monitor -p COM9` so the monitor never grabs a Bluetooth port.
+- **Next:** the servo check, then M6 (the robot joins the link: Wi-Fi, WebSocket client, streaming mic and speech, eyes follow state and emotion).
+
 ## 2026-11-24 — M4 robot link done
 
 - **Built:**
