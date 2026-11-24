@@ -8,6 +8,7 @@
 #include "dsp.h"
 #include "eyes.h"
 #include "pins.h"
+#include "servos.h"
 
 namespace {
 
@@ -53,6 +54,7 @@ void printHelp() {
   Serial.println("  vol <0-100>               speaker volume (starts at 20)");
   Serial.println("  mic                       mic levels for 10 s");
   Serial.println("  rec / play                record 3 s, play it back");
+  Serial.println("  servo                     eased pan/tilt sweep");
 }
 
 // Any typed character stops a running test. CR/LF don't count, by design: they are left
@@ -64,6 +66,12 @@ bool keyPressed() {
     if (c != '\r' && c != '\n') any = true;
   }
   return any;
+}
+
+// For long blocking tests: keeps the eyes animating, then checks for a key.
+bool serviceAndCheckKey() {
+  eyes::update(millis());
+  return keyPressed();
 }
 
 constexpr size_t kRecSamples = dsp::kRate * 3;  // 3 s = 96 KB, in PSRAM
@@ -177,6 +185,15 @@ void handle(char* cmd) {
     runRecord();
   } else if (!strcmp(name, "play")) {
     runPlay();
+  } else if (!strcmp(name, "servo")) {
+    Serial.println("Servo sweep (press any letter to stop)");
+    if (servos::sweep(serviceAndCheckKey)) {
+      Serial.println("Servo sweep done");
+    } else if (!servos::ready()) {
+      Serial.println("Servo: not started");
+    } else {
+      Serial.println("Servo sweep stopped");
+    }
   } else {
     Serial.printf("Unknown command '%s'\n", name);
     printHelp();
@@ -218,6 +235,7 @@ void setup() {
   if (!eyes::begin()) Serial.println("Eyes: not started");
   if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
   if (!audio::beginMic()) Serial.println("Mic: not started");
+  if (!servos::begin()) Serial.println("Servos: not started");
   Serial.println("Type 'help' for commands.");
 }
 
