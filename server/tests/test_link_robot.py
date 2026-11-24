@@ -1,7 +1,28 @@
+import asyncio
 import threading
 
 from desk_buddy.audio import BYTES_PER_SECOND, CHUNK_BYTES
-from desk_buddy.link.robot import RobotMic, RobotPlayer
+from desk_buddy.link.robot import RobotLink, RobotMic, RobotPlayer
+
+
+class FakeWebSocket:
+    def __init__(self, fail_after: int | None = None):
+        self.sent, self.closed_with = [], None
+        self.fail_after = fail_after
+
+    async def _record(self, item):
+        if self.fail_after is not None and len(self.sent) >= self.fail_after:
+            raise ConnectionError("socket gone")
+        self.sent.append(item)
+
+    async def send_bytes(self, data):
+        await self._record(data)
+
+    async def send_json(self, data):
+        await self._record(data)
+
+    async def close(self, code=1000):
+        self.closed_with = code
 
 
 class FakeClock:
@@ -170,3 +191,55 @@ def test_stop_from_another_thread_is_safe():
         t.join()
     assert player.current_token() == 10
     assert sent == [{"type": "audio_stop"}] * 10
+
+
+def test_link_sends_in_order_from_any_thread_until_closed():
+    ws = FakeWebSocket()
+
+    async def run():
+        link = RobotLink(ws, asyncio.get_running_loop(), "1.0")
+        sender = asyncio.create_task(link.run_sender())
+        link.send({"type": "welcome"})
+        await asyncio.to_thread(link.send, b"\x01\x00")
+        link.send({"type": "audio_end"})
+        await asyncio.sleep(0.05)
+        await link.close(4003)
+        link.send({"type": "late"})  # after close: dropped
+        await asyncio.wait_for(sender, 2)
+        return link
+
+    link = asyncio.run(run())
+    assert ws.sent == [{"type": "welcome"}, b"\x01\x00", {"type": "audio_end"}]
+    assert ws.closed_with == 4003
+    assert link.closed and link.fw_version == "1.0"
+
+
+def test_link_close_halts_its_player():
+    ws = FakeWebSocket()
+
+    async def run():
+        link = RobotLink(ws, asyncio.get_running_loop())
+        token = link.player.current_token()
+        await link.close()
+        link.player.play(b"\x00" * CHUNK_BYTES, token)
+        link.player.stop()
+
+    asyncio.run(run())
+    assert ws.sent == []
+
+
+def test_a_failed_send_closes_the_link():
+    ws = FakeWebSocket(fail_after=1)
+
+    async def run():
+        link = RobotLink(ws, asyncio.get_running_loop())
+        sender = asyncio.create_task(link.run_sender())
+        link.send({"type": "welcome"})
+        link.send({"type": "state", "name": "idle"})
+        await asyncio.wait_for(sender, 2)
+        return link
+
+    link = asyncio.run(run())
+    assert link.closed
+    assert ws.sent == [{"type": "welcome"}]
+    assert ws.closed_with == 1011

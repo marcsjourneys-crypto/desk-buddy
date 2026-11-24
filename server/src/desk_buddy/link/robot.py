@@ -1,7 +1,9 @@
-"""One robot connection: its mic, its speaker and (Task 5) the link that owns them."""
+"""One robot connection: its mic, its speaker and the link that owns them."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -127,3 +129,53 @@ class RobotPlayer:
         with self._lock:
             self._closed = True
             self._generation += 1
+
+
+class RobotLink:
+    """One connected robot. All sends go through one outbox and one sender task, so frames
+    keep their order and never interleave."""
+
+    def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, fw_version: str = "") -> None:
+        self._ws = ws
+        self._loop = loop
+        self._outbox: asyncio.Queue[Any] = asyncio.Queue()
+        self.fw_version = fw_version
+        self.closed = False
+        self.mic = RobotMic()
+        self.player = RobotPlayer(self.send)
+
+    def send(self, item: Any) -> None:
+        """Queue a protocol dict or PCM bytes. Safe from any thread and never blocks: it is
+        called under RobotPlayer's lock. Does nothing once the link is closed."""
+        if self.closed:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._outbox.put_nowait, item)
+        except RuntimeError:  # loop already closed during shutdown
+            pass
+
+    async def run_sender(self) -> None:
+        """Runs until close(). A failed send closes the link (treated as a disconnect)."""
+        try:
+            while (item := await self._outbox.get()) is not None:
+                if self.closed:
+                    return
+                if isinstance(item, bytes):
+                    await self._ws.send_bytes(item)
+                else:
+                    await self._ws.send_json(item)
+        except Exception as exc:
+            if not self.closed:
+                log.warning("Send to robot failed: %s", exc)
+                await self.close(1011)
+
+    async def close(self, code: int = 1000) -> None:
+        """Stop the player (halting any play() in a worker thread), end the sender and close
+        the socket. Safe to call more than once."""
+        if self.closed:
+            return
+        self.closed = True
+        self.player.close()
+        self._outbox.put_nowait(None)
+        with contextlib.suppress(Exception):
+            await self._ws.close(code=code)
