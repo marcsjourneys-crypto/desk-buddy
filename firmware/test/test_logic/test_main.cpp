@@ -2,9 +2,16 @@
 #include <Arduino.h>
 #include <unity.h>
 
+#include <string.h>
+
+#include "backoff.h"
+#include "dc_block.h"
 #include "dsp.h"
 #include "ease.h"
 #include "eye_model.h"
+#include "link_msg.h"
+#include "looks.h"
+#include "ring_buffer.h"
 #include "servo_math.h"
 
 void setUp() {}
@@ -262,6 +269,152 @@ void test_presets_fit_sprite() {
   }
 }
 
+void test_dc_block_removes_offset() {
+  DcBlocker dc;
+  int16_t y = 0;
+  for (int i = 0; i < 2000; i++) y = dc.process(1000);
+  TEST_ASSERT_LESS_THAN_INT(50, abs(y));
+}
+
+void test_dc_block_keeps_speech() {
+  DcBlocker dc;
+  int16_t buf[1600];  // 100 ms of a 1 kHz sine at 16 kHz
+  for (size_t i = 0; i < 1600; i++) {
+    buf[i] = static_cast<int16_t>(10000 * sinf(2 * PI * 1000 * i / 16000.0f));
+  }
+  dc.processBlock(buf, 1600);
+  int peak = 0;
+  for (size_t i = 800; i < 1600; i++) peak = max(peak, abs(static_cast<int>(buf[i])));
+  TEST_ASSERT_GREATER_THAN_INT(9500, peak);
+}
+
+void test_dc_block_saturates() {
+  DcBlocker dc;
+  TEST_ASSERT_EQUAL_INT16(32767, dc.process(32767));
+  TEST_ASSERT_EQUAL_INT16(-32768, dc.process(-32768));  // would be about -65000
+  DcBlocker up;
+  up.process(-32768);
+  TEST_ASSERT_EQUAL_INT16(32767, up.process(32767));
+}
+
+void test_ring_wraps() {
+  int16_t store[5];
+  Int16Ring r(store, 5);
+  const int16_t a[] = {1, 2, 3, 4};
+  int16_t out[5] = {0};
+  TEST_ASSERT_EQUAL_UINT32(4, r.write(a, 4));
+  TEST_ASSERT_EQUAL_UINT32(3, r.read(out, 3));
+  TEST_ASSERT_EQUAL_INT16(3, out[2]);
+  TEST_ASSERT_EQUAL_UINT32(4, r.write(a, 4));  // wraps round the end
+  TEST_ASSERT_EQUAL_UINT32(5, r.available());
+  TEST_ASSERT_EQUAL_UINT32(5, r.read(out, 5));
+  const int16_t want[] = {4, 1, 2, 3, 4};
+  TEST_ASSERT_EQUAL_INT16_ARRAY(want, out, 5);
+  TEST_ASSERT_EQUAL_UINT32(0, r.read(out, 5));
+}
+
+void test_ring_partial_write_when_full() {
+  int16_t store[4];
+  Int16Ring r(store, 4);
+  const int16_t a[] = {1, 2, 3, 4, 5, 6};
+  TEST_ASSERT_EQUAL_UINT32(4, r.write(a, 6));
+  TEST_ASSERT_EQUAL_UINT32(0, r.space());
+  TEST_ASSERT_EQUAL_UINT32(0, r.write(a, 1));
+}
+
+void test_ring_clear_and_counts() {
+  int16_t store[8];
+  Int16Ring r(store, 8);
+  const int16_t a[] = {1, 2, 3};
+  r.write(a, 3);
+  TEST_ASSERT_EQUAL_UINT32(8, r.available() + r.space());
+  r.clear();
+  TEST_ASSERT_EQUAL_UINT32(0, r.available());
+  TEST_ASSERT_EQUAL_UINT32(8, r.space());
+}
+
+void test_backoff() {
+  Backoff b;
+  const uint32_t want[] = {1000, 2000, 4000, 8000, 16000, 30000, 30000};
+  for (uint32_t w : want) TEST_ASSERT_EQUAL_UINT32(w, b.next());
+  b.reset();
+  TEST_ASSERT_EQUAL_UINT32(1000, b.next());
+}
+
+linkmsg::Parsed parse(const char* s) { return linkmsg::parseServerText(s, strlen(s)); }
+
+void test_parse_messages() {
+  using linkmsg::Msg;
+  TEST_ASSERT_TRUE(parse("{\"type\":\"welcome\"}").type == Msg::Welcome);
+  linkmsg::Parsed p = parse("{\"type\":\"state\",\"name\":\"listening\"}");
+  TEST_ASSERT_TRUE(p.type == Msg::State);
+  TEST_ASSERT_EQUAL_STRING("listening", p.name);
+  p = parse("{\"type\":\"emotion\",\"name\":\"happy\"}");
+  TEST_ASSERT_TRUE(p.type == Msg::Emotion);
+  TEST_ASSERT_EQUAL_STRING("happy", p.name);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"audio_start\",\"rate\":16000}").type == Msg::AudioStart);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"audio_end\"}").type == Msg::AudioEnd);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"audio_stop\"}").type == Msg::AudioStop);
+}
+
+void test_parse_truncates_long_name() {
+  const linkmsg::Parsed p = parse("{\"type\":\"state\",\"name\":\"abcdefghijklmnopqrstuvwxyz\"}");
+  TEST_ASSERT_TRUE(p.type == linkmsg::Msg::State);
+  TEST_ASSERT_EQUAL_STRING("abcdefghijklmno", p.name);  // 15 chars + NUL
+}
+
+void test_parse_bad_and_unknown() {
+  using linkmsg::Msg;
+  TEST_ASSERT_TRUE(parse("not json{").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("[1,2]").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"name\":\"idle\"}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"state\"}").type == Msg::Bad);  // name missing
+  TEST_ASSERT_TRUE(parse("{\"type\":\"look\"}").type == Msg::Unknown);
+  // Only the given length counts, even when the buffer carries on.
+  TEST_ASSERT_TRUE(linkmsg::parseServerText("{\"type\":\"welcome\"}xx", 18).type == Msg::Welcome);
+}
+
+void test_build_hello_round_trips() {
+  char out[128];
+  const size_t n = linkmsg::buildHello(out, sizeof(out), "tok\"en\\x", "0.2.0");
+  TEST_ASSERT_GREATER_THAN_UINT32(0, n);
+  TEST_ASSERT_EQUAL_UINT32(strlen(out), n);
+  TEST_ASSERT_NOT_NULL(strstr(out, "tok\\\"en\\\\x"));  // escaped
+  JsonDocument doc;
+  TEST_ASSERT_TRUE(deserializeJson(doc, out) == DeserializationError::Ok);
+  TEST_ASSERT_EQUAL_STRING("hello", doc["type"].as<const char*>());
+  TEST_ASSERT_EQUAL_STRING("tok\"en\\x", doc["token"].as<const char*>());
+  TEST_ASSERT_EQUAL_STRING("0.2.0", doc["fw_version"].as<const char*>());
+}
+
+void test_build_hello_too_small() {
+  char out[10];
+  TEST_ASSERT_EQUAL_UINT32(0, linkmsg::buildHello(out, sizeof(out), "abcdefghijklmnop", "1"));
+}
+
+void test_look_for_emotion() {
+  TEST_ASSERT_EQUAL_STRING("idle", lookForEmotion("neutral"));
+  TEST_ASSERT_EQUAL_STRING("happy", lookForEmotion("happy"));
+  TEST_ASSERT_EQUAL_STRING("sad", lookForEmotion("sad"));
+  TEST_ASSERT_EQUAL_STRING("surprised", lookForEmotion("surprised"));
+  TEST_ASSERT_EQUAL_STRING("sleep", lookForEmotion("sleepy"));
+  TEST_ASSERT_EQUAL_STRING("skeptical", lookForEmotion("thinking"));
+  TEST_ASSERT_EQUAL_STRING("up", lookForEmotion("curious"));
+  TEST_ASSERT_EQUAL_STRING("idle", lookForEmotion("grumpy"));
+  TEST_ASSERT_EQUAL_STRING("idle", lookForEmotion(nullptr));
+}
+
+void test_look_for_state() {
+  TEST_ASSERT_EQUAL_STRING("idle", lookForState("idle", "happy"));
+  TEST_ASSERT_EQUAL_STRING("listening", lookForState("listening", "happy"));
+  TEST_ASSERT_EQUAL_STRING("thinking", lookForState("thinking", "happy"));
+  TEST_ASSERT_EQUAL_STRING("happy", lookForState("speaking", "happy"));
+  TEST_ASSERT_EQUAL_STRING("sad", lookForState("speaking", "sad"));
+  TEST_ASSERT_EQUAL_STRING("sleep", lookForState("sleeping", "happy"));
+  TEST_ASSERT_EQUAL_STRING("sleep", lookForState("", "happy"));
+  TEST_ASSERT_EQUAL_STRING("sleep", lookForState(nullptr, nullptr));
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -294,6 +447,20 @@ void setup() {
   RUN_TEST(test_servo_motion_bad_speed);
   RUN_TEST(test_servo_motion_reverse);
   RUN_TEST(test_servo_motion_across_millis_wrap);
+  RUN_TEST(test_dc_block_removes_offset);
+  RUN_TEST(test_dc_block_keeps_speech);
+  RUN_TEST(test_dc_block_saturates);
+  RUN_TEST(test_ring_wraps);
+  RUN_TEST(test_ring_partial_write_when_full);
+  RUN_TEST(test_ring_clear_and_counts);
+  RUN_TEST(test_backoff);
+  RUN_TEST(test_parse_messages);
+  RUN_TEST(test_parse_truncates_long_name);
+  RUN_TEST(test_parse_bad_and_unknown);
+  RUN_TEST(test_build_hello_round_trips);
+  RUN_TEST(test_build_hello_too_small);
+  RUN_TEST(test_look_for_emotion);
+  RUN_TEST(test_look_for_state);
   UNITY_END();
 }
 
