@@ -3,11 +3,15 @@
 import asyncio
 import contextlib
 import logging
+import time
 
 import pytest
 
+from desk_buddy.audio import BYTES_PER_SECOND
+from desk_buddy.brain.memory import Conversation
 from desk_buddy.fake_robot import FakeRobot
 from desk_buddy.link.switch import DeviceSwitch
+from desk_buddy.loop import Orchestrator, State
 from desk_buddy.server import (
     CLOSE_BAD_TOKEN,
     CLOSE_NO_HELLO,
@@ -246,3 +250,193 @@ def test_busy_port_is_a_clear_error():
                 await start_server(app, "127.0.0.1", port)
 
     asyncio.run(run())
+
+
+# --- A real Orchestrator (fake STT, LLM and TTS) behind the server ---
+
+
+class EchoTranscriber:
+    def __init__(self):
+        self.heard = []
+
+    def transcribe(self, pcm):
+        self.heard.append(len(pcm))
+        return "hello buddy"
+
+
+class OneLineChat:
+    async def stream_reply(self, history, text):
+        yield "[happy] Hi there. "
+        yield "Nice to see you."
+
+
+class ToneSynth:
+    def __init__(self, seconds=0.1):
+        self.bytes = int(seconds * BYTES_PER_SECOND) & ~1
+
+    def synthesize(self, text):
+        return b"\x01\x00" * (self.bytes // 2)
+
+
+@contextlib.asynccontextmanager
+async def buddy(synth=None):
+    switch = DeviceSwitch(NullMic(), NullPlayer())
+    events: asyncio.Queue[str] = asyncio.Queue()
+    transcriber = EchoTranscriber()
+    orch = Orchestrator(
+        mic=switch.mic,
+        transcriber=transcriber,
+        chat=OneLineChat(),
+        synthesizer=synth or ToneSynth(),
+        speaker=switch.player,
+        conversation=Conversation(),
+        on_state=switch.send_state,
+        on_emotion=switch.send_emotion,
+    )
+    app = create_app(
+        token=TOKEN, switch=switch, events=events, current_state=lambda: orch.state.value
+    )
+    server = await start_server(app, "127.0.0.1", 0)
+    loop_task = asyncio.create_task(orch.run(events))
+    try:
+        yield f"ws://127.0.0.1:{server.port}/robot", orch, switch, transcriber
+    finally:
+        loop_task.cancel()
+        await orch.shutdown()
+        await asyncio.wait_for(server.stop(), 5)
+
+
+IDLE = {"type": "state", "name": "idle"}
+SPEAKING = {"type": "state", "name": "speaking"}
+LISTENING = {"type": "state", "name": "listening"}
+
+
+def text_frames(frames):
+    return [f for f in frames if isinstance(f, dict)]
+
+
+async def recv_until_frame(robot, wanted, timeout=5.0):
+    """Frames up to and including the first one equal to `wanted`."""
+    frames = []
+    async with asyncio.timeout(timeout):
+        while True:
+            frame = await robot.recv()
+            assert frame is not None, f"closed ({robot.close_code}) before {wanted}"
+            frames.append(frame)
+            if frame == wanted:
+                return frames
+
+
+async def start_a_reply(robot):
+    """Connect, talk for 0.5 s, and return once Buddy is speaking and audio is arriving."""
+    await robot.connect()
+    await robot.recv_until("state")
+    await robot.press()
+    await robot.send_audio(b"\x00\x00" * (BYTES_PER_SECOND // 4))  # 0.5 s
+    await robot.release()
+    await recv_until_frame(robot, SPEAKING)
+    assert isinstance(await robot.recv(), dict)  # audio_start
+    assert isinstance(await robot.recv(), bytes)
+
+
+async def wait_for(condition, timeout=2.0):
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+def test_full_turn_through_the_robot():
+    async def run():
+        async with buddy() as (url, orch, _, transcriber):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            await robot.press()
+            await robot.send_audio(b"\x00\x00" * (BYTES_PER_SECOND // 4))  # 0.5 s
+            await robot.release()
+            frames = await recv_until_frame(robot, IDLE)
+            texts = text_frames(frames)
+            kinds = [(t["type"], t.get("name")) for t in texts]
+            assert kinds[0] == ("state", "listening")
+            assert kinds.index(("state", "thinking")) < kinds.index(("emotion", "happy"))
+            assert kinds.index(("emotion", "happy")) < kinds.index(("state", "speaking"))
+            assert [t["type"] for t in texts[4:]] == [
+                "audio_start",
+                "audio_end",
+                "audio_start",
+                "audio_end",
+                "state",
+            ]
+            audio = b"".join(f for f in frames if isinstance(f, bytes))
+            assert len(audio) == 2 * (BYTES_PER_SECOND // 10)  # two 0.1 s sentences
+            assert transcriber.heard == [BYTES_PER_SECOND // 2]  # 0.5 s of int16
+            assert orch.state is State.IDLE
+            await robot.close()
+
+    asyncio.run(run())
+
+
+def test_button_press_mid_reply_sends_audio_stop():
+    async def run():
+        async with buddy(ToneSynth(2.0)) as (url, orch, _, _):
+            robot = FakeRobot(url, TOKEN)
+            await start_a_reply(robot)
+            await robot.press()
+            frames = await recv_until_frame(robot, LISTENING)
+            texts = text_frames(frames)
+            assert {"type": "audio_stop"} in texts
+            assert {"type": "audio_end"} not in texts
+            await robot.release()  # no audio: an ignored tap
+            await recv_until_frame(robot, IDLE)
+            # Nothing more arrives: the interrupted reply is not resumed.
+            with pytest.raises(TimeoutError):
+                await robot.recv(timeout=0.5)
+            assert orch.state is State.IDLE
+            await robot.close()
+
+    started = time.monotonic()
+    asyncio.run(run())
+    # The 2 s sentences were cut short: the playing worker thread stopped promptly too
+    # (asyncio.run waits for it).
+    assert time.monotonic() - started < 3.5
+
+
+def test_disconnect_mid_reply_returns_to_idle_on_the_pc():
+    async def run():
+        async with buddy(ToneSynth(10.0)) as (url, orch, switch, _):
+            robot = FakeRobot(url, TOKEN)
+            await start_a_reply(robot)
+            link = switch.robot
+            await robot.close()
+            await wait_for(lambda: orch.state is State.IDLE and switch.robot is None)
+            assert link.closed
+
+    started = time.monotonic()
+    asyncio.run(run())
+    assert time.monotonic() - started < 5  # the 10 s sentence stopped playing
+
+
+def test_a_new_robot_mid_reply_closes_the_old_one_and_goes_idle():
+    async def run():
+        async with buddy(ToneSynth(10.0)) as (url, orch, switch, _):
+            old = FakeRobot(url, TOKEN)
+            await start_a_reply(old)
+            old_link = switch.robot
+            new = FakeRobot(url, TOKEN)
+            await new.connect()
+            assert await new.recv() == {"type": "welcome"}
+            # The old robot is closed with 4003, and its audio stops.
+            async with asyncio.timeout(2):
+                while await old.recv() is not None:
+                    pass
+            assert old.close_code == CLOSE_REPLACED
+            assert old_link.closed
+            # The new robot sees Buddy go idle (the reply is interrupted, not moved over).
+            await recv_until_frame(new, IDLE)
+            await wait_for(lambda: orch.state is State.IDLE)
+            assert switch.robot is not None and switch.robot is not old_link
+            await new.close()
+
+    started = time.monotonic()
+    asyncio.run(run())
+    assert time.monotonic() - started < 5  # the old link's 10 s play stopped
