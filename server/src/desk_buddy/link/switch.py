@@ -12,8 +12,15 @@ from desk_buddy.loop import Mic, Player, State
 log = logging.getLogger(__name__)
 
 
+class LinkMic(Mic, Protocol):
+    """A robot's mic: begin()/end() follow the talk button, start()/stop() the loop."""
+
+    def begin(self) -> None: ...
+    def end(self) -> None: ...
+
+
 class Robot(Protocol):
-    mic: Mic
+    mic: LinkMic
     player: Player
 
     def send(self, item: Any) -> None: ...

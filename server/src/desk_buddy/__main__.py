@@ -11,7 +11,7 @@ from collections.abc import Callable
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.config import ConfigError, Settings, load_settings
-from desk_buddy.link.switch import DeviceSwitch
+from desk_buddy.link.switch import DeviceSwitch, Robot
 from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator
 from desk_buddy.ptt import KeyWatcher, parse_key
@@ -21,6 +21,8 @@ from desk_buddy.tools import build_tools
 from desk_buddy.tts import SapiSynthesizer
 
 log = logging.getLogger("desk_buddy")
+
+RELEASE_DELAY = 0.25  # seconds the robot's mic stays open after the key is released
 
 
 class StartupError(Exception):
@@ -128,13 +130,34 @@ async def _run(settings: Settings) -> None:
         await orchestrator.run(events)
 
 
-def key_handler(switch: DeviceSwitch, events: asyncio.Queue[str]) -> Callable[[str], None]:
-    """The push-to-talk key's handler (runs on the event loop). Ignored while a robot is
-    connected: the robot takes over the button."""
+def key_handler(
+    switch: DeviceSwitch, events: asyncio.Queue[str], delay: float = RELEASE_DELAY
+) -> Callable[[str], None]:
+    """The push-to-talk key's handler (runs on the event loop). While a robot is connected
+    the key drives it: down begins the robot's mic, and up ends it `delay` seconds later so
+    audio still in flight over Wi-Fi isn't lost."""
+    pending: list[tuple[asyncio.TimerHandle, Robot]] = []  # at most one delayed release
+
+    def release(robot: Robot) -> None:
+        pending.clear()
+        if switch.robot is robot:
+            robot.mic.end()
+        events.put_nowait("up")  # always, so the orchestrator never stays listening
 
     def on_key(event: str) -> None:
-        if switch.robot is None:
+        if pending:  # fire a delayed release now, so the order stays down/up/down
+            handle, old = pending[0]
+            handle.cancel()
+            release(old)
+        robot = switch.robot
+        if robot is None:
             events.put_nowait(event)
+        elif event == "down":
+            robot.mic.begin()
+            events.put_nowait("down")
+        else:
+            handle = asyncio.get_running_loop().call_later(delay, release, robot)
+            pending.append((handle, robot))
 
     return on_key
 

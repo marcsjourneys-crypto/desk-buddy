@@ -223,19 +223,144 @@ def test_busy_port_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):
     ]
 
 
-def test_the_key_is_ignored_while_a_robot_is_attached():
-    class Device:
-        def start(self):
-            pass
+class Device:
+    def start(self):
+        pass
 
-        def stop(self):
-            return b""
+    def stop(self):
+        return b""
 
+
+class RecordingRobotMic(Device):
+    def __init__(self, log):
+        self.log = log
+
+    def begin(self):
+        self.log.append("begin")
+
+    def end(self):
+        self.log.append("end")
+
+
+class KeyRobot:
+    """A robot whose mic records begin/end into a shared log."""
+
+    def __init__(self, log):
+        self.mic = RecordingRobotMic(log)
+        self.player = None
+
+    def send(self, item):
+        pass
+
+
+DELAY = 0.05
+
+
+def drain(events):
+    out = []
+    while not events.empty():
+        out.append(events.get_nowait())
+    return out
+
+
+class LoggingQueue(asyncio.Queue):
+    """Records each queued event in the same log as the mic calls, in call order."""
+
+    def __init__(self, log):
+        super().__init__()
+        self.log = log
+
+    def put_nowait(self, item):
+        self.log.append(item)
+        super().put_nowait(item)
+
+
+def key_setup(log):
     switch = DeviceSwitch(Device(), Device())
-    events: asyncio.Queue[str] = asyncio.Queue()
-    on_key = entry.key_handler(switch, events)
-    on_key("down")
-    switch.attach(object())
-    on_key("up")  # the robot owns the button now
-    assert events.get_nowait() == "down"
-    assert events.empty()
+    events = LoggingQueue(log)
+    return switch, events, entry.key_handler(switch, events, delay=DELAY)
+
+
+def test_the_key_goes_straight_to_the_events_without_a_robot():
+    async def run():
+        switch = DeviceSwitch(Device(), Device())
+        events: asyncio.Queue[str] = asyncio.Queue()
+        on_key = entry.key_handler(switch, events, delay=DELAY)
+        on_key("down")
+        on_key("up")
+        return drain(events)
+
+    assert asyncio.run(run()) == ["down", "up"]
+
+
+def test_key_down_with_a_robot_begins_its_mic_then_queues_down():
+    log = []
+
+    async def run():
+        switch, events, press = key_setup(log)
+        switch.attach(KeyRobot(log))
+        press("down")
+
+    asyncio.run(run())
+    assert log == ["begin", "down"]
+
+
+def test_key_up_with_a_robot_ends_its_mic_after_the_delay():
+    log = []
+
+    async def run():
+        switch, events, press = key_setup(log)
+        switch.attach(KeyRobot(log))
+        press("down")
+        press("up")
+        assert log == ["begin", "down"]  # nothing yet: in-flight audio may still arrive
+        await asyncio.sleep(DELAY * 3)
+        assert drain(events) == ["down", "up"]
+
+    asyncio.run(run())
+    assert log == ["begin", "down", "end", "up"]
+
+
+def test_a_re_press_during_the_delay_releases_first():
+    log = []
+
+    async def run():
+        switch, events, press = key_setup(log)
+        switch.attach(KeyRobot(log))
+        press("down")
+        press("up")
+        press("down")
+        await asyncio.sleep(DELAY * 3)  # the cancelled release must not fire again
+
+    asyncio.run(run())
+    assert log == ["begin", "down", "end", "up", "begin", "down"]
+
+
+def test_a_robot_detaching_during_the_delay_still_queues_up():
+    log = []
+
+    async def run():
+        switch, events, press = key_setup(log)
+        robot = KeyRobot(log)
+        switch.attach(robot)
+        press("down")
+        press("up")
+        switch.detach(robot)
+        await asyncio.sleep(DELAY * 3)
+
+    asyncio.run(run())
+    assert log == ["begin", "down", "up"]  # no end() on the old robot
+
+
+def test_the_key_with_a_robot_attached_mid_press():
+    log = []
+
+    async def run():
+        switch, events, press = key_setup(log)
+        press("down")  # no robot yet: straight through
+        switch.attach(KeyRobot(log))
+        press("up")
+        await asyncio.sleep(DELAY * 3)
+
+    asyncio.run(run())
+    assert log == ["down", "end", "up"]
