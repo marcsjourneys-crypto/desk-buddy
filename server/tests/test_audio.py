@@ -108,6 +108,20 @@ def test_mic_buffers_only_between_start_and_stop(fake_sd):
     assert mic.stop() == b""
 
 
+def test_mic_drain_takes_audio_but_keeps_recording(fake_sd):
+    made, _ = fake_sd
+    mic = Microphone()
+    stream = made[0]
+    mic.start()
+    stream.callback(b"one!", 2, None, None)
+    assert mic.drain() == b"one!"
+    assert mic.drain() == b""
+    stream.callback(b"two!", 2, None, None)
+    assert mic.stop() == b"two!"
+    stream.callback(b"late", 2, None, None)
+    assert mic.drain() == b""
+
+
 def test_mic_close_is_idempotent(fake_sd):
     made, _ = fake_sd
     mic = Microphone()

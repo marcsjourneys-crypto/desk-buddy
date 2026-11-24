@@ -105,6 +105,10 @@ class Microphone:
         self._buffer.take()
         self._recording.set()
 
+    def drain(self) -> bytes:
+        """Audio captured so far, without stopping the recording (for streaming)."""
+        return self._buffer.take()
+
     def stop(self) -> bytes:
         self._recording.clear()
         return self._buffer.take()
