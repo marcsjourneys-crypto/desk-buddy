@@ -46,7 +46,7 @@ class NullPlayer:
 
 
 @contextlib.asynccontextmanager
-async def running(hello_timeout=5.0):
+async def running(hello_timeout=5.0, clock=time.monotonic):
     switch = DeviceSwitch(NullMic(), NullPlayer())
     events: asyncio.Queue[str] = asyncio.Queue()
     app = create_app(
@@ -55,6 +55,7 @@ async def running(hello_timeout=5.0):
         events=events,
         current_state=lambda: "idle",
         hello_timeout=hello_timeout,
+        clock=clock,
     )
     server = await start_server(app, "127.0.0.1", 0)
     try:
@@ -236,6 +237,121 @@ def test_oversized_frame_closes_only_that_connection():
             await again.close()
 
     asyncio.run(run())
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_repeated_bad_tokens_block_the_ip_for_a_while(caplog):
+    caplog.set_level(logging.INFO)
+    clock = FakeClock()
+
+    async def run():
+        async with running(clock=clock) as (url, switch, _):
+            for _ in range(server_module.MAX_AUTH_FAILURES):
+                bad = FakeRobot(url, "wrong-token-wrong-token")
+                await bad.connect()
+                assert await bad.recv() is None
+                assert bad.close_code == CLOSE_BAD_TOKEN
+            blocked = FakeRobot(url, TOKEN)
+            await blocked.connect(hello=False)  # refused before its hello is read
+            with contextlib.suppress(Exception):  # it may already be closed
+                await blocked.send({"type": "hello", "token": TOKEN, "fw_version": ""})
+            assert await blocked.recv() is None
+            assert blocked.close_code == CLOSE_BAD_TOKEN
+            assert switch.robot is None
+            clock.now += server_module.BLOCK_SECONDS + 1
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            assert await robot.recv() == {"type": "welcome"}
+            await robot.close()
+
+    asyncio.run(run())
+    blocks = [m for m in caplog.messages if "blocked after repeated bad tokens" in m]
+    assert blocks == ["Robot refused: 127.0.0.1 blocked after repeated bad tokens"]
+    assert TOKEN not in caplog.text
+
+
+def test_a_good_token_clears_earlier_failures():
+    clock = FakeClock()
+
+    async def run():
+        async with running(clock=clock) as (url, _, _):
+            for _ in range(2):
+                for _ in range(server_module.MAX_AUTH_FAILURES - 1):
+                    bad = FakeRobot(url, "wrong-token-wrong-token")
+                    await bad.connect()
+                    assert await bad.recv() is None
+                robot = FakeRobot(url, TOKEN)
+                await robot.connect()
+                assert await robot.recv() == {"type": "welcome"}
+                await robot.close()
+
+    asyncio.run(run())
+
+
+def test_too_many_connections_waiting_for_hello_are_refused_4002():
+    async def run():
+        async with running(hello_timeout=5.0) as (url, _, _):
+            waiting = [FakeRobot(url, TOKEN) for _ in range(server_module.MAX_PENDING_HELLOS)]
+            for robot in waiting:
+                await robot.connect(hello=False)
+            extra = FakeRobot(url, TOKEN)
+            await extra.connect(hello=False)
+            with contextlib.suppress(Exception):  # it may already be closed
+                await extra.send({"type": "hello", "token": TOKEN, "fw_version": ""})
+            started = time.monotonic()
+            assert await extra.recv(timeout=2) is None
+            assert time.monotonic() - started < 1  # at once, not after the hello timeout
+            assert extra.close_code == CLOSE_NO_HELLO
+            for robot in waiting:
+                await robot.close()
+            # Once they are gone, a new robot gets in.
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            assert await robot.recv() == {"type": "welcome"}
+            await robot.close()
+
+    asyncio.run(run())
+
+
+def test_a_button_flood_is_dropped_and_logged_once(caplog):
+    caplog.set_level(logging.INFO)
+    clock = FakeClock()  # frozen: the bucket never refills
+
+    async def run():
+        async with running(clock=clock) as (url, _, events):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            assert await next_event(events) == "reset"
+            for i in range(30):
+                await (robot.press() if i % 2 == 0 else robot.release())
+            await asyncio.sleep(0.3)
+            got = []
+            while not events.empty():
+                got.append(events.get_nowait())
+            await robot.close()
+            return got
+
+    got = asyncio.run(run())
+    assert got == ["down", "up"] * 5
+    assert caplog.messages.count("Robot button flood: dropping") == 1
+
+
+def test_the_button_limit_refills_over_time():
+    from desk_buddy.server import _ButtonLimiter
+
+    clock = FakeClock()
+    limiter = _ButtonLimiter(clock)
+    assert sum(limiter.allow() for _ in range(30)) == server_module.BUTTON_BURST
+    clock.now += 0.5
+    assert sum(limiter.allow() for _ in range(30)) == 5
 
 
 def test_busy_port_is_a_clear_error():

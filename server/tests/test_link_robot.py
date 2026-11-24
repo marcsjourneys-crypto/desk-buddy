@@ -249,6 +249,29 @@ def test_a_failed_send_closes_the_link():
     assert ws.closed_with == 1011
 
 
+def test_a_full_outbox_closes_the_link_1011(caplog):
+    from desk_buddy.link.robot import MAX_OUTBOX
+
+    ws = FakeWebSocket()
+
+    async def run():
+        link = RobotLink(ws, asyncio.get_running_loop())  # no sender: nothing drains
+        for _ in range(MAX_OUTBOX + 5):
+            link.send(b"\x00\x00")
+        await asyncio.sleep(0.05)
+        assert link.closed
+        size = link._outbox.qsize()
+        link.send(b"\x00\x00")  # ignored once closed
+        await asyncio.sleep(0.01)
+        assert link._outbox.qsize() == size
+        return link
+
+    asyncio.run(run())
+    assert ws.closed_with == 1011
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
 def test_a_send_to_a_disconnected_robot_is_not_a_warning(caplog):
     ws = FakeWebSocket(fail_after=0, error=WebSocketDisconnect(1001))
 

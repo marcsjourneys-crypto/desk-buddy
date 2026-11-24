@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 MAX_RECORD_SECONDS = 30.0
 MAX_SLEEP = 0.02  # so stop() takes effect within one chunk
+MAX_OUTBOX = 128  # about 2.5 s of 20 ms audio chunks; more means the robot isn't reading
 
 Send = Callable[[Any], None]  # thread-safe; takes a protocol dict or PCM bytes
 
@@ -145,6 +146,8 @@ class RobotLink:
         self.closed = False
         self.mic = RobotMic()
         self.player = RobotPlayer(self.send)
+        self._overflowed = False
+        self._overflow_close: asyncio.Task[None] | None = None  # kept so it isn't GC'd
 
     def send(self, item: Any) -> None:
         """Queue a protocol dict or PCM bytes. Safe from any thread and never blocks: it is
@@ -152,9 +155,22 @@ class RobotLink:
         if self.closed:
             return
         try:
-            self._loop.call_soon_threadsafe(self._outbox.put_nowait, item)
+            self._loop.call_soon_threadsafe(self._enqueue, item)
         except RuntimeError:  # loop already closed during shutdown
             pass
+
+    def _enqueue(self, item: Any) -> None:
+        """On the event loop. A full outbox means the robot stopped reading: close the link
+        (1011) so it reconnects, and drop the item."""
+        if self.closed:
+            return
+        if self._outbox.qsize() >= MAX_OUTBOX:
+            if not self._overflowed:
+                self._overflowed = True
+                log.warning("Robot send queue full (%d items): closing the link", MAX_OUTBOX)
+                self._overflow_close = self._loop.create_task(self.close(1011))
+            return
+        self._outbox.put_nowait(item)
 
     async def run_sender(self) -> None:
         """Runs until close(). A failed send closes the link (treated as a disconnect)."""
