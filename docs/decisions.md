@@ -30,3 +30,15 @@ Format: **Decision** — why · alternatives considered.
 - **New `.env` keys:** `LLM_PROVIDER`, `LLM_EFFORT` (default `low`), `PTT_KEY` (default `right_ctrl`).
 - **`anthropic` SDK 2.x uses `httpx2`**, not `httpx`.
 - **Async tests use `asyncio.run`**, so no pytest-asyncio.
+
+## 2026-11-23 — M2 personality
+
+- **Character: cheerful and calm, with the odd dry, witty line.** It's one prompt in `brain/personality.py`. The name is still TBD (currently Buddy).
+- **Emotion tags are read by a streaming parser** (`brain/emotion.py`). A missing or unknown tag means neutral, and known tags later in the reply are removed so they aren't spoken. · Alternatives: structured output, a separate classification call.
+- **Memory lasts until restart, capped at `HISTORY_TURNS` exchanges (default 20).** · Alternatives: forget after a period of idle time.
+- **Only what was heard is remembered.**
+  - A sentence counts once it starts playing.
+  - Failed turns, and turns interrupted before any speech, are dropped.
+- **Interruptions are noted on the user's next message, not in Buddy's stored reply.** In the first live test, Claude copied an "(interrupted)" marker from its own stored reply into a new reply, and the voice spoke it. · Alternatives: a marker at the end of the stored reply (the original design).
+- **Forget command: fixed phrases checked in code** ("new topic", "forget that", "start over"…, in `brain/memory.py`). · Alternatives: a Claude tool.
+- **Short replies are enforced by the prompt only** (`MAX_SENTENCES`, about thirty words), so "tell me three facts" still works.

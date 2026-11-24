@@ -53,8 +53,9 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 
 ## Personality
 
-- Original character (name TBD — placeholder **Buddy**). Do not use existing fictional characters or voice clones.
-- One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines for wake, sleep, errors.
+- Original character (name TBD; currently **Buddy**). Cheerful and calm, with the odd dry, witty line. Do not use existing fictional characters or voice clones.
+- One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines (error, refusal and "fresh start" now; wake and sleep in M6).
+- Remembers the conversation until restart: the last `HISTORY_TURNS` exchanges, and only what was actually heard. An interruption is noted on the user's next message, never in Buddy's stored reply. Saying "new topic", "forget that" or "start over" clears it (fixed phrases in `brain/memory.py`).
 - Every reply starts with an emotion tag: `[neutral] [happy] [sad] [surprised] [sleepy] [thinking] [curious]`. The server strips it from speech and sends it to the robot's eyes.
 - Replies are short by default (configurable max sentences). Spoken style: no markdown, no lists.
 

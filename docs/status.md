@@ -2,6 +2,24 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-23 — M2 personality done
+
+- **Built:**
+  - Character prompt.
+  - Emotion tags, shown in the log as `Buddy [happy]: …` and stripped from speech.
+  - Memory until restart (`HISTORY_TURNS`, default 20).
+  - "New topic" / "forget that" clears the memory.
+- **Plan:** `docs/plans/2026-11-23-m2-personality.md`.
+- **Tests:** 171 unit and 12 integration tests pass. The integration tests include a live Labrador follow-up.
+- **Voice check by the user:**
+  - The follow-up "Are they good hunters?" worked.
+  - "New topic" cleared the memory.
+  - Interrupts worked.
+  - The replies were short and calm.
+- **Fixed after the voice check:** Claude had copied the "(interrupted)" marker into a reply. Interruptions are now noted on the user's next message instead.
+- **Not checked by hand:** the M1 quick-tap check and the check with another window focused.
+- **Next:** M3, Obsidian dictation (`take_note` and `read_notes` tools).
+
 ## 2026-11-23 — M1 voice loop working end to end
 
 First live run: the user asked about owls and Buddy answered out loud. STT 666 ms, first token 1245 ms, first audio 1815 ms (from key release). Startup, reply and the "Bye" on exit are confirmed. Decisions, `CLAUDE.md` and `server/README.md` are updated.
