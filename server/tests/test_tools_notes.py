@@ -110,6 +110,8 @@ def test_folders_outside_the_vault_are_refused(tmp_path, folder):
     with pytest.raises(ToolError):
         vault.take_note("x", "idea", "T")
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+    with pytest.raises(ToolError):
+        vault.read_notes("2026-11-23")
 
 
 def test_custom_folder_names(tmp_path):
@@ -118,3 +120,35 @@ def test_custom_folder_names(tmp_path):
     vault.take_note("y", "idea", "T")
     assert (tmp_path / "Journal" / "2026-11-23.md").exists()
     assert (tmp_path / "Box" / "2026-11-23 T.md").exists()
+
+
+def test_read_notes_returns_notes_and_ideas_for_the_day(vault):
+    vault.take_note("Pick up dog food", "note", "")
+    vault.take_note("A lamp that dims.", "idea", "Lamp")
+    assert vault.read_notes("2026-11-23") == (
+        "Notes for Monday 23 November 2026:\n"
+        "- 16:38 Pick up dog food\n"
+        "Ideas:\n"
+        "- Lamp: A lamp that dims."
+    )
+
+
+def test_read_notes_empty_day(vault):
+    assert vault.read_notes("2026-11-22") == "Nothing noted on Sunday 22 November 2026."
+
+
+def test_read_notes_ignores_other_days(vault, tmp_path):
+    vault.take_note("today", "note", "")
+    assert "today" not in vault.read_notes("2026-11-24")
+
+
+@pytest.mark.parametrize("bad", ["yesterday", "23/11/2026", "2026-13-01", "../x"])
+def test_read_notes_bad_date(vault, bad):
+    with pytest.raises(ToolError, match="2026-11-23"):
+        vault.read_notes(bad)
+
+
+def test_read_notes_caps_long_days(vault):
+    for i in range(400):
+        vault.take_note(f"note number {i} " + "x" * 40, "note", "")
+    assert len(vault.read_notes("2026-11-23")) <= 4000
