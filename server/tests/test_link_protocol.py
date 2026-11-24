@@ -67,6 +67,18 @@ def test_error_text_never_contains_the_token():
     assert "s3cret" not in str(info.value)
 
 
+def test_hello_repr_masks_the_token():
+    msg = parse('{"type": "hello", "token": "s3cret-s3cret-s3cret", "fw_version": "0.1"}')
+    text = repr(msg)
+    assert "s3cret" not in text
+    assert "***" in text and "0.1" in text
+    assert msg.data["token"] == "s3cret-s3cret-s3cret"  # masked in repr only
+
+
+def test_other_message_repr_is_plain():
+    assert "down" in repr(parse('{"type": "button", "action": "down"}'))
+
+
 def test_server_messages():
     assert protocol.welcome() == {"type": "welcome"}
     assert protocol.state("idle") == {"type": "state", "name": "idle"}

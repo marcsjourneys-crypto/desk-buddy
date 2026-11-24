@@ -116,9 +116,11 @@ class Orchestrator:
         elif event == "reset":
             # A robot attached or detached: drop whatever was happening and wait.
             await self._interrupt()
-            if self.state is State.LISTENING:
-                self.mic.stop()
-            self._set_state(State.IDLE)
+            try:
+                if self.state is State.LISTENING:
+                    self.mic.stop()
+            finally:
+                self._set_state(State.IDLE)
 
     async def wait_idle(self) -> None:
         if self._turn:

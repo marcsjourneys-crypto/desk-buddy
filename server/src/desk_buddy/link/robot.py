@@ -21,7 +21,13 @@ Send = Callable[[Any], None]  # thread-safe; takes a protocol dict or PCM bytes
 
 class RobotMic:
     """Audio frames from the robot. The link calls begin()/end() on button down/up, so no
-    frame is lost while the orchestrator catches up; start()/stop() are the Mic protocol."""
+    frame is lost while the orchestrator catches up; start()/stop() are the Mic protocol.
+
+    Recording is driven by begin()/end() only: stop() takes the buffer but leaves recording
+    alone, so a fast re-press (the link has already begun the next clip when the
+    orchestrator handles the previous "up") keeps the start of the next clip.
+    begin(), end(), feed() and stop() are all called on the event-loop thread.
+    """
 
     def __init__(self, max_seconds: float = MAX_RECORD_SECONDS) -> None:
         self._buffer = PcmBuffer(max_seconds)
@@ -46,7 +52,6 @@ class RobotMic:
         """No-op: recording already began when the button went down."""
 
     def stop(self) -> bytes:
-        self._recording = False
         return self._buffer.take()
 
 
@@ -111,8 +116,12 @@ class RobotPlayer:
     def stop(self) -> None:
         with self._lock:
             self._generation += 1
-            if not self._closed:
+            if self._closed:
+                return
+            try:
                 self._send(protocol.audio_stop())
+            except Exception as exc:  # never abort the orchestrator's interrupt
+                log.debug("Couldn't send audio_stop: %s", exc)
 
     def close(self) -> None:
         with self._lock:

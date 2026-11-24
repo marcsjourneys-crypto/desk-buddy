@@ -27,6 +27,12 @@ class Message:
     type: str
     data: dict[str, Any] = field(default_factory=dict)
 
+    def __repr__(self) -> str:
+        data = self.data
+        if "token" in data:
+            data = {**data, "token": "***"}  # never show the hello token in logs
+        return f"Message(type={self.type!r}, data={data!r})"
+
 
 def parse(text: str) -> Message:
     try:

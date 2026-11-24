@@ -45,12 +45,17 @@ def test_mic_begin_clears_old_audio():
     assert mic.stop() == b"\x02\x00"
 
 
-def test_mic_stop_ends_recording():
+def test_mic_stop_takes_the_buffer_but_does_not_end_recording():
+    # A fast re-press: the orchestrator handles the first "up" (stop) after the link has
+    # already begun the second clip. The second clip's start must not be lost.
     mic = RobotMic()
     mic.begin()
     mic.feed(b"\x01\x00")
     assert mic.stop() == b"\x01\x00"
-    mic.feed(b"\x02\x00")
+    mic.feed(b"\x02\x00")  # still recording: begin() was not followed by end()
+    assert mic.stop() == b"\x02\x00"
+    mic.end()
+    mic.feed(b"\x03\x00")
     assert mic.stop() == b""
 
 
@@ -138,6 +143,15 @@ def test_close_makes_play_a_no_op():
     player.close()
     player.play(b"\x00" * CHUNK_BYTES, player.current_token())
     assert sent == []
+
+
+def test_stop_bumps_the_token_even_if_send_fails():
+    def send(item):
+        raise ConnectionError("socket gone")
+
+    player = RobotPlayer(send)
+    player.stop()  # must not raise: the orchestrator's interrupt must finish
+    assert player.current_token() == 1
 
 
 def test_stop_after_close_sends_nothing():

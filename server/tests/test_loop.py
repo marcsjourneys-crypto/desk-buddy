@@ -2,6 +2,8 @@ import asyncio
 import logging
 import threading
 
+import pytest
+
 from desk_buddy.audio import BYTES_PER_SECOND
 from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation
 from desk_buddy.brain.personality import ERROR_LINE, FORGET_LINE, REFUSAL_LINE
@@ -417,3 +419,42 @@ def test_reset_when_idle_does_nothing():
     assert mic.stops == 0
     assert parts["speaker"].stops == 0
     assert states == []
+
+
+def test_reset_goes_idle_even_if_the_mic_fails_to_stop():
+    class BrokenStopMic(FakeMic):
+        def stop(self):
+            super().stop()
+            raise OSError("device gone")
+
+    orch, _, states = make(mic=BrokenStopMic())
+
+    async def scenario():
+        await orch.handle("down")
+        with pytest.raises(OSError):
+            await orch.handle("reset")
+
+    asyncio.run(scenario())
+    assert orch.state is State.IDLE
+    assert states == [State.LISTENING, State.IDLE]
+
+
+def test_a_fresh_turn_after_reset_works_with_a_new_token():
+    speaker = FakeSpeaker(block=True)
+    orch, _, states = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("reset")
+        speaker.block = False
+        speaker.played.clear()
+        speaker.tokens.clear()
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert speaker.played == ["Hello there.", "How are you?"]
+    assert speaker.tokens == [1, 1]
+    assert orch.state is State.IDLE
+    assert states[-4:] == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]

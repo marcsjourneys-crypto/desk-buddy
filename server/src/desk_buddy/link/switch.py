@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Protocol
 
 from desk_buddy.link import protocol
 from desk_buddy.loop import Mic, Player, State
+
+log = logging.getLogger(__name__)
 
 
 class Robot(Protocol):
@@ -86,6 +89,13 @@ class SwitchedPlayer:
         with self._lock:
             self._generation += 1
             robot = self._switch.robot
-        self._pc.stop()
+        # Each device in its own try, so one failing device can't keep the other playing.
+        try:
+            self._pc.stop()
+        except Exception:
+            log.exception("Failed to stop the PC speaker")
         if robot is not None:
-            robot.player.stop()
+            try:
+                robot.player.stop()
+            except Exception:
+                log.exception("Failed to stop the robot's speaker")

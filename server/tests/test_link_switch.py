@@ -90,6 +90,32 @@ def test_stop_invalidates_tokens_and_stops_every_device():
     assert robot.player.stops == 1 and pc_speaker.stops == 1
 
 
+class BrokenPlayer(Player):
+    def stop(self):
+        super().stop()
+        raise ConnectionError("device gone")
+
+
+def test_a_failing_pc_stop_still_stops_the_robot():
+    pc_speaker = BrokenPlayer()
+    switch = DeviceSwitch(Mic(b"pc"), pc_speaker)
+    robot = Robot()
+    switch.attach(robot)
+    switch.player.stop()
+    assert pc_speaker.stops == 1 and robot.player.stops == 1
+    assert switch.player.current_token() == 1
+
+
+def test_a_failing_robot_stop_still_stops_the_pc():
+    switch, _, pc_speaker = make()
+    robot = Robot()
+    robot.player = BrokenPlayer()
+    switch.attach(robot)
+    switch.player.stop()
+    assert pc_speaker.stops == 1 and robot.player.stops == 1
+    assert switch.player.current_token() == 1
+
+
 def test_stop_without_a_robot_stops_the_pc_speaker():
     switch, _, pc_speaker = make()
     switch.player.stop()
