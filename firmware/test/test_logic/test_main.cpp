@@ -19,7 +19,8 @@ void test_in_out_cubic() {
   TEST_ASSERT_EQUAL_FLOAT(0.0625f, ease::inOutCubic(0.25f));
   TEST_ASSERT_EQUAL_FLOAT(0.5f, ease::inOutCubic(0.5f));
   TEST_ASSERT_EQUAL_FLOAT(1.0f, ease::inOutCubic(1));
-  TEST_ASSERT_EQUAL_FLOAT(1.0f, ease::inOutCubic(7));  // clamped
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, ease::inOutCubic(7));   // clamped
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, ease::inOutCubic(-1));  // clamped
 }
 
 void test_progress_survives_millis_wrap() {
@@ -67,6 +68,17 @@ void test_tween_retarget_starts_from_current() {
   t.to(eye::presets::happy(), 0, 200);
   t.to(eye::presets::idle(), 100, 200);  // mid-blend: starts from where it is now
   TEST_ASSERT_EQUAL_FLOAT(-0.8f, t.at(100).upper);
+  TEST_ASSERT_EQUAL_FLOAT(-1.0f, t.at(300).upper);  // and ends at the new target
+}
+
+void test_tween_set_and_settle() {
+  eye::Tween t;
+  t.set(eye::presets::idle());
+  TEST_ASSERT_FALSE(t.moving(0));
+  t.to(eye::presets::happy(), 0, 200);
+  t.settle(500);
+  // Half a millis() wrap later the old blend must not replay.
+  TEST_ASSERT_EQUAL_FLOAT(-0.6f, t.at(500 + 0x80000000u).upper);
 }
 
 void test_blinker() {
@@ -83,6 +95,24 @@ void test_blinker() {
   TEST_ASSERT_EQUAL_FLOAT(0.0f, b.amount(5999));
 }
 
+void test_blinker_default_is_not_blinking() {
+  eye::Blinker b;
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, b.amount(50));
+  TEST_ASSERT_TRUE(b.finished(50));
+}
+
+void test_blinker_symmetric() {
+  eye::Blinker b;
+  b.blinkNow(1000);
+  TEST_ASSERT_EQUAL_FLOAT(b.amount(1045), b.amount(1135));
+}
+
+void test_blinker_survives_millis_wrap() {
+  eye::Blinker b;
+  b.blinkNow(0xFFFFFFF0u);
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, b.amount(0xFFFFFFF0u + 90));
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -94,7 +124,11 @@ void setup() {
   RUN_TEST(test_same);
   RUN_TEST(test_tween);
   RUN_TEST(test_tween_retarget_starts_from_current);
+  RUN_TEST(test_tween_set_and_settle);
   RUN_TEST(test_blinker);
+  RUN_TEST(test_blinker_default_is_not_blinking);
+  RUN_TEST(test_blinker_symmetric);
+  RUN_TEST(test_blinker_survives_millis_wrap);
   UNITY_END();
 }
 

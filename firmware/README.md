@@ -26,6 +26,6 @@ Close the serial monitor before flashing or testing; only one program can use th
 - **PlatformIO Core 6.2 (pioarduino).** The platform needs Core 6.2 or newer, and the platform's own installer can't replace the running core on Windows.
   - Install it with PlatformIO closed:
     `& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" -m pip install "pioarduino==6.2.0"`
-  - Don't install `6.2.0.post1`: its version counts as older than 6.2.0, so the platform refuses it.
+  - Don't install `6.2.0.post1`. PlatformIO's semver check reads 6.2.0.post1 as a pre-release of 6.2.0, so the platform refuses it.
   - If `pio` breaks with a missing module (urllib3, certifi…), reinstall with `pip install --ignore-installed "pioarduino==6.2.0"`.
 - **Use PowerShell, not Git Bash.** ESP-IDF's tool installer refuses MSYS/MinGW shells ("MSys/Mingw is not supported"), and the compiler is then missing.

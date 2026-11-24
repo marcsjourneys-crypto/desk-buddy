@@ -23,6 +23,9 @@ constexpr int kRotation = 0;   // 0 = arc at the pin edge; change once the head 
 
 // One GC9A01 on the shared SPI2 bus. Only the left panel drives the shared reset line:
 // if both did, starting the right eye would reset the already-started left eye.
+// Each panel has its own Bus_SPI, and both use SPI2, which is also Arduino's default SPI
+// host. So never release() one panel (it would free the bus under the other), and anything
+// else that uses the global `SPI` object would end up on the eye pins.
 class Panel : public lgfx::LGFX_Device {
  public:
   Panel(int cs, int rst) {
@@ -139,6 +142,11 @@ void drawTest() {
 namespace eyes {
 
 bool begin() {
+  // Both chip selects high first, so the right panel ignores the left panel's init traffic.
+  for (int cs : {pins::kEyeCsLeft, pins::kEyeCsRight}) {
+    pinMode(cs, OUTPUT);
+    digitalWrite(cs, HIGH);
+  }
   leftPanel.init();  // left first: it owns the shared reset line
   rightPanel.init();
   for (int i = 0; i < 2; i++) {
@@ -150,6 +158,7 @@ bool begin() {
   sprite.setColorDepth(16);
   if (sprite.createSprite(kSprite, kSprite) == nullptr) {
     Serial.println("Eyes: no memory for the frame buffer");
+    sprite.deleteSprite();
     return false;
   }
   blinker.schedule(millis(), 2000);
@@ -187,6 +196,8 @@ bool show(const char* name) {
   if (testMode) clearPanels();  // the test ring is outside the sprite
   testMode = false;
   autoBlink = blinks;
+  // A fresh schedule: after a long sleep, the old one could be stale enough to wrap.
+  if (blinks) blinker.schedule(now, 3000 + esp_random() % 3000);
   dirty = true;
   for (auto& t : tweens) t.to(target, now, ms);
   return true;
@@ -197,6 +208,7 @@ void update(uint32_t now) {
   if (autoBlink && blinker.finished(now)) blinker.schedule(now, 3000 + esp_random() % 3000);
   const float b = blinker.amount(now);
   for (int i = 0; i < 2; i++) {
+    tweens[i].settle(now);
     eye::Params p = tweens[i].at(now);
     if (b > 0) p = eye::lerp(p, eye::closedLike(p), b);
     if (!dirty && eye::same(p, drawn[i])) continue;
@@ -207,7 +219,11 @@ void update(uint32_t now) {
 }
 
 float measureFps(uint32_t ms) {
-  if (!ready) return 0;
+  if (!ready || ms == 0) return 0;
+  if (testMode) {  // leave test mode, or the screen would stay frozen on the last frame
+    testMode = false;
+    clearPanels();
+  }
   const uint32_t start = millis();
   uint32_t frames = 0;
   while (millis() - start < ms) {

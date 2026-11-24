@@ -10,6 +10,7 @@ constexpr char kFwVersion[] = "0.1.0-m5";
 
 char line[64];
 size_t lineLen = 0;
+bool overflow = false;  // the current line didn't fit; reject it at the line end
 
 void blinkLed() {
   for (int i = 0; i < 3; i++) {
@@ -62,18 +63,27 @@ void handle(char* cmd) {
   }
 }
 
+// The monitor echoes what you type (monitor_echo), so the firmware doesn't.
 void pollSerial() {
   while (Serial.available()) {
     const char c = static_cast<char>(Serial.read());
     if (c == '\r' || c == '\n') {
       line[lineLen] = '\0';
-      if (lineLen > 0) {
-        Serial.printf("> %s\n", line);
+      if (overflow) {
+        Serial.printf("Line too long (max %u chars)\n", static_cast<unsigned>(sizeof(line) - 1));
+      } else if (lineLen > 0) {
         handle(line);
       }
       lineLen = 0;
+      overflow = false;
+    } else if (c == 0x08 || c == 0x7F) {  // backspace, DEL
+      if (lineLen) lineLen--;
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      // other control characters: ignore
     } else if (lineLen < sizeof(line) - 1) {
       line[lineLen++] = c;
+    } else {
+      overflow = true;
     }
   }
 }

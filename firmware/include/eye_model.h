@@ -83,6 +83,14 @@ class Tween {
   bool moving(uint32_t now) const {
     return duration_ > 0 && static_cast<uint32_t>(now - start_) < duration_;
   }
+  // Once the blend is over, hold the target for good. Without this, the last transition
+  // would replay when millis() comes round again (~49.7 days later).
+  void settle(uint32_t now) {
+    if (duration_ > 0 && static_cast<uint32_t>(now - start_) >= duration_) {
+      from_ = to_;
+      duration_ = 0;
+    }
+  }
 
  private:
   Params from_, to_;
@@ -95,10 +103,17 @@ class Blinker {
  public:
   static constexpr uint32_t kMs = 180;
 
-  void schedule(uint32_t now, uint32_t delay) { next_ = now + delay; }
-  void blinkNow(uint32_t now) { next_ = now; }
+  void schedule(uint32_t now, uint32_t delay) {
+    next_ = now + delay;
+    armed_ = true;
+  }
+  void blinkNow(uint32_t now) {
+    next_ = now;
+    armed_ = true;
+  }
 
   float amount(uint32_t now) const {
+    if (!armed_) return 0;
     const int32_t dt = static_cast<int32_t>(now - next_);
     if (dt < 0 || dt >= static_cast<int32_t>(kMs)) return 0;
     const float t = static_cast<float>(dt) / kMs;
@@ -106,11 +121,13 @@ class Blinker {
   }
   // True once the current blink is over (time to schedule the next one).
   bool finished(uint32_t now) const {
+    if (!armed_) return true;
     return static_cast<int32_t>(now - next_) >= static_cast<int32_t>(kMs);
   }
 
  private:
   uint32_t next_ = 0;
+  bool armed_ = false;  // no blink until schedule() or blinkNow()
 };
 
 }  // namespace eye
