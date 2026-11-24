@@ -1,4 +1,5 @@
 from desk_buddy.brain.emotion import EMOTIONS
+from desk_buddy.brain.memory import INTERRUPTED_NOTE
 from desk_buddy.brain.personality import (
     ERROR_LINE,
     FORGET_LINE,
@@ -20,7 +21,7 @@ def test_prompt_lists_every_emotion_tag():
 
 
 def test_prompt_explains_interrupted_marker():
-    assert "(interrupted)" in system_prompt(2)
+    assert INTERRUPTED_NOTE in system_prompt(2)
 
 
 def test_canned_lines_use_known_emotions_and_have_text():

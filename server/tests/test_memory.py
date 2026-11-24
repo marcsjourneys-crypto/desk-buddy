@@ -1,6 +1,6 @@
 import pytest
 
-from desk_buddy.brain.memory import Conversation, is_forget_command
+from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation, is_forget_command
 
 
 def test_messages_alternate_user_and_assistant_in_order():
@@ -75,3 +75,29 @@ def test_forget_phrases_match(text):
 )
 def test_near_misses_do_not_match(text):
     assert not is_forget_command(text)
+
+
+def test_interrupted_reply_is_stored_clean_and_noted_on_next_user_message():
+    c = Conversation()
+    c.add("q1", "[happy] A.", interrupted=True)
+    c.add("q2", "[neutral] B.")
+    msgs = c.messages()
+    assert msgs[1]["content"] == "[happy] A."
+    assert msgs[2]["content"] == f"{INTERRUPTED_NOTE} q2"
+    assert msgs[0]["content"] == "q1"
+
+
+def test_user_message_notes_only_an_interrupted_last_reply():
+    c = Conversation()
+    assert c.user_message("hi") == "hi"
+    c.add("q1", "A.", interrupted=True)
+    assert c.user_message("q2") == f"{INTERRUPTED_NOTE} q2"
+    c.add("q2", "B.")
+    assert c.user_message("q3") == "q3"
+
+
+def test_forget_clears_pending_interruption_note():
+    c = Conversation()
+    c.add("q1", "A.", interrupted=True)
+    c.forget()
+    assert c.user_message("q2") == "q2"

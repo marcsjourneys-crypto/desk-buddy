@@ -3,7 +3,7 @@ import logging
 import threading
 
 from desk_buddy.audio import BYTES_PER_SECOND
-from desk_buddy.brain.memory import Conversation
+from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation
 from desk_buddy.brain.personality import ERROR_LINE, FORGET_LINE, REFUSAL_LINE
 from desk_buddy.llm import LLMError, LLMRefusal
 from desk_buddy.loop import Orchestrator, State
@@ -314,10 +314,17 @@ def test_interrupt_remembers_only_what_started_playing():
         await orch.handle("up")
         assert await asyncio.to_thread(speaker.started.wait, 2)
         await orch.handle("down")  # interrupt during "Hello there."
+        speaker.block = False
+        await orch.handle("up")  # next question
+        await orch.wait_idle()
 
     asyncio.run(scenario())
-    assert len(parts["conversation"]) == 1  # remembered exactly once
-    assert parts["conversation"].messages()[1]["content"] == "[neutral] Hello there. (interrupted)"
+    conversation = parts["conversation"]
+    assert len(conversation) == 2
+    # Buddy's stored reply stays clean (Claude copies markers it sees in its own replies)...
+    assert conversation.messages()[1]["content"] == "[neutral] Hello there."
+    # ...and the next user message carries the note instead.
+    assert parts["chat"].prompts[1] == f"{INTERRUPTED_NOTE} hi buddy"
 
 
 class SlowChat:

@@ -17,7 +17,6 @@ from desk_buddy.brain.memory import Conversation, is_forget_command
 from desk_buddy.brain.personality import (
     ERROR_LINE,
     FORGET_LINE,
-    INTERRUPTED,
     REFUSAL_LINE,
     Line,
 )
@@ -183,9 +182,7 @@ class Orchestrator:
         if turn.failed or not turn.spoken:
             return
         reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken)
-        if not turn.complete:
-            reply += f" {INTERRUPTED}"
-        self.conversation.add(turn.user, reply)
+        self.conversation.add(turn.user, reply, interrupted=not turn.complete)
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         """Claude deltas -> emotion + sentences -> PCM, into the queue. None marks the end."""
@@ -201,7 +198,8 @@ class Orchestrator:
 
         try:
             history = self.conversation.messages()
-            async with contextlib.aclosing(self.chat.stream_reply(history, turn.user)) as deltas:
+            prompt = self.conversation.user_message(turn.user)
+            async with contextlib.aclosing(self.chat.stream_reply(history, prompt)) as deltas:
                 async for delta in deltas:
                     if first_token:
                         log.info("First token %.0f ms", self._ms())

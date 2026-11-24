@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from desk_buddy.brain.emotion import EMOTIONS
-
-INTERRUPTED = "(interrupted)"
+from desk_buddy.brain.memory import INTERRUPTED_NOTE
 
 
 class Line(NamedTuple):
@@ -39,5 +38,5 @@ question.
 Start every reply with exactly one emotion tag that fits your tone, chosen from: {tags}. \
 Use no other tags. For example: [curious] Ooh, what are you building?
 
-If one of your earlier replies ends with {INTERRUPTED}, the user cut you off there and \
-only heard what came before it."""
+A user message that starts with "{INTERRUPTED_NOTE}" means the user cut off your \
+previous reply and only heard part of it. Never write that note yourself."""
