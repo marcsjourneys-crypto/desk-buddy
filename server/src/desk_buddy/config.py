@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from desk_buddy.ptt import parse_key
 
@@ -25,6 +25,9 @@ ENV_KEYS = (
     "MAX_SENTENCES",
     "HISTORY_TURNS",
     "PTT_KEY",
+    "OBSIDIAN_VAULT_PATH",
+    "OBSIDIAN_DAILY_FOLDER",
+    "OBSIDIAN_IDEAS_FOLDER",
 )
 
 # The provider seam: each value maps to one Chat class in llm.create_chat().
@@ -55,6 +58,9 @@ class Settings:
     max_sentences: int = 2
     history_turns: int = 20
     ptt_key: str = "right_ctrl"
+    obsidian_vault_path: str = ""  # blank = note tools off
+    obsidian_daily_folder: str = "Daily"
+    obsidian_ideas_folder: str = "Ideas"
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -132,7 +138,33 @@ def load_settings(
         max_sentences=max_sentences,
         history_turns=history_turns,
         ptt_key=ptt_key,
+        obsidian_vault_path=_vault_path(get),
+        obsidian_daily_folder=_vault_folder(
+            get, "OBSIDIAN_DAILY_FOLDER", Settings.obsidian_daily_folder
+        ),
+        obsidian_ideas_folder=_vault_folder(
+            get, "OBSIDIAN_IDEAS_FOLDER", Settings.obsidian_ideas_folder
+        ),
     )
+
+
+def _vault_path(get: Callable[[str, str], str]) -> str:
+    raw = get("OBSIDIAN_VAULT_PATH", "")
+    if raw and not Path(raw).is_dir():
+        raise ConfigError(f"OBSIDIAN_VAULT_PATH is not an existing folder: {raw!r}")
+    return raw
+
+
+def _vault_folder(get: Callable[[str, str], str], key: str, default: str) -> str:
+    """A relative folder inside the vault: no drive (C:, C:rel, UNC), no root, no "..".
+
+    Parsed as a Windows path on every OS, so "/" and "\\" both count as separators.
+    """
+    raw = get(key, default)
+    path = PureWindowsPath(raw)
+    if path.drive or path.root or ".." in path.parts:
+        raise ConfigError(f"{key} must be a folder name inside the vault, got {raw!r}")
+    return raw
 
 
 def _positive_int(get: Callable[[str, str], str], key: str, default: int) -> int:

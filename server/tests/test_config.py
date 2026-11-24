@@ -146,3 +146,42 @@ def test_choice_error_shows_the_value_as_typed():
 def test_history_turns_is_read(tmp_path):
     s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "HISTORY_TURNS": "5"})
     assert s.history_turns == 5
+
+
+def test_obsidian_defaults():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.obsidian_vault_path == ""
+    assert s.obsidian_daily_folder == "Daily"
+    assert s.obsidian_ideas_folder == "Ideas"
+
+
+def test_obsidian_vault_path_is_read(tmp_path):
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k", "OBSIDIAN_VAULT_PATH": str(tmp_path)},
+    )
+    assert s.obsidian_vault_path == str(tmp_path)
+
+
+def test_missing_vault_folder_is_a_clear_error(tmp_path):
+    with pytest.raises(ConfigError, match="OBSIDIAN_VAULT_PATH"):
+        load_settings(
+            env_path=None,
+            environ={"ANTHROPIC_API_KEY": "k", "OBSIDIAN_VAULT_PATH": str(tmp_path / "nope")},
+        )
+
+
+@pytest.mark.parametrize("key", ["OBSIDIAN_DAILY_FOLDER", "OBSIDIAN_IDEAS_FOLDER"])
+@pytest.mark.parametrize(
+    "value", ["../outside", "C:\\abs", "/abs", "a/../../b", "C:abs", "\\\\server\\share"]
+)
+def test_note_folders_must_stay_inside_the_vault(key, value):
+    with pytest.raises(ConfigError, match=key):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
+
+
+def test_nested_note_folder_is_allowed():
+    s = load_settings(
+        env_path=None, environ={"ANTHROPIC_API_KEY": "k", "OBSIDIAN_DAILY_FOLDER": "Buddy/Daily"}
+    )
+    assert s.obsidian_daily_folder == "Buddy/Daily"
