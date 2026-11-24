@@ -185,3 +185,41 @@ def test_nested_note_folder_is_allowed():
         env_path=None, environ={"ANTHROPIC_API_KEY": "k", "OBSIDIAN_DAILY_FOLDER": "Buddy/Daily"}
     )
     assert s.obsidian_daily_folder == "Buddy/Daily"
+
+
+def test_robot_link_defaults():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.robot_token == ""
+    assert s.server_host == "127.0.0.1"
+    assert s.server_port == 8765
+
+
+def test_robot_token_must_be_long_enough():
+    with pytest.raises(ConfigError, match="ROBOT_TOKEN"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "ROBOT_TOKEN": "short"})
+
+
+def test_robot_token_error_does_not_leak_the_token():
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "ROBOT_TOKEN": "s3cret"})
+    assert "s3cret" not in str(excinfo.value)
+
+
+def test_robot_token_is_not_in_repr():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "ROBOT_TOKEN": "x" * 20})
+    assert s.robot_token == "x" * 20
+    assert "x" * 20 not in repr(s)
+
+
+def test_server_host_and_port_are_read():
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k", "SERVER_HOST": "0.0.0.0", "SERVER_PORT": "9000"},
+    )
+    assert (s.server_host, s.server_port) == ("0.0.0.0", 9000)
+
+
+@pytest.mark.parametrize("port", ["0", "70000", "abc"])
+def test_server_port_must_be_valid(port):
+    with pytest.raises(ConfigError, match="SERVER_PORT"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SERVER_PORT": port})

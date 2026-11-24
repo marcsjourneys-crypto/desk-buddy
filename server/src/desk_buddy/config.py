@@ -28,6 +28,9 @@ ENV_KEYS = (
     "OBSIDIAN_VAULT_PATH",
     "OBSIDIAN_DAILY_FOLDER",
     "OBSIDIAN_IDEAS_FOLDER",
+    "ROBOT_TOKEN",
+    "SERVER_HOST",
+    "SERVER_PORT",
 )
 
 # The provider seam: each value maps to one Chat class in llm.create_chat().
@@ -36,6 +39,7 @@ LLM_PROVIDERS = ("anthropic",)
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 STT_DEVICES = ("cpu", "cuda")
 TTS_ENGINES = ("sapi",)  # "piper" arrives later behind the same interface
+MIN_TOKEN_CHARS = 16
 
 
 _INLINE_COMMENT = re.compile(r"\s#")
@@ -61,6 +65,9 @@ class Settings:
     obsidian_vault_path: str = ""  # blank = note tools off
     obsidian_daily_folder: str = "Daily"
     obsidian_ideas_folder: str = "Ideas"
+    robot_token: str = field(default="", repr=False)  # blank = robot link off
+    server_host: str = "127.0.0.1"
+    server_port: int = 8765
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -145,7 +152,29 @@ def load_settings(
         obsidian_ideas_folder=_vault_folder(
             get, "OBSIDIAN_IDEAS_FOLDER", Settings.obsidian_ideas_folder
         ),
+        robot_token=_robot_token(get),
+        server_host=get("SERVER_HOST", Settings.server_host),
+        server_port=_port(get, "SERVER_PORT", Settings.server_port),
     )
+
+
+def _robot_token(get: Callable[[str, str], str]) -> str:
+    """Never put the token itself in an error message."""
+    token = get("ROBOT_TOKEN", "")
+    if token and len(token) < MIN_TOKEN_CHARS:
+        raise ConfigError(f"ROBOT_TOKEN must be at least {MIN_TOKEN_CHARS} characters")
+    return token
+
+
+def _port(get: Callable[[str, str], str], key: str, default: int) -> int:
+    raw = get(key, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 65535:
+        raise ConfigError(f"{key} must be a port number 1-65535, got {raw!r}")
+    return value
 
 
 def _vault_path(get: Callable[[str, str], str]) -> str:
