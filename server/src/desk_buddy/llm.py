@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import anthropic
 
 from desk_buddy.brain.personality import system_prompt
 from desk_buddy.config import Settings
+from desk_buddy.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +94,7 @@ class SentenceSplitter:
 
 
 MAX_TOKENS = 2048  # thinking counts toward this; spoken replies are short
+MAX_TOOL_ROUNDS = 3  # API calls per reply; the last one may not call tools
 
 
 class LLMError(Exception):
@@ -110,59 +113,113 @@ class Chat(Protocol):
     ) -> AsyncGenerator[str, None]: ...
 
 
-class ClaudeChat:
-    """Streaming chat. The caller owns the history (see brain.memory)."""
+def _llm_error(exc: anthropic.APIError) -> LLMError:
+    if isinstance(exc, anthropic.RateLimitError):
+        return LLMError("rate limited by the API")
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return LLMError("API key rejected (check ANTHROPIC_API_KEY)")
+    if isinstance(exc, anthropic.APIStatusError):
+        # status 200 here means an error event arrived mid-stream; type names it
+        return LLMError(f"API error {exc.status_code} ({getattr(exc, 'type', None)})")
+    if isinstance(exc, anthropic.APIConnectionError):
+        return LLMError("can't reach the API")
+    return LLMError(f"unexpected API error ({type(exc).__name__})")
 
-    def __init__(self, client: Any, *, model: str, effort: str, system: str) -> None:
+
+class ClaudeChat:
+    """Streaming chat with a tool loop. The caller owns the history (see brain.memory)."""
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        model: str,
+        effort: str,
+        system: str | Callable[[], str],
+        tools: ToolRegistry | None = None,
+    ) -> None:
         # client: anthropic.AsyncAnthropic (typed Any so tests can pass a fake)
         self._client = client
         self._model = model
         self._effort = effort
-        self._system = system
+        self._system = system if callable(system) else (lambda: system)
+        self._tools = tools or ToolRegistry()
 
     async def stream_reply(
         self, history: Sequence[Mapping[str, str]], user_text: str
     ) -> AsyncGenerator[str, None]:
-        """Yield text deltas as they arrive.
+        """Yield text deltas as they arrive, running tools between rounds.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
         after some text was already yielded, so callers must handle a partial reply.
         """
-        try:
-            async with self._client.messages.stream(
-                model=self._model,
-                max_tokens=MAX_TOKENS,
-                system=self._system,
-                output_config={"effort": self._effort},
-                messages=[*history, {"role": "user", "content": user_text}],
-            ) as stream:
-                async for text in stream.text_stream:
-                    yield text
-                message = await stream.get_final_message()
-        except anthropic.RateLimitError as exc:
-            raise LLMError("rate limited by the API") from exc
-        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
-            raise LLMError("API key rejected (check ANTHROPIC_API_KEY)") from exc
-        except anthropic.APIStatusError as exc:
-            # status 200 here means an error event arrived mid-stream; type names it
-            raise LLMError(f"API error {exc.status_code} ({getattr(exc, 'type', None)})") from exc
-        except anthropic.APIConnectionError as exc:
-            raise LLMError("can't reach the API") from exc
-        except anthropic.APIError as exc:
-            raise LLMError(f"unexpected API error ({type(exc).__name__})") from exc
-        if message.stop_reason == "refusal":
-            raise LLMRefusal("Claude declined to answer")
-        if message.stop_reason == "max_tokens":
-            log.warning("reply truncated: stop_reason=max_tokens (MAX_TOKENS=%d)", MAX_TOKENS)
+        messages: list[Any] = [*history, {"role": "user", "content": user_text}]
+        spoke = False
+        for round_no in range(1, MAX_TOOL_ROUNDS + 1):
+            params: dict[str, Any] = {
+                "model": self._model,
+                "max_tokens": MAX_TOKENS,
+                "system": self._system(),
+                "output_config": {"effort": self._effort},
+                "messages": messages,
+            }
+            if self._tools:
+                params["tools"] = self._tools.schemas()
+                if round_no == MAX_TOOL_ROUNDS:
+                    params["tool_choice"] = {"type": "none"}
+            first = True
+            try:
+                async with self._client.messages.stream(**params) as stream:
+                    async for text in stream.text_stream:
+                        if first and spoke:
+                            yield "\n"  # keep sentences from separate rounds apart
+                        first = False
+                        spoke = True
+                        yield text
+                    message = await stream.get_final_message()
+            except anthropic.APIError as exc:
+                raise _llm_error(exc) from exc
+            if message.stop_reason == "refusal":
+                raise LLMRefusal("Claude declined to answer")
+            if message.stop_reason == "max_tokens":
+                log.warning("reply truncated: stop_reason=max_tokens (MAX_TOKENS=%d)", MAX_TOKENS)
+                return
+            if message.stop_reason != "tool_use":
+                return
+            uses = [block for block in message.content if block.type == "tool_use"]
+            if not uses:
+                log.warning("stop_reason=tool_use but no tool_use blocks; ending the reply")
+                return
+            results = [await self._run_tool(block) for block in uses]
+            # New list each round: the content list goes back unchanged (thinking blocks too).
+            messages = [
+                *messages,
+                {"role": "assistant", "content": message.content},
+                {"role": "user", "content": results},
+            ]
+
+    async def _run_tool(self, block: Any) -> dict[str, Any]:
+        # If the turn is cancelled here the thread still finishes (a note may be saved),
+        # but the cancel propagates at once and the reply ends.
+        outcome = await asyncio.to_thread(self._tools.run, block.name, block.input)
+        result: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": outcome.text,
+        }
+        if outcome.is_error:
+            result["is_error"] = True
+        return result
 
 
-def create_chat(settings: Settings) -> Chat:
+def create_chat(settings: Settings, tools: ToolRegistry | None = None) -> Chat:
     """Build the chat client for settings.llm_provider. Add new providers here."""
     if settings.llm_provider == "anthropic":
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
             model=settings.llm_model,
             effort=settings.llm_effort,
-            system=system_prompt(settings.max_sentences),
+            system=lambda: system_prompt(settings.max_sentences, notes=bool(tools)),
+            tools=tools,
         )
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")

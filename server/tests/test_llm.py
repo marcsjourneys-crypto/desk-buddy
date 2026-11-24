@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import threading
 from types import SimpleNamespace
 
 import anthropic
@@ -7,14 +8,16 @@ import httpx2
 import pytest
 
 from desk_buddy.config import Settings
-from desk_buddy.llm import ClaudeChat, LLMError, LLMRefusal, create_chat
+from desk_buddy.llm import MAX_TOOL_ROUNDS, ClaudeChat, LLMError, LLMRefusal, create_chat
+from desk_buddy.tools.registry import Tool, ToolError, ToolRegistry
 
 URL = "https://api.anthropic.com/v1/messages"
 
 
 class FakeStream:
-    def __init__(self, deltas, stop_reason="end_turn", error=None, stream_error=None):
+    def __init__(self, deltas, stop_reason="end_turn", error=None, stream_error=None, content=None):
         self._deltas, self._stop_reason, self._error = deltas, stop_reason, error
+        self._content = content if content is not None else []
         self._stream_error = stream_error
         self.closed = False
 
@@ -38,18 +41,18 @@ class FakeStream:
         return gen()
 
     async def get_final_message(self):
-        return SimpleNamespace(stop_reason=self._stop_reason)
+        return SimpleNamespace(stop_reason=self._stop_reason, content=self._content)
 
 
 class FakeClient:
-    def __init__(self, stream: FakeStream):
+    def __init__(self, *streams: FakeStream):
         self.calls: list[dict] = []
         self.messages = SimpleNamespace(stream=self._stream)
-        self._s = stream
+        self._streams = list(streams)
 
     def _stream(self, **kwargs):
         self.calls.append(kwargs)
-        return self._s
+        return self._streams.pop(0)
 
 
 def collect(chat: ClaudeChat, text: str, history=()) -> list[str]:
@@ -59,9 +62,9 @@ def collect(chat: ClaudeChat, text: str, history=()) -> list[str]:
     return asyncio.run(run())
 
 
-def make_chat(stream: FakeStream) -> tuple[ClaudeChat, FakeClient]:
-    client = FakeClient(stream)
-    return ClaudeChat(client, model="m", effort="low", system="sys"), client
+def make_chat(*streams: FakeStream, tools=None) -> tuple[ClaudeChat, FakeClient]:
+    client = FakeClient(*streams)
+    return ClaudeChat(client, model="m", effort="low", system="sys", tools=tools), client
 
 
 def status_error(cls, status: int):
@@ -173,3 +176,158 @@ def test_breaking_out_early_closes_stream():
 
 def test_create_chat_builds_claude_for_anthropic_provider():
     assert isinstance(create_chat(Settings(anthropic_api_key="k")), ClaudeChat)
+
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+
+def note_registry(calls):
+    def take_note(text):
+        calls.append(text)
+        return "Saved"
+
+    return ToolRegistry([Tool("take_note", "d", SCHEMA, take_note)])
+
+
+def tool_use(id="t1", text="buy milk"):
+    return SimpleNamespace(type="tool_use", id=id, name="take_note", input={"text": text})
+
+
+def test_no_tools_sends_no_tool_params():
+    chat, client = make_chat(FakeStream(["hi"]))
+    collect(chat, "hi")
+    assert "tools" not in client.calls[0]
+    assert "tool_choice" not in client.calls[0]
+
+
+def test_tool_round_trip_streams_text_around_the_tool():
+    calls = []
+    thinking = SimpleNamespace(type="thinking", thinking="", signature="sig")
+    first = FakeStream(
+        ["Let me note that."], stop_reason="tool_use", content=[thinking, tool_use()]
+    )
+    second = FakeStream(["Noted."])
+    chat, client = make_chat(first, second, tools=note_registry(calls))
+    assert collect(chat, "note buy milk") == ["Let me note that.", "\n", "Noted."]
+    assert calls == ["buy milk"]
+    assert client.calls[0]["tools"][0]["name"] == "take_note"
+    sent = client.calls[1]["messages"]
+    assert sent[-2] == {"role": "assistant", "content": [thinking, tool_use()]}
+    assert sent[-1] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Saved"}],
+    }
+
+
+def test_parallel_tool_calls_return_in_one_message():
+    calls = []
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use("a", "x"), tool_use("b", "y")])
+    chat, client = make_chat(first, FakeStream(["ok"]), tools=note_registry(calls))
+    collect(chat, "two notes")
+    results = client.calls[1]["messages"][-1]["content"]
+    assert [r["tool_use_id"] for r in results] == ["a", "b"]
+    assert calls == ["x", "y"]
+
+
+def test_tool_error_is_sent_back_flagged():
+    def broken(text):
+        raise ToolError("disk full")
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, broken)])
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use()])
+    chat, client = make_chat(first, FakeStream(["Sorry."]), tools=registry)
+    collect(chat, "note it")
+    assert client.calls[1]["messages"][-1]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "t1",
+        "content": "disk full",
+        "is_error": True,
+    }
+
+
+def test_last_round_forbids_tools():
+    calls = []
+    looping = [
+        FakeStream([], stop_reason="tool_use", content=[tool_use(str(i))])
+        for i in range(MAX_TOOL_ROUNDS - 1)
+    ]
+    chat, client = make_chat(*looping, FakeStream(["Done."]), tools=note_registry(calls))
+    assert collect(chat, "go") == ["Done."]
+    assert len(client.calls) == MAX_TOOL_ROUNDS
+    assert "tool_choice" not in client.calls[0]
+    assert client.calls[-1]["tool_choice"] == {"type": "none"}
+
+
+def test_refusal_stops_before_any_tool_runs():
+    calls = []
+    first = FakeStream([], stop_reason="refusal", content=[tool_use()])
+    chat, _ = make_chat(first, tools=note_registry(calls))
+    with pytest.raises(LLMRefusal):
+        collect(chat, "x")
+    assert calls == []
+
+
+def test_system_prompt_can_be_rebuilt_per_request():
+    stamps = iter(["s1", "s2"])
+    client = FakeClient(FakeStream(["a"]), FakeStream(["b"]))
+    chat = ClaudeChat(client, model="m", effort="low", system=lambda: next(stamps))
+    collect(chat, "one")
+    collect(chat, "two")
+    assert [c["system"] for c in client.calls] == ["s1", "s2"]
+
+
+def test_breaking_out_in_a_later_round_closes_that_stream():
+    calls = []
+    first = FakeStream(["One."], stop_reason="tool_use", content=[tool_use()])
+    second = FakeStream(["Two", "three"])
+    chat, _ = make_chat(first, second, tools=note_registry(calls))
+
+    async def run():
+        async with contextlib.aclosing(chat.stream_reply([], "hi")) as agen:
+            async for d in agen:
+                if d == "Two":
+                    break
+
+    asyncio.run(run())
+    assert first.closed and second.closed
+
+
+def test_tool_use_stop_without_tool_blocks_ends_the_reply():
+    chat, client = make_chat(FakeStream(["Hm."], stop_reason="tool_use"), tools=note_registry([]))
+    assert collect(chat, "x") == ["Hm."]
+    assert len(client.calls) == 1
+
+
+def test_cancel_while_a_tool_runs_propagates():
+    started, release = threading.Event(), threading.Event()
+
+    def slow(text):
+        started.set()
+        release.wait(5)
+        return "Saved"
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, slow)])
+    first = FakeStream(["One."], stop_reason="tool_use", content=[tool_use()])
+    chat, client = make_chat(first, FakeStream(["never"]), tools=registry)
+
+    async def consume():
+        async with contextlib.aclosing(chat.stream_reply([], "hi")) as agen:
+            async for _ in agen:
+                pass
+
+    async def run():
+        task = asyncio.create_task(consume())
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+
+    asyncio.run(run())
+    assert first.closed
+    assert len(client.calls) == 1
