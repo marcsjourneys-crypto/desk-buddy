@@ -27,15 +27,15 @@ struct Level {
 
 inline Level level(const int16_t* x, size_t n) {
   if (n == 0) return {-96.0f, -96.0f};
-  double sum = 0;
+  uint64_t sum = 0;  // integer maths: the S3 has no double-precision FPU
   int peak = 0;
   for (size_t i = 0; i < n; i++) {
     const int v = x[i];
-    sum += static_cast<double>(v) * v;
+    sum += static_cast<uint32_t>(v * v);
     const int a = v < 0 ? -v : v;
     if (a > peak) peak = a;
   }
-  return {toDb(sqrtf(static_cast<float>(sum / n))), toDb(static_cast<float>(peak))};
+  return {toDb(sqrtf(static_cast<float>(sum) / n)), toDb(static_cast<float>(peak))};
 }
 
 // True when every sample is (nearly) the same: no mic on the line.
@@ -49,25 +49,27 @@ inline bool isFlat(const int16_t* x, size_t n) {
 }
 
 // Linear fade in/out over `fade` samples at each end of a `total`-sample sound.
+// Symmetric: the first and last samples are 0. Outside the sound it is 0.
 inline float fadeGain(size_t i, size_t total, size_t fade) {
+  if (i >= total) return 0;
   if (fade == 0) return 1;
-  if (i < fade) return static_cast<float>(i) / fade;
   const size_t left = total - 1 - i;
-  if (left < fade) return static_cast<float>(left) / fade;
-  return 1;
+  const size_t edge = i < left ? i : left;
+  return edge < fade ? static_cast<float>(edge) / fade : 1.0f;
 }
 
+// `volume` must be 0..100 (callers clamp it), so the result always fits in int16_t.
 inline int16_t scale(int16_t s, int volume) {
   return static_cast<int16_t>(static_cast<int32_t>(s) * volume / 100);
 }
 
-// n samples of a sine; `phase` carries on across blocks.
+// n samples of a sine; `phase` carries on across blocks. `amp` must be below 32767.
 inline void tone(int16_t* out, size_t n, float hz, float amp, float& phase) {
   const float step = 2 * static_cast<float>(M_PI) * hz / kRate;
   for (size_t i = 0; i < n; i++) {
     out[i] = static_cast<int16_t>(amp * sinf(phase));
     phase += step;
-    if (phase > 2 * static_cast<float>(M_PI)) phase -= 2 * static_cast<float>(M_PI);
+    while (phase > 2 * static_cast<float>(M_PI)) phase -= 2 * static_cast<float>(M_PI);
   }
 }
 

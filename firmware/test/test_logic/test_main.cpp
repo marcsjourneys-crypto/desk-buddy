@@ -144,6 +144,9 @@ void test_is_flat() {
   TEST_ASSERT_TRUE(dsp::isFlat(zeros, 50));
   zeros[10] = 300;
   TEST_ASSERT_FALSE(dsp::isFlat(zeros, 50));
+  TEST_ASSERT_TRUE(dsp::isFlat(zeros, 0));
+  const int16_t jitter[4] = {5, 6, 5, 6};  // hi - lo == 1 still counts as flat
+  TEST_ASSERT_TRUE(dsp::isFlat(jitter, 4));
 }
 
 void test_fade_gain() {
@@ -155,10 +158,20 @@ void test_fade_gain() {
   TEST_ASSERT_EQUAL_FLOAT(1.0f, dsp::fadeGain(3, 100, 0));
 }
 
+void test_fade_gain_edges() {
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, dsp::fadeGain(0, 10, 10));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, dsp::fadeGain(9, 10, 10));
+  // Fades longer than half the sound meet in the middle, symmetrically.
+  TEST_ASSERT_EQUAL_FLOAT(dsp::fadeGain(4, 10, 10), dsp::fadeGain(5, 10, 10));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, dsp::fadeGain(100, 100, 10));  // past the end
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, dsp::fadeGain(0, 0, 10));      // empty sound
+}
+
 void test_scale_volume() {
   TEST_ASSERT_EQUAL_INT16(5000, dsp::scale(10000, 50));
   TEST_ASSERT_EQUAL_INT16(0, dsp::scale(10000, 0));
   TEST_ASSERT_EQUAL_INT16(-32768, dsp::scale(-32768, 100));
+  TEST_ASSERT_EQUAL_INT16(-1, dsp::scale(-3, 50));  // truncates toward zero
 }
 
 void test_tone_continues_phase() {
@@ -172,11 +185,21 @@ void test_tone_continues_phase() {
   TEST_ASSERT_EQUAL_INT16(all[15], b[7]);
 }
 
+void test_tone_values() {
+  int16_t a[16];
+  float phase = 0;
+  dsp::tone(a, 16, 1000, 10000, phase);  // 16 samples per cycle at 16 kHz
+  TEST_ASSERT_INT16_WITHIN(2, 10000, a[4]);  // quarter cycle: the peak
+  TEST_ASSERT_INT16_WITHIN(2, 0, a[8]);      // half cycle: back through zero
+}
+
 void test_servo_pulse() {
   TEST_ASSERT_EQUAL_UINT32(1500, servo::angleToPulseUs(0));
   TEST_ASSERT_EQUAL_UINT32(2500, servo::angleToPulseUs(90));
   TEST_ASSERT_EQUAL_UINT32(500, servo::angleToPulseUs(-90));
   TEST_ASSERT_EQUAL_UINT32(2500, servo::angleToPulseUs(120));  // clamped
+  TEST_ASSERT_EQUAL_UINT32(1000, servo::angleToPulseUs(-45));
+  TEST_ASSERT_EQUAL_UINT32(500, servo::angleToPulseUs(-120));  // clamped
   TEST_ASSERT_EQUAL_UINT32(1228, servo::pulseToDuty(1500));     // 14-bit duty at 50 Hz
   TEST_ASSERT_EQUAL_UINT32(409, servo::pulseToDuty(500));
 }
@@ -197,6 +220,29 @@ void test_servo_motion() {
   TEST_ASSERT_TRUE(m.done(2000));
   m.moveTo(90, 90, 3000, 90);  // no distance: done at once
   TEST_ASSERT_TRUE(m.done(3000));
+}
+
+void test_servo_motion_bad_speed() {
+  servo::Motion m;
+  m.moveTo(0, 90, 1000, 0);
+  TEST_ASSERT_TRUE(m.done(1000));
+  TEST_ASSERT_EQUAL_FLOAT(90.0f, m.at(1000));
+  m.moveTo(0, 90, 2000, -10);
+  TEST_ASSERT_TRUE(m.done(2000));
+}
+
+void test_servo_motion_reverse() {
+  servo::Motion m;
+  m.moveTo(90, 0, 1000, 90);
+  TEST_ASSERT_EQUAL_FLOAT(45.0f, m.at(1500));
+}
+
+void test_servo_motion_across_millis_wrap() {
+  servo::Motion m;
+  const uint32_t start = 0xFFFFFE0Cu;  // 500 ms before millis() wraps
+  m.moveTo(0, 90, start, 90);
+  TEST_ASSERT_EQUAL_FLOAT(45.0f, m.at(start + 500));
+  TEST_ASSERT_TRUE(m.done(start + 1000));
 }
 
 void setup() {
@@ -220,11 +266,16 @@ void setup() {
   RUN_TEST(test_level);
   RUN_TEST(test_is_flat);
   RUN_TEST(test_fade_gain);
+  RUN_TEST(test_fade_gain_edges);
   RUN_TEST(test_scale_volume);
   RUN_TEST(test_tone_continues_phase);
+  RUN_TEST(test_tone_values);
   RUN_TEST(test_servo_pulse);
   RUN_TEST(test_servo_clamp);
   RUN_TEST(test_servo_motion);
+  RUN_TEST(test_servo_motion_bad_speed);
+  RUN_TEST(test_servo_motion_reverse);
+  RUN_TEST(test_servo_motion_across_millis_wrap);
   UNITY_END();
 }
 

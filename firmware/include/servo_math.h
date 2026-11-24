@@ -34,7 +34,10 @@ struct Motion {
     from = current;
     to = target;
     start = now;
-    duration = static_cast<uint32_t>(fabsf(target - current) / degPerSec * 1000);
+    // A zero or negative speed means "go now" rather than dividing by it.
+    duration = degPerSec > 0
+                   ? static_cast<uint32_t>(fabsf(target - current) / degPerSec * 1000.0f + 0.5f)
+                   : 0;
   }
   float at(uint32_t now) const {
     return ease::lerp(from, to, ease::inOutCubic(ease::progress(now, start, duration)));

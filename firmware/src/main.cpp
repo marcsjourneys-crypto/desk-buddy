@@ -36,6 +36,7 @@ void printInfo() {
   }
   Serial.printf("Heap free: %lu KB\n", static_cast<unsigned long>(ESP.getFreeHeap() / 1024));
   Serial.printf("Uptime: %lu s\n", static_cast<unsigned long>(millis() / 1000));
+  Serial.printf("Speaker write errors: %lu\n", static_cast<unsigned long>(audio::writeErrors()));
 }
 
 void printHelp() {
@@ -44,7 +45,7 @@ void printHelp() {
   Serial.println("  info                      chip, flash, PSRAM, memory, uptime");
   Serial.println("  eyes idle|happy|sleep|blink|test");
   Serial.println("  fps                       eye frame rate over 3 s");
-  Serial.println("  tone [hz]                 1 s test tone (440 Hz default)");
+  Serial.println("  tone [50-7900]            1 s test tone in Hz (440 default)");
   Serial.println("  vol <0-100>               speaker volume (starts at 20)");
 }
 
@@ -61,15 +62,30 @@ void handle(char* cmd) {
   } else if (!strcmp(name, "fps")) {
     Serial.printf("Eyes: %.1f fps (both eyes)\n", eyes::measureFps(3000));
   } else if (!strcmp(name, "tone")) {
-    const float hz = arg ? atof(arg) : 440;
-    if (hz < 50 || hz > 8000) {
-      Serial.println("Usage: tone [50-8000]");
+    float hz = 440;
+    bool ok = true;
+    if (arg) {
+      char* end = nullptr;
+      hz = strtof(arg, &end);
+      ok = end != arg && *end == '\0';
+    }
+    // Written so NaN fails too. 7900 stays clear of the 8 kHz Nyquist limit.
+    if (!ok || !(hz >= 50 && hz <= 7900)) {
+      Serial.println("Usage: tone [50-7900]");
     } else {
       Serial.printf("Tone %.0f Hz at volume %d\n", hz, audio::volume());
       audio::playTone(hz, 1000);
     }
   } else if (!strcmp(name, "vol")) {
-    if (arg) audio::setVolume(atoi(arg));
+    if (arg) {
+      char* end = nullptr;
+      const long v = strtol(arg, &end, 10);
+      if (end == arg || *end != '\0') {
+        Serial.println("Usage: vol <0-100>");
+        return;
+      }
+      audio::setVolume(static_cast<int>(v < 0 ? 0 : (v > 100 ? 100 : v)));
+    }
     Serial.printf("Volume %d\n", audio::volume());
   } else {
     Serial.printf("Unknown command '%s'\n", name);
