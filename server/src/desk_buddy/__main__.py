@@ -14,6 +14,7 @@ from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.stt import WhisperTranscriber
+from desk_buddy.tools import build_tools
 from desk_buddy.tts import SapiSynthesizer
 
 log = logging.getLogger("desk_buddy")
@@ -73,7 +74,12 @@ async def _run(settings: Settings) -> None:
         stack.callback(mic.close)
         speaker = Speaker()
         stack.callback(speaker.close)
-        chat = create_chat(settings)
+        tools = build_tools(settings)
+        log.info(
+            "Note tools: %s",
+            f"on ({settings.obsidian_vault_path})" if tools else "off (no OBSIDIAN_VAULT_PATH)",
+        )
+        chat = create_chat(settings, tools)
         orchestrator = Orchestrator(
             mic=mic,
             transcriber=transcriber,

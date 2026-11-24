@@ -65,7 +65,7 @@ def fakes(monkeypatch, calls):
     monkeypatch.setattr(entry, "SapiSynthesizer", FakeSynthesizer)
     monkeypatch.setattr(entry, "Microphone", FakeMicrophone)
     monkeypatch.setattr(entry, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(entry, "create_chat", lambda settings: object())
+    monkeypatch.setattr(entry, "create_chat", lambda settings, tools=None: object())
     monkeypatch.setattr(entry, "Orchestrator", FakeOrchestrator)
     monkeypatch.setattr(entry, "KeyWatcher", FakeWatcher)
 
