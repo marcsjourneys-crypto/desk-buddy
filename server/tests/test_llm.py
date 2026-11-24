@@ -109,6 +109,13 @@ def test_max_tokens_logs_warning_and_does_not_raise(caplog):
     assert "max_tokens" in caplog.text
 
 
+def test_max_tokens_before_any_text_is_an_error():
+    # e.g. the budget ran out on thinking or a tool call: silence would be confusing
+    chat, _ = make_chat(FakeStream([], stop_reason="max_tokens"))
+    with pytest.raises(LLMError, match="ran out of room"):
+        collect(chat, "hi")
+
+
 def test_connection_error_becomes_llm_error():
     request = httpx2.Request("POST", URL)
     chat, _ = make_chat(FakeStream([], error=anthropic.APIConnectionError(request=request)))

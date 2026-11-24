@@ -183,6 +183,8 @@ class ClaudeChat:
                 raise LLMRefusal("Claude declined to answer")
             if message.stop_reason == "max_tokens":
                 log.warning("reply truncated: stop_reason=max_tokens (MAX_TOKENS=%d)", MAX_TOKENS)
+                if not spoke:
+                    raise LLMError("reply ran out of room before saying anything")
                 return
             if message.stop_reason != "tool_use":
                 return
