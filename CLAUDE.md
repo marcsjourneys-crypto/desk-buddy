@@ -42,7 +42,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 ## Server stack (decided)
 
 - Python 3.12+, managed with uv. Tests with pytest.
-- Async core: asyncio + websockets (or FastAPI if the dashboard needs it — decide in M4).
+- Async core: asyncio + websockets, or FastAPI if the dashboard needs it — decide in M4. FastAPI is likely, since the planned web UI covers settings, personality and expressions.
 - Python comes from uv's own builds only (`python-preference = "only-managed"`). The Microsoft Store Python can't open microphones.
 - VAD: Silero VAD — the ONNX model bundled with faster-whisper (`vad_filter`), no PyTorch.
 - Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
@@ -115,5 +115,9 @@ Anyone (or any TV) near the robot can talk to it.
 - **M5 – Firmware bring-up** (can run in parallel with M1–M4): blink + PSRAM check, one eye, two eyes, mic levels, speaker tone, record/playback loopback, servo sweep with easing.
 - **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state.
 - **M7 – PC computer control.** Spotify search via Web API (free dev key) and playback via `spotify:` URIs / Web API (remote playback control needs Premium), media keys via Win32 `SendInput` (ctypes), allowlisted apps (launched by full exe path, argument lists) and sites, master volume. All safety rules above.
-- **M8 – Dashboard.** Local web page: live state, transcript, last actions, settings (incl. computer-control switch).
+- **M8 – Dashboard.** Local web page: live state, transcript, last actions, and settings, including:
+  - the computer-control switch;
+  - the vault path and other non-secret settings, which move from `.env` to a settings file the UI edits (secrets stay in `.env`);
+  - personality editing (the prompt and canned lines move to an editable file).
+- **M9 – Expression library** (after M6). Design and preview eye expressions in the browser and map them to emotions.
 - **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.

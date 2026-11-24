@@ -42,3 +42,10 @@ Format: **Decision** — why · alternatives considered.
 - **Interruptions are noted on the user's next message, not in Buddy's stored reply.** In the first live test, Claude copied an "(interrupted)" marker from its own stored reply into a new reply, and the voice spoke it. · Alternatives: a marker at the end of the stored reply (the original design).
 - **Forget command: fixed phrases checked in code** ("new topic", "forget that", "start over"…, in `brain/memory.py`). · Alternatives: a Claude tool.
 - **Short replies are enforced by the prompt only** (`MAX_SENTENCES`, about thirty words), so "tell me three facts" still works.
+
+## 2026-11-23 — M3 design and roadmap
+
+- **Buddy gets an Obsidian vault of its own.** Daily notes go in `Daily/YYYY-MM-DD.md` and ideas in `Ideas/YYYY-MM-DD <title>.md`. Buddy only appends and creates; it never edits or deletes. · Alternatives: write into the user's main vault, match an existing daily-notes plugin.
+- **Dictated notes are lightly cleaned by Claude**: mishearings, punctuation and filler are fixed, and Buddy confirms briefly. · Alternatives: verbatim, summarised.
+- **Tools run in our own streaming loop inside `ClaudeChat`**, up to 3 rounds, with `tool_choice: none` on the last round and strict schemas. · Alternatives: the SDK's beta tool runner; catching note phrases in code without Claude.
+- **Planned browser UI.** M8 grows to cover settings (the vault path and other non-secret settings move to a UI-editable file; secrets stay in `.env`) and personality editing. A new M9 adds an eye-expression library after M6. This makes FastAPI the likely M4 choice.
