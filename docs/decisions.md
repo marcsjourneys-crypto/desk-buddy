@@ -49,3 +49,13 @@ Format: **Decision** — why · alternatives considered.
 - **Dictated notes are lightly cleaned by Claude**: mishearings, punctuation and filler are fixed, and Buddy confirms briefly. · Alternatives: verbatim, summarised.
 - **Tools run in our own streaming loop inside `ClaudeChat`**, up to 3 rounds, with `tool_choice: none` on the last round and strict schemas. · Alternatives: the SDK's beta tool runner; catching note phrases in code without Claude.
 - **Planned browser UI.** M8 grows to cover settings (the vault path and other non-secret settings move to a UI-editable file; secrets stay in `.env`) and personality editing. A new M9 adds an eye-expression library after M6. This makes FastAPI the likely M4 choice.
+
+## 2026-11-23 — M3 Obsidian dictation
+
+- **The vault boundary is checked lexically** (`os.path.abspath` plus `is_relative_to`), not with `Path.resolve()`. On Windows, `resolve()` sometimes returned `\\?\` paths depending on timing, so the check failed at random. Buddy only writes paths it builds itself, and file names are sanitised by `safe_title`. · Alternatives: `resolve()` (follows symlinks, but flaky here).
+- **Folder settings are validated with `PureWindowsPath`.** A drive, a root or `..` is rejected, including drive-relative paths like `C:x`. A plain string check let `C:x` through.
+- **Logs show only an 80-character preview of each tool result.** That's enough to see that a note was saved without copying everything you dictate into the console log.
+- **Running out of tokens before any text plays the error line.** A tool round can use up `MAX_TOKENS` before Buddy says anything, and silence would be confusing.
+- **To do before M7:** text that `read_notes` returns comes from files, not from the user. Before computer-control tools exist, it must be marked as untrusted so a planted note can't steer Buddy (prompt injection).
+- **Known minor issue:** in the voice check, Buddy repeated the prompt's example confirmation ("Noted: pick up dog food.") word for word. Harmless; vary the example if it becomes repetitive.
+- **Voice check passed (user):** a daily note, an idea file whose misheard title was cleaned up, and a read-back summary. First audio took 2.5–3.8 s with a tool round, against about 1.8 s without one.

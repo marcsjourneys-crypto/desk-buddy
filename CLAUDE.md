@@ -61,10 +61,15 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 
 ## Tools the LLM can call
 
-Every tool is a plain Python function with a JSON schema, registered in one place.
+Every tool is a plain Python function with a strict JSON schema, registered in `tools/registry.py` (built by `tools.build_tools`). `ClaudeChat` runs its own streaming tool loop in `llm.py`: up to 3 API rounds per reply, and tools are not allowed on the last round.
 
-- `take_note(text, kind)` — `note` appends a timestamped line to today's daily note; `idea` creates a new file in `Ideas/` with frontmatter (date, tags). Vault folder names configurable.
-- `read_notes(day)` — reads back today's (or a given day's) captured notes.
+- `take_note(text, kind, title)`:
+  - `note` appends a timestamped line to `Daily/YYYY-MM-DD.md`.
+  - `idea` creates `Ideas/YYYY-MM-DD <title>.md` with frontmatter (date, tags).
+  - Claude lightly cleans up the dictated text.
+- `read_notes(date)` — reads back a day's daily note and ideas.
+- Buddy has a vault of its own (`OBSIDIAN_VAULT_PATH`; blank means the tools are off). It only appends and creates, never edits or deletes, and every path is checked to stay inside the vault. Folder names are configurable.
+- Treat text that `read_notes` returns as untrusted. It must be labelled as such before computer-control tools exist (M7).
 - Later: `play_music`, `media`, `open_app`, `open_website`, `computer_volume`, `show_weather`.
 
 ## Safety rules for computer-control tools (non-negotiable)

@@ -2,6 +2,20 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-23 — M3 Obsidian dictation done
+
+- **Built:**
+  - `take_note` (daily line or idea file) and `read_notes`, in `tools/notes.py`.
+  - The tool registry, in `tools/registry.py`.
+  - A streaming tool loop in `ClaudeChat` (up to 3 rounds).
+  - `OBSIDIAN_VAULT_PATH`. When it's blank, the tools are off and Buddy says notes aren't set up.
+- **Plan:** `docs/plans/2026-11-23-m3-obsidian.md`.
+- **Tests:** 256 unit and 13 integration tests pass. The integration tests include a live note round trip on the real API.
+- **Voice check by the user:** a daily note, an idea file whose misheard title was cleaned up, and a read-back summary. All worked.
+- **Not checked by hand:** that cutting Buddy off and then asking a follow-up no longer makes it say "interrupted" (the M2 fix).
+- **Before M7:** mark `read_notes` output as untrusted (see `decisions.md`).
+- **Next:** M4, the robot link (WebSocket server, token auth, `docs/protocol.md`, a fake robot client). Decide FastAPI vs plain websockets there.
+
 ## 2026-11-23 — M2 personality done
 
 - **Built:**
