@@ -145,10 +145,25 @@ class RunningServer:
     server: uvicorn.Server
     task: asyncio.Task[None]
     port: int
+    stopping: bool = False
+
+    def __post_init__(self) -> None:
+        self.task.add_done_callback(self._on_done)
 
     async def stop(self) -> None:
+        self.stopping = True
         self.server.should_exit = True
         await self.task
+
+    def _on_done(self, task: asyncio.Task[None]) -> None:
+        if self.stopping:
+            return
+        if task.cancelled():
+            log.error("Robot link stopped unexpectedly: cancelled")
+        elif (exc := task.exception()) is not None:
+            log.error("Robot link stopped unexpectedly: %s", exc, exc_info=exc)
+        else:
+            log.error("Robot link stopped unexpectedly")
 
 
 async def start_server(app: FastAPI, host: str, port: int) -> RunningServer:

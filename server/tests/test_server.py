@@ -340,6 +340,35 @@ def test_a_failed_startup_cancels_serving_and_closes_the_socket(monkeypatch):
     assert seen["sockets"][0].fileno() == -1  # closed
 
 
+def _plain_app():
+    return create_app(
+        token=TOKEN,
+        switch=DeviceSwitch(NullMic(), NullPlayer()),
+        events=asyncio.Queue(),
+        current_state=lambda: "idle",
+    )
+
+
+def test_an_unexpected_server_stop_is_logged_as_an_error(caplog):
+    async def run():
+        server = await start_server(_plain_app(), "127.0.0.1", 0)
+        server.server.should_exit = True  # uvicorn stops on its own, not via stop()
+        await asyncio.wait_for(server.task, 10)
+
+    asyncio.run(run())
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("Robot link stopped unexpectedly" in m for m in errors)
+
+
+def test_a_normal_stop_logs_no_error(caplog):
+    async def run():
+        server = await start_server(_plain_app(), "127.0.0.1", 0)
+        await asyncio.wait_for(server.stop(), 10)
+
+    asyncio.run(run())
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 def test_a_cancelled_startup_cancels_serving_and_closes_the_socket(monkeypatch):
     seen = {"cancelled": False}
 
