@@ -14,6 +14,7 @@
 #include "looks.h"
 #include "ring_buffer.h"
 #include "servo_math.h"
+#include "wake_logic.h"
 
 void setUp() {}
 void tearDown() {}
@@ -528,6 +529,82 @@ void test_look_for_state() {
   TEST_ASSERT_EQUAL_STRING("sleep", lookForState(nullptr, nullptr));
 }
 
+void test_wake_window_mean() {
+  wake::SlidingWindow w(4);
+  TEST_ASSERT_EQUAL_FLOAT(0.25f, w.push(1.0f));  // missing values count as 0
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, w.push(1.0f));
+  TEST_ASSERT_EQUAL_FLOAT(0.75f, w.push(1.0f));
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, w.push(1.0f));
+  TEST_ASSERT_EQUAL_FLOAT(0.75f, w.push(0.0f));  // the oldest 1.0 drops out
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, w.push(0.0f));
+  w.reset();
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, w.mean());
+}
+
+void test_wake_window_clamps() {
+  wake::SlidingWindow w(2);
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, w.push(7.0f));    // clamped to 1
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, w.push(-3.0f));   // clamped to 0
+  wake::SlidingWindow big(1000);
+  TEST_ASSERT_EQUAL_UINT32(wake::kMaxWindow, big.size());
+  wake::SlidingWindow none(0);
+  TEST_ASSERT_EQUAL_UINT32(1, none.size());
+  TEST_ASSERT_EQUAL_FLOAT(0.9f, none.push(0.9f));
+}
+
+void test_wake_detector_cutoff() {
+  wake::Detector d(0.9f, 3);
+  TEST_ASSERT_FALSE(d.step(1.0f, 100));  // mean 0.33
+  TEST_ASSERT_FALSE(d.step(1.0f, 110));  // mean 0.67
+  TEST_ASSERT_TRUE(d.step(1.0f, 120));   // mean 1.0
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, d.detectedScore());
+  wake::Detector low(0.9f, 2);
+  TEST_ASSERT_FALSE(low.step(0.85f, 0));
+  TEST_ASSERT_FALSE(low.step(0.85f, 10));  // under the cutoff
+}
+
+void test_wake_detector_cooldown() {
+  wake::Detector d(0.5f, 1, 2000);
+  TEST_ASSERT_TRUE(d.step(1.0f, 1000));
+  TEST_ASSERT_TRUE(d.cooling(1000));
+  TEST_ASSERT_FALSE(d.step(1.0f, 1500));
+  TEST_ASSERT_FALSE(d.step(1.0f, 2999));
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, d.score());  // the score stays live while cooling
+  TEST_ASSERT_TRUE(d.step(1.0f, 3000));
+}
+
+void test_wake_detector_hold_off() {
+  wake::Detector d(0.75f, 2, 2000);
+  TEST_ASSERT_FALSE(d.step(1.0f, 0));  // mean 0.5
+  d.holdOff(10);  // a state change: the window starts afresh, no trigger for 2 s
+  TEST_ASSERT_FALSE(d.step(1.0f, 20));
+  TEST_ASSERT_FALSE(d.step(1.0f, 2009));
+  TEST_ASSERT_TRUE(d.step(1.0f, 2010));
+}
+
+void test_wake_detector_survives_millis_wrap() {
+  wake::Detector d(0.5f, 1, 2000);
+  TEST_ASSERT_TRUE(d.step(1.0f, 0xFFFFFF00u));
+  TEST_ASSERT_FALSE(d.step(1.0f, 0x00000100u));  // 512 ms later, across the wrap
+  TEST_ASSERT_TRUE(d.step(1.0f, 0x00000800u));   // 2304 ms later
+}
+
+void test_wake_quantize_feature() {
+  // A typical microWakeWord input: scale 0.1015625 (26/256), zero point -128.
+  TEST_ASSERT_EQUAL_INT8(-128, wake::quantizeFeature(0, 0.1015625f, -128));
+  TEST_ASSERT_EQUAL_INT8(-28, wake::quantizeFeature(260, 0.1015625f, -128));  // 10.16 -> 100
+  TEST_ASSERT_EQUAL_INT8(127, wake::quantizeFeature(5000, 0.1015625f, -128));  // saturates
+  TEST_ASSERT_EQUAL_INT8(5, wake::quantizeFeature(26, 0.2f, 0));  // 1.015625/0.2 = 5.08
+  TEST_ASSERT_EQUAL_INT8(-128, wake::quantizeFeature(100, 0.0f, -300));  // broken scale
+}
+
+void test_wake_dequantize() {
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, wake::dequantize(128, 1.0f / 256, 0));
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, wake::dequantize(0, 1.0f / 256, -128));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, wake::dequantize(-200, 1.0f / 256, 0));  // clamped
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, wake::dequantize(300, 1.0f / 256, 0));
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -582,6 +659,14 @@ void setup() {
   RUN_TEST(test_build_hello_too_small);
   RUN_TEST(test_look_for_emotion);
   RUN_TEST(test_look_for_state);
+  RUN_TEST(test_wake_window_mean);
+  RUN_TEST(test_wake_window_clamps);
+  RUN_TEST(test_wake_detector_cutoff);
+  RUN_TEST(test_wake_detector_cooldown);
+  RUN_TEST(test_wake_detector_hold_off);
+  RUN_TEST(test_wake_detector_survives_millis_wrap);
+  RUN_TEST(test_wake_quantize_feature);
+  RUN_TEST(test_wake_dequantize);
   UNITY_END();
 }
 
