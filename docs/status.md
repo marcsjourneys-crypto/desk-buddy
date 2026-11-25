@@ -2,6 +2,24 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — M7 apps and websites built (check pending)
+
+- **Built:**
+  - **The Apps tab:** Find apps (Windows' own Start-app list), a filter, ticking apps with 1–3 spoken names each, and bookmarks. Saved in `apps.json` and `bookmarks.json` (`apps_store.py`).
+  - **`open_app` and `open_website`** (`tools/launch.py`): names from an enum only, apps started as `explorer.exe shell:AppsFolder\<id>` by full path, bookmarks opened in the default browser. Both need `COMPUTER_CONTROL=on` and go through the guard.
+  - **`open_search_result` after a spoken "yes"** (`tools/confirm.py`): only an exact address from this or the last question's web search results, never a local one. After CARL's reply the robot asks "Shall I open the page on <site>?", and only a strict, short yes at the very next question, within a minute, opens it.
+  - Review fixes: the server asks instead of the model, a strict yes vocabulary, the next question only, refusals counted through the guard, no local pages, UTF-8 app listing, full exe paths.
+- **Plan:** `docs/plans/2026-11-25-m7-apps-websites.md`.
+- **Tests:** 1159 server tests pass (17 integration tests deselected).
+- **Check by the user (pending):**
+  1. On the Apps tab, find apps, tick Notepad and your browser, and give the browser the name "browser". "Open notepad" opens it.
+  2. Add a bookmark ("weather" → a forecast page). "Open the weather" opens it.
+  3. Ask a question that needs a search, then "open that page". After CARL's reply, the robot asks "Shall I open the page on <site>?". Say "yes" and it opens.
+  4. Repeat, but say "no, never mind": nothing opens, and the Live tab shows "cancelled".
+  5. Repeat, wait more than a minute, then say "yes": nothing opens (expired).
+  6. With `COMPUTER_CONTROL` off, "open notepad" gets "that isn't switched on".
+- **Next:** the user check, then media keys and PC volume (the rest of M7), the servo check, or in-page controls.
+
 ## 2026-11-25 — Web search and About you done
 
 - **Built:**
