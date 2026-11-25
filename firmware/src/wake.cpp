@@ -128,6 +128,7 @@ constexpr size_t kModelBytes = 0;
 #endif
 
 bool tried = false;
+bool ready = false;  // start() finished: the task runs and the tensors are checked
 char error[200] = "";
 const tflite::Model* model = nullptr;
 uint8_t* arena = nullptr;
@@ -341,7 +342,7 @@ void wakeTask(void*) {
 }
 
 const char* start() {
-  if (!WAKE_HAVE_MODEL || kModelData == nullptr) {
+  if (!WAKE_HAVE_MODEL) {
     return fail(
         "No wake word model: put hey_carl.tflite in firmware/models, run "
         "scripts/model_to_header.py, then rebuild and flash");
@@ -363,6 +364,7 @@ const char* start() {
                               kTaskCore) != pdPASS) {
     return fail("Wake: couldn't start the task");
   }
+  ready = true;
   return nullptr;
 }
 
@@ -381,7 +383,7 @@ void printTensor(const char* label, const TfLiteTensor* t) {
 
 namespace wake {
 
-bool haveModel() { return WAKE_HAVE_MODEL && kModelData != nullptr; }
+bool haveModel() { return WAKE_HAVE_MODEL; }
 
 const char* begin() {
   if (!tried) {
@@ -404,7 +406,7 @@ void printInfo() {
     }
     Serial.println();
   }
-  if (interpreter == nullptr) return;
+  if (interpreter == nullptr || input == nullptr || output == nullptr) return;
   printTensor("input", input);
   printTensor("output", output);
   Serial.printf("  %d feature frames per step (%d ms)\n", stride, stride * 10);
@@ -414,7 +416,7 @@ void printInfo() {
 }
 
 void run(bool on) {
-  if (interpreter == nullptr) return;
+  if (!ready) return;
   if (on) {
     seenDetections = detections.load();
     takeStats();  // start the counters now

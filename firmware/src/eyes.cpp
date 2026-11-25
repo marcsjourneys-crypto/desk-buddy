@@ -99,6 +99,7 @@ constexpr uint32_t kSpecialFrameMs = 33;  // ~30 fps is plenty for these
 // between frames. Only drawing is skipped: tweens and blinks follow the clock regardless.
 constexpr uint32_t kLidFrameMs = 33;
 uint32_t lastLidFrame = 0;
+uint32_t frameCount = 0;  // frames update() has drawn (see eyes::frames())
 constexpr uint32_t kGrowMs = 250;
 
 const Step* sequence = nullptr;
@@ -475,6 +476,7 @@ void update(uint32_t now) {
   if (special != Special::None) {
     if (dirty || now - lastSpecialFrame >= kSpecialFrameMs) {
       drawSpecial(now);
+      frameCount++;
       lastSpecialFrame = now;
       dirty = false;
     }
@@ -485,6 +487,7 @@ void update(uint32_t now) {
     return;
   }
   const float b = blinker.amount(now);
+  bool drewAny = false;
   for (int i = 0; i < 2; i++) {
     tweens[i].settle(now);
     eye::Params p = current(i, now);
@@ -493,9 +496,13 @@ void update(uint32_t now) {
     draw(i, p);
     drawn[i] = p;
     lastLidFrame = now;
+    drewAny = true;
   }
+  if (drewAny) frameCount++;
   dirty = false;
 }
+
+uint32_t frames() { return frameCount; }
 
 float measureFps(uint32_t ms) {
   if (!ready || ms == 0) return 0;

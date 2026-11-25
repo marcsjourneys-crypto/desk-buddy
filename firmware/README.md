@@ -51,7 +51,38 @@ What to expect in the monitor: `Wi-Fi: joining …`, `Wi-Fi connected <ip>`, the
 - `Wi-Fi: still joining … (network not found)`: check the name (2.4 GHz only). `connect failed (password?)`: check the password.
 - `Can't connect to …, retry in Ns`: CARL isn't running, the IP is wrong, `SERVER_HOST` isn't `0.0.0.0`, or the firewall rule is missing. Without the rule each attempt also hangs for about 5 s.
 - `Server refused the robot (bad token or protocol) - check: token <value>`: the token doesn't match `ROBOT_TOKEN`. After repeated bad tokens the server also blocks the robot's IP for 60 s. The robot retries every 5 minutes, or at once after a new `token` command.
-- While the link is connected, `tone`, `mic`, `rec`, `play`, `servo` and `fps` are refused (they would fight the link for the speaker, the mic or the main loop).
+- While the link is connected, `tone`, `mic`, `rec`, `play`, `servo`, `fps` and `wake` are refused (they would fight the link for the speaker, the mic or the main loop).
+
+## Wake word ("Hey CARL", Phase 0 test)
+
+The engine test from `../docs/plans/2026-11-25-wake-word.md`: TFLite Micro (prebuilt in Arduino core 3.3.12: `esp-tflite-micro` 1.4.0, `esp-nn` 1.3.2) and TFLM's audio microfrontend (vendored in `lib/microfrontend`, see its README) run a microWakeWord model on the robot. Code: `src/wake.cpp`, logic in `include/wake_logic.h`.
+
+**Put the model in** (each time it changes), in `firmware/`:
+1. Copy the trained `stream_state_internal_quant.tflite` to `models/hey_carl.tflite`.
+2. Check `models/hey_carl.json` (cutoff, window size, arena size).
+3. `python scripts/model_to_header.py --ops` writes `models/hey_carl_model.h` and lists the model's operators.
+4. Build and flash (`pio run -t upload`).
+
+Without the header the firmware still builds; `wake test` then says there's no model.
+
+| Command | Shows |
+|---|---|
+| `wake info` | The model: wake word, size, operators (a missing one is marked `MISSING`), input/output shape and quantisation, arena used. |
+| `wake test` | `HEARD (score 0.98)` on each detection (the eyes flash surprised), and every 3 s: model step time (avg, max), frontend time per 10 ms, core 0 load, eye fps, free heap and PSRAM. Any letter stops it. |
+| `wake raw` | The model's probability and the window's score 10 times a second, for tuning the cutoff. |
+
+- `wake` is refused while the robot link is connected (the link owns the mic). Nothing fires for 2 s after a start, a detection or (later) a state change.
+- The eyes play the animated "thinking" look during the test, so the fps shows what detection costs them (the cap is ~30 fps; the target is ≥ 20).
+- If `AllocateTensors` fails, the arena is doubled up to 256 KB; set `tensor_arena_size` in the manifest to a bit over what `wake info` says is used.
+
+### Feature check (design note, not built yet)
+
+The model only works if the robot's features match training. Plan for `scripts/wake_features_check.py`:
+1. A `wake dump` command records ~3 s from the mic, then prints the raw PCM (base64) and the 40-value feature frames the board computed from it, between marker lines.
+2. The script (run with `serial_cmd.py`'s port handling) saves the PCM as a WAV and computes features from that WAV with `pymicro_features` (the same microfrontend, as Python bindings; it's a dev-only tool in `tools/wakeword/`, never a server dependency).
+3. It compares frame by frame: the frame count must match, and each value should be within ±1 (fixed-point rounding); it prints the worst frame and the mean absolute difference. A systematic offset means a setting differs (window, PCAN, noise reduction); a level offset points at the mic scaling (`dsp::kMicShift`).
+
+A known WAV can also be checked without the mic by streaming it to the board instead of recording.
 
 ## Windows setup notes (one-time, done 2026-11-24)
 

@@ -11,6 +11,7 @@
 #include "pins.h"
 #include "servos.h"
 #include "settings.h"
+#include "wake.h"
 
 namespace {
 
@@ -60,6 +61,9 @@ void printHelp() {
   Serial.println("  mic                       mic levels for 10 s");
   Serial.println("  rec / play                record 3 s, play it back");
   Serial.println("  servo                     eased pan/tilt sweep");
+  Serial.println("  wake info                 the wake word model: ops, tensors, arena");
+  Serial.println("  wake test                 detect \"Hey CARL\": HEARD lines, timing, memory, fps");
+  Serial.println("  wake raw                  the live score, for tuning");
   Serial.println("Robot link setup (saved on the robot):");
   Serial.println("  wifi <name> <password>    Wi-Fi network; the name can't contain spaces, the");
   Serial.println("                            password is 8-63 chars (no tabs) or - for open");
@@ -232,6 +236,75 @@ void runPlay() {
   audio::play(recording, recorded);
 }
 
+// `wake test` / `wake raw`: the wake task owns the mic until a key is pressed. The eyes play
+// an animated look (capped at ~30 fps) meanwhile, so their frame rate shows what detection
+// costs them.
+void runWake(bool raw) {
+  if (const char* error = wake::begin()) {
+    Serial.println(error);
+    return;
+  }
+  wake::printInfo();
+  Serial.printf("Listening for the wake word%s (press any letter to stop)\n",
+                raw ? ", live score" : "");
+  constexpr uint32_t kStatsMs = 3000;
+  constexpr uint32_t kRawMs = 100;
+  constexpr uint32_t kHeardLookMs = 1500;
+  eyes::show("thinking");
+  wake::run(true);
+  uint32_t lastStats = millis();
+  uint32_t lastRaw = lastStats;
+  uint32_t heardAt = 0;
+  bool heardLook = false;
+  uint32_t framesAt = eyes::frames();
+  while (!keyPressed()) {
+    const uint32_t now = millis();
+    eyes::update(now);
+    float score = 0;
+    if (wake::takeDetection(&score)) {
+      Serial.printf("HEARD (score %.2f)\n", score);
+      eyes::show("surprised");
+      heardAt = now;
+      heardLook = true;
+    }
+    if (heardLook && now - heardAt >= kHeardLookMs) {
+      eyes::show("thinking");
+      heardLook = false;
+    }
+    if (raw && now - lastRaw >= kRawMs) {
+      lastRaw = now;
+      const float s = wake::score();
+      const int bars = constrain(static_cast<int>(s * 20 + 0.5f), 0, 20);
+      Serial.printf("p %.3f  score %.3f |%-20.*s|\n", wake::probability(), s, bars,
+                    "####################");
+    }
+    if (!raw && now - lastStats >= kStatsMs) {
+      const wake::Stats st = wake::takeStats();
+      const uint32_t frames = eyes::frames();
+      const float fps = (frames - framesAt) * 1000.0f / (now - lastStats);
+      framesAt = frames;
+      lastStats = now;
+      Serial.printf(
+          "step %lu us avg, %lu max (%lu steps); frontend %lu us per 10 ms; core 0 load %.0f%%; "
+          "eyes %.1f fps; heap %lu KB free (min %lu), PSRAM %lu KB free\n",
+          static_cast<unsigned long>(st.invokeUsAvg), static_cast<unsigned long>(st.invokeUsMax),
+          static_cast<unsigned long>(st.invokes), static_cast<unsigned long>(st.frontendUsAvg),
+          st.load * 100, fps, static_cast<unsigned long>(ESP.getFreeHeap() / 1024),
+          static_cast<unsigned long>(ESP.getMinFreeHeap() / 1024),
+          static_cast<unsigned long>(ESP.getFreePsram() / 1024));
+      if (st.shortReads || st.invokeErrors) {
+        Serial.printf("  short mic reads %lu, failed steps %lu\n",
+                      static_cast<unsigned long>(st.shortReads),
+                      static_cast<unsigned long>(st.invokeErrors));
+      }
+    }
+    delay(1);
+  }
+  wake::run(false);
+  eyes::show("sleep");
+  Serial.println("Wake test stopped");
+}
+
 void handle(char* cmd) {
   char* name = strtok(cmd, " ");
   if (name == nullptr) return;
@@ -242,7 +315,8 @@ void handle(char* cmd) {
   // Audio tests would fight the streaming tasks; servo and fps block the loop for seconds.
   const bool blocksLink = !strcmp(name, "tone") || !strcmp(name, "mic") ||
                           !strcmp(name, "rec") || !strcmp(name, "play") ||
-                          !strcmp(name, "servo") || !strcmp(name, "fps");
+                          !strcmp(name, "servo") || !strcmp(name, "fps") ||
+                          !strcmp(name, "wake");
   if (blocksLink && net::connected()) {
     Serial.println("Not while the robot link is connected");
     return;
@@ -287,6 +361,16 @@ void handle(char* cmd) {
     runRecord();
   } else if (!strcmp(name, "play")) {
     runPlay();
+  } else if (!strcmp(name, "wake")) {
+    if (arg != nullptr && !strcmp(arg, "info")) {
+      const char* error = wake::begin();
+      wake::printInfo();
+      if (error != nullptr) Serial.println(error);
+    } else if (arg != nullptr && (!strcmp(arg, "test") || !strcmp(arg, "raw"))) {
+      runWake(!strcmp(arg, "raw"));
+    } else {
+      Serial.println("Usage: wake info|test|raw");
+    }
   } else if (!strcmp(name, "servo")) {
     Serial.println("Servo sweep (press any letter to stop)");
     if (servos::sweep(serviceAndCheckKey)) {
