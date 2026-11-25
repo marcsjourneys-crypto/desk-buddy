@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 import anthropic
 
+from desk_buddy.brain.memory import merge_consecutive
 from desk_buddy.brain.personality import system_prompt
 from desk_buddy.config import Settings
 from desk_buddy.tools.registry import ToolRegistry
@@ -107,10 +108,11 @@ class LLMRefusal(LLMError):
 
 class Chat(Protocol):
     """What the voice loop needs from any LLM provider. A provider that runs tools may
-    also keep a `tools_succeeded` count (see ClaudeChat); the loop reads it if present."""
+    also keep a `tools_succeeded` count and `last_tool_rounds` (see ClaudeChat); the
+    loop reads them if present."""
 
     def stream_reply(
-        self, history: Sequence[Mapping[str, str]], user_text: str
+        self, history: Sequence[Mapping[str, Any]], user_text: str
     ) -> AsyncGenerator[str, None]: ...
 
 
@@ -148,16 +150,21 @@ class ClaudeChat:
         # Tool calls that succeeded, ever. Only grows; the loop compares it before and
         # after a reply to tell whether that reply's turn ran a tool successfully.
         self.tools_succeeded = 0
+        # The latest reply's tool rounds, (tool_use blocks, tool_result blocks) each, as
+        # plain dicts for the conversation memory. Reset when a reply starts.
+        self.last_tool_rounds: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
 
     async def stream_reply(
-        self, history: Sequence[Mapping[str, str]], user_text: str
+        self, history: Sequence[Mapping[str, Any]], user_text: str
     ) -> AsyncGenerator[str, None]:
         """Yield text deltas as they arrive, running tools between rounds.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
         after some text was already yielded, so callers must handle a partial reply.
         """
-        messages: list[Any] = [*history, {"role": "user", "content": user_text}]
+        # A remembered turn can end on tool results: the new text then joins that message.
+        messages: list[Any] = merge_consecutive([*history, {"role": "user", "content": user_text}])
+        self.last_tool_rounds = []
         spoke = False
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             params: dict[str, Any] = {
@@ -197,6 +204,16 @@ class ClaudeChat:
                 log.warning("stop_reason=tool_use but no tool_use blocks; ending the reply")
                 return
             results = [await self._run_tool(block) for block in uses]
+            # For memory: plain tool_use blocks (no thinking, no text, which was spoken).
+            self.last_tool_rounds.append(
+                (
+                    [
+                        {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
+                        for b in uses
+                    ],
+                    results,
+                )
+            )
             # New list each round: the content list goes back unchanged (thinking blocks too).
             messages = [
                 *messages,

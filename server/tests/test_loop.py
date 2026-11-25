@@ -875,3 +875,94 @@ def test_a_chat_without_a_tool_count_never_says_task_done():
     orch, parts, _ = make(random=lambda: 0.0)  # FakeChat has no tools_succeeded
     asyncio.run(talk(orch))
     assert parts["speaker"].played == ["Hello there.", "How are you?"]
+
+
+# --- Tool calls are remembered ---
+
+USE = {"type": "tool_use", "id": "t1", "name": "play_music", "input": {"query": "Queen"}}
+RESULT = {"type": "tool_result", "tool_use_id": "t1", "content": "Started playing."}
+
+
+class ToolChat:
+    """Runs one tool round (as ClaudeChat records it) before replying."""
+
+    def __init__(self, deltas=("[happy] Here's some Queen. ",), error=None, hold=None):
+        self.deltas, self.error, self.hold = deltas, error, hold
+        self.last_tool_rounds = []
+        self.histories = []
+
+    async def stream_reply(self, history, text):
+        self.histories.append(list(history))
+        self.last_tool_rounds = [([dict(USE)], [dict(RESULT)])]
+        if self.hold:
+            await self.hold.wait()
+        for d in self.deltas:
+            yield d
+        if self.error:
+            raise self.error
+
+
+def test_a_tool_turn_is_remembered_with_its_tool_blocks():
+    chat = ToolChat()
+    orch, parts, _ = make(chat=chat)
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Here's some Queen."]  # only the reply is spoken
+    assert orch.conversation.messages() == [
+        {"role": "user", "content": "hi buddy"},
+        {"role": "assistant", "content": [USE]},
+        {"role": "user", "content": [RESULT]},
+        {"role": "assistant", "content": "[happy] Here's some Queen."},
+    ]
+
+
+def test_the_next_turn_sends_the_tool_blocks_in_its_history():
+    chat = ToolChat()
+    orch, _, _ = make(chat=chat)
+
+    async def scenario():
+        await talk(orch)
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.histories[1][1] == {"role": "assistant", "content": [USE]}
+
+
+def test_tools_that_ran_are_kept_even_if_the_reply_was_cut_off_before_speech():
+    hold = asyncio.Event()  # never set: the reply never comes
+    chat = ToolChat(hold=hold)
+    orch, _, _ = make(chat=chat)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        await asyncio.sleep(0.05)
+        await orch.handle("down")  # interrupt while it's thinking
+
+    asyncio.run(scenario())
+    messages = orch.conversation.messages()
+    assert messages[1:] == [
+        {"role": "assistant", "content": [USE]},
+        {"role": "user", "content": [RESULT]},
+    ]
+    assert orch.conversation.user_message("louder").startswith(INTERRUPTED_NOTE)
+
+
+def test_tools_that_ran_are_kept_when_the_reply_fails_but_the_error_line_is_not():
+    chat = ToolChat(deltas=(), error=LLMError("boom"))
+    orch, parts, _ = make(chat=chat)
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == [ERROR_LINE.text]
+    messages = orch.conversation.messages()
+    assert messages[1:] == [
+        {"role": "assistant", "content": [USE]},
+        {"role": "user", "content": [RESULT]},
+    ]
+
+
+def test_tool_rounds_from_an_earlier_turn_are_never_reused():
+    class StaleChat(FakeChat):
+        last_tool_rounds = [([dict(USE)], [dict(RESULT)])]  # left over, never reset
+
+    orch, _, _ = make(chat=StaleChat())
+    asyncio.run(talk(orch))
+    assert all(isinstance(m["content"], str) for m in orch.conversation.messages())

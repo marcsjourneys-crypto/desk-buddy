@@ -262,6 +262,44 @@ def test_parallel_tool_calls_return_in_one_message():
     assert chat.tools_succeeded == 2
 
 
+def test_each_reply_records_its_tool_rounds_as_plain_api_blocks():
+    calls = []
+    thinking = SimpleNamespace(type="thinking", thinking="", signature="sig")
+    first = FakeStream(
+        ["Let me note that."], stop_reason="tool_use", content=[thinking, tool_use()]
+    )
+    chat, _ = make_chat(first, FakeStream(["Noted."]), tools=note_registry(calls))
+    collect(chat, "note buy milk")
+    assert chat.last_tool_rounds == [
+        (
+            [{"type": "tool_use", "id": "t1", "name": "take_note", "input": {"text": "buy milk"}}],
+            [{"type": "tool_result", "tool_use_id": "t1", "content": "Saved"}],
+        )
+    ]
+    # A reply without tools starts afresh.
+    chat._client._streams.append(FakeStream(["Hi."]))
+    collect(chat, "hello")
+    assert chat.last_tool_rounds == []
+
+
+def test_history_ending_in_tool_results_joins_the_new_user_message():
+    chat, client = make_chat(FakeStream(["ok"]))
+    leftover = [{"type": "tool_result", "tool_use_id": "t1", "content": "Saved"}]
+    history = [
+        {"role": "user", "content": "note it"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+        },
+        {"role": "user", "content": leftover},
+    ]
+    collect(chat, "and now?", history=history)
+    assert client.calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": [*leftover, {"type": "text", "text": "and now?"}],
+    }
+
+
 def test_tools_succeeded_starts_at_zero_and_skips_failed_tools():
     def broken(text):
         raise ToolError("disk full")

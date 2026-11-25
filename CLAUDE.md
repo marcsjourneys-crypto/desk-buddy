@@ -71,7 +71,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
   - a failing `PONDERING` or `TASK_DONE` line is skipped with a warning and never costs the reply;
   - `TASK_DONE` "Another mystery of the universe solved." after a reply whose turn ran a tool successfully, one time in four;
   - 42 is prompt guidance only: when CARL doesn't know, it says so plainly, and at most once per conversation may add that the answer might be 42.
-- Remembers the conversation until restart: the last `HISTORY_TURNS` exchanges, and only what was actually heard. An interruption is noted on the user's next message, never in CARL's stored reply. Saying "new topic", "forget that" or "start over" clears it (fixed phrases in `brain/memory.py`).
+- Remembers the conversation until restart: the last `HISTORY_TURNS` exchanges, and only what was actually heard, plus the tool calls each turn made (as real `tool_use`/`tool_result` blocks in API order, results capped at 300 characters, kept even when the reply was cut off or failed: the action happened). A turn is kept or dropped whole, so trimming never orphans a tool call. An interruption is noted on the user's next message, never in CARL's stored reply. Saying "new topic", "forget that" or "start over" clears it (fixed phrases in `brain/memory.py`).
 - Every reply starts with an emotion tag: `[neutral] [happy] [sad] [surprised] [sleepy] [thinking] [curious]`. The server strips it from speech and sends it to the robot's eyes.
 - Replies are short by default (configurable max sentences). Spoken style: no markdown, no lists.
 

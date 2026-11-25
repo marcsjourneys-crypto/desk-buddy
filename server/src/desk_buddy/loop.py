@@ -242,6 +242,8 @@ class Orchestrator:
                 return
             turn = _Turn(user=text, thinking_since=time.perf_counter())
             tools_before = _tools_succeeded(self.chat)
+            if hasattr(self.chat, "last_tool_rounds"):
+                self.chat.last_tool_rounds = []  # never remember an earlier turn's tools
             queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._produce(turn, queue))
@@ -266,11 +268,20 @@ class Orchestrator:
                 self._set_state(State.IDLE)
 
     def _remember(self, turn: _Turn) -> None:
-        """Keep what the user actually heard; drop failed turns and silent ones."""
-        if turn.failed or not turn.spoken:
+        """Keep what the user actually heard, plus every tool call that ran (the action
+        happened even if the reply was cut off or failed). A failed reply's canned error
+        line isn't kept; a turn with neither a reply nor tools isn't kept at all."""
+        rounds = list(getattr(self.chat, "last_tool_rounds", None) or [])
+        heard = turn.spoken and not turn.failed
+        if not heard and not rounds:
             return
-        reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken)
-        self.conversation.add(turn.user, reply, interrupted=not turn.complete)
+        reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken) if heard else None
+        self.conversation.add(
+            turn.user,
+            reply,
+            interrupted=not turn.complete and not turn.failed,
+            tool_rounds=rounds,
+        )
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         """Claude deltas -> emotion + sentences -> PCM, into the queue. None marks the end."""
