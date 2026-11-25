@@ -9,12 +9,13 @@
 #include "eyes.h"
 #include "pins.h"
 #include "servos.h"
+#include "settings.h"
 
 namespace {
 
 constexpr char kFwVersion[] = "0.1.0-m5";
 
-char line[64];
+char line[301];  // room for "token " plus a 256-char token
 size_t lineLen = 0;
 bool overflow = false;  // the current line didn't fit; reject it at the line end
 
@@ -56,6 +57,71 @@ void printHelp() {
   Serial.println("  mic                       mic levels for 10 s");
   Serial.println("  rec / play                record 3 s, play it back");
   Serial.println("  servo                     eased pan/tilt sweep");
+  Serial.println("Robot link setup (saved on the robot):");
+  Serial.println("  wifi <name> <password>    Wi-Fi network (the name can't contain spaces)");
+  Serial.println("  server <host>:<port>      the PC running Buddy, e.g. 192.168.1.20:8765");
+  Serial.println("  token <value>             ROBOT_TOKEN from server/.env (16-256 chars)");
+  Serial.println("  config                    show the settings (secrets masked)");
+  Serial.println("  forget                    wipe the Wi-Fi, server and token");
+}
+
+// The rest of the line after the command name, trimmed; nullptr if there's nothing.
+char* trimmed(char* s) {
+  if (s == nullptr) return nullptr;
+  while (*s == ' ') s++;
+  size_t n = strlen(s);
+  while (n > 0 && s[n - 1] == ' ') s[--n] = '\0';
+  return n ? s : nullptr;
+}
+
+void printSaved(const char* error) {
+  if (error != nullptr) {
+    Serial.println(error);
+  } else if (settings::complete()) {
+    Serial.println("Saved.");
+  } else {
+    Serial.println("Saved. Set wifi/server/token, then the robot connects.");
+  }
+}
+
+// Never prints the password or the whole token.
+void printConfig() {
+  const char* notSet = "(not set)";
+  Serial.printf("wifi:   %s\n", settings::ssid()[0] ? settings::ssid() : notSet);
+  Serial.printf("pass:   %s\n", settings::pass()[0] ? "****" : notSet);
+  if (settings::host()[0] && settings::port()) {
+    Serial.printf("server: %s:%u\n", settings::host(), static_cast<unsigned>(settings::port()));
+  } else {
+    Serial.printf("server: %s\n", notSet);
+  }
+  const char* t = settings::token();
+  const size_t n = strlen(t);
+  if (n >= 2) {
+    Serial.printf("token:  ****%s\n", t + n - 2);
+  } else {
+    Serial.printf("token:  %s\n", notSet);
+  }
+}
+
+// Settings commands take the whole rest of the line. Returns false if `name` isn't one.
+bool handleSettings(const char* name, char* rest) {
+  if (!strcmp(name, "wifi")) {
+    char* ssid = rest ? strtok(rest, " ") : nullptr;
+    char* pass = ssid ? trimmed(strtok(nullptr, "")) : nullptr;
+    printSaved(settings::setWifi(ssid, pass));
+  } else if (!strcmp(name, "server")) {
+    printSaved(settings::setServer(rest));
+  } else if (!strcmp(name, "token")) {
+    printSaved(settings::setToken(rest));
+  } else if (!strcmp(name, "config")) {
+    printConfig();
+  } else if (!strcmp(name, "forget")) {
+    settings::forget();
+    Serial.println("Forgot the Wi-Fi, server and token.");
+  } else {
+    return false;
+  }
+  return true;
 }
 
 // Any typed character stops a running test. CR/LF don't count, by design: they are left
@@ -144,8 +210,10 @@ void runPlay() {
 
 void handle(char* cmd) {
   char* name = strtok(cmd, " ");
-  char* arg = strtok(nullptr, " ");
   if (name == nullptr) return;
+  char* rest = trimmed(strtok(nullptr, ""));  // everything after the name
+  if (handleSettings(name, rest)) return;
+  char* arg = rest ? strtok(rest, " ") : nullptr;
   if (!strcmp(name, "help")) {
     printHelp();
   } else if (!strcmp(name, "info")) {
@@ -233,6 +301,7 @@ void setup() {
   delay(200);
   blinkLed();
   printInfo();
+  settings::load();
   if (!eyes::begin()) Serial.println("Eyes: not started");
   if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
   if (!audio::beginMic()) Serial.println("Mic: not started");
