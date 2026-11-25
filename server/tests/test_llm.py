@@ -27,7 +27,8 @@ from desk_buddy.tools.registry import Tool, ToolError, ToolRegistry
 URL = "https://api.anthropic.com/v1/messages"
 
 
-NEW_BLOCK = object()  # in FakeStream deltas: a new text content block starts here
+NEW_BLOCK = object()  # in FakeStream deltas: a search block, then text in a new block
+NEW_TEXT = object()  # in FakeStream deltas: a new text block right after a text block
 
 
 def block_start(kind="text"):
@@ -65,6 +66,9 @@ class FakeStream:
         for d in self._deltas:
             if d is NEW_BLOCK:
                 yield block_start("server_tool_use")
+                in_text = False
+                continue
+            if d is NEW_TEXT:
                 in_text = False
                 continue
             if not in_text:
@@ -627,6 +631,34 @@ def test_a_break_goes_between_text_blocks_around_a_search(search_allowed):
     assert collect(chat, "weather?") == ["Sunny."]
 
 
+def test_text_blocks_that_follow_each_other_join_without_a_break(search_allowed):
+    # A cited answer comes as several text blocks, split mid-sentence.
+    deltas = [
+        "Based on the forecast, ",
+        NEW_TEXT,
+        "tomorrow will be 12 degrees",
+        NEW_TEXT,
+        ", says the Met Office.",
+    ]
+    chat, _ = web_chat(FakeStream(deltas))
+    assert "\n" not in collect(chat, "weather?")
+    # Text, then a search, then more text still gets its break.
+    chat, _ = web_chat(
+        FakeStream(["Let me look.", NEW_BLOCK, "Sunny,", NEW_TEXT, " says the BBC."])
+    )
+    assert collect(chat, "weather?") == ["Let me look.", "\n", "Sunny,", " says the BBC."]
+
+
+def test_titles_shown_on_the_dashboard_are_one_plain_line(search_allowed):
+    title = "Line sep para\x85next ‮evil‬ ⁦iso⁩"
+    content = [search_use(), search_result(results=((title, "https://x.example/ "),))]
+    chat, _ = web_chat(FakeStream(["ok"], content=content))
+    collect(chat, "x")
+    ((shown, site),) = chat.searches[0].sources
+    assert shown == "Line sep para next evil iso"
+    assert site == "x.example"
+
+
 def test_pause_turn_resumes_with_the_content_and_no_new_user_message(search_allowed):
     paused_content = [text_block("Let me look."), search_use()]
     first = FakeStream(["Let me look."], stop_reason="pause_turn", content=paused_content)
@@ -749,13 +781,44 @@ def test_a_round_after_a_pause_joins_the_paused_content(search_allowed):
     assert client.calls[2]["messages"][1]["content"] == [search_use(), search_result(), tool_use()]
 
 
-def web_search_refused():
+def bad_request(message):
     request = httpx2.Request("POST", URL)
+    body = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
     return anthropic.BadRequestError(
-        "Error code: 400 - web search is not enabled for this organization",
-        response=httpx2.Response(400, request=request),
-        body=None,
+        f"Error code: 400 - {body}", response=httpx2.Response(400, request=request), body=body
     )
+
+
+def web_search_refused():
+    return bad_request("Web search is not enabled for this organization.")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "web_search is disabled for your organization",
+        "Web search is not available for this account.",
+    ],
+)
+def test_other_wordings_of_search_turned_off_also_block_it(search_allowed, message):
+    chat, client = web_chat(FakeStream([], error=bad_request(message)), FakeStream(["ok"]))
+    collect(chat, "hi")
+    assert web_search_blocked()
+
+
+def test_another_web_search_error_retries_without_search_but_keeps_it_on(search_allowed, caplog):
+    error = bad_request("tools.0.web_search_20250305.max_uses: Input should be\ngreater than 0")
+    chat, client = web_chat(FakeStream([], error=error), FakeStream(["ok"]), FakeStream(["again"]))
+    with caplog.at_level("WARNING", logger="desk_buddy.llm"):
+        assert collect(chat, "hi") == ["ok"]
+    assert client.calls[0]["tools"] == [WEB_TOOL]
+    assert "tools" not in client.calls[1]
+    assert not web_search_blocked() and chat.web_search
+    assert "isn't enabled for this API key" not in caplog.text
+    # The API's own message, on one line.
+    assert "max_uses: Input should be greater than 0" in caplog.text
+    collect(chat, "next")
+    assert client.calls[2]["tools"] == [WEB_TOOL]  # the next reply searches again
 
 
 def test_search_turned_off_for_the_account_falls_back_once_and_stays_off(search_allowed, caplog):

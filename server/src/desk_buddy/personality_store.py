@@ -40,6 +40,27 @@ ABOUT_LIMITS: Mapping[str, int] = MappingProxyType(
 )
 assert tuple(ABOUT_LIMITS) == ABOUT_FIELDS
 
+# ISO 3166-1 alpha-2: the 249 officially assigned codes (what web search's location takes).
+COUNTRY_CODES = frozenset(
+    """
+    AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ
+    BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+    CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ
+    DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+    GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU
+    ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ
+    LA LB LC LI LK LR LS LT LU LV LY
+    MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ
+    NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY
+    QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ
+    TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ
+    VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
+    """.split()
+)
+COUNTRY_ALIASES = MappingProxyType({"UK": "GB"})  # common, but not the ISO code
+# Characters a single-line field may not hold: they break a line or flip text direction.
+LINE_BREAKERS = frozenset("\x85  ‪‫‬‭‮⁦⁧⁨⁩")
+
 
 def personality_path() -> Path:
     return app_data_dir() / "personality.json"
@@ -90,9 +111,11 @@ def _check_about(name: str, value: Any) -> str:
     text = value.replace("\r\n", "\n").strip()
     limit = ABOUT_LIMITS[name]
     if name == "country":
-        text = text.upper()
-        if text and not (len(text) == 2 and text.isascii() and text.isalpha()):
-            raise ValueError("The country must be a two-letter code like GB or US, or blank.")
+        text = COUNTRY_ALIASES.get(text.upper(), text.upper())
+        if text and text not in COUNTRY_CODES:
+            raise ValueError(
+                "The country must be a two-letter ISO country code like GB or US, or blank."
+            )
         return text
     if len(text) > limit:
         raise ValueError(f"This can be at most {limit} characters.")
@@ -101,6 +124,8 @@ def _check_about(name: str, value: Any) -> str:
         if name == "notes":
             raise ValueError("This can't contain control characters.")
         raise ValueError("This must be one line of text.")
+    if name != "notes" and any(c in LINE_BREAKERS for c in text):
+        raise ValueError("This must be one line of text, without direction marks.")
     return text
 
 

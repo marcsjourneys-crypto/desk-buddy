@@ -441,8 +441,15 @@
     }
   }
 
-  function renderPersonality(data) {
+  // `saved`: the About field just saved or cleared. Other About fields keep any edits
+  // that weren't saved yet, so saving one field never loses another.
+  function renderPersonality(data, saved = null) {
     personality = data;
+    const unsaved = {};
+    for (const input of $("about").querySelectorAll("[data-about]")) {
+      const name = input.getAttribute("data-about");
+      if (name !== saved && input.value !== input.getAttribute("data-saved")) unsaved[name] = input.value;
+    }
     setBanner("personality", data.error);
     const character = $("character");
     character.maxLength = data.limits.character;
@@ -454,7 +461,7 @@
     const about = $("about");
     about.replaceChildren();
     for (const [name, label] of Object.entries(ABOUT_LABELS)) {
-      about.append(aboutRow(name, label, data.about[name] || "", data.limits.about[name]));
+      about.append(aboutRow(name, label, data.about[name] || "", data.limits.about[name], unsaved[name]));
     }
     const lines = $("lines");
     lines.replaceChildren();
@@ -468,17 +475,20 @@
     $("character-count").textContent = `${n} / ${personality.limits.character}`;
   }
 
-  function aboutRow(name, label, value, limit) {
+  function aboutRow(name, label, value, limit, unsaved) {
+    const shown = unsaved === undefined ? value : unsaved;
+    const attrs = { value: shown, maxLength: limit, "aria-label": label, "data-about": name, "data-saved": value };
     const input =
       name === "notes"
-        ? el("textarea", { rows: 4, value, maxLength: limit, spellcheck: true, "aria-label": label })
-        : el("input", { type: "text", value, maxLength: limit, spellcheck: false, "aria-label": label });
-    const message = el("span", { class: "msg", text: value ? "" : "not set" });
+        ? el("textarea", { rows: 4, spellcheck: true, ...attrs })
+        : el("input", { type: "text", spellcheck: false, ...attrs });
+    const status = unsaved !== undefined ? "not saved yet" : value ? "" : "not set";
+    const message = el("span", { class: "msg", text: status });
     const save = el("button", { type: "button", text: "Save" });
     const reset = el("button", { type: "button", class: "secondary", text: "Clear", hidden: !value });
     save.addEventListener("click", async () => {
       try {
-        renderPersonality(await api("PUT", "/api/personality", { about: { [name]: input.value } }));
+        renderPersonality(await api("PUT", "/api/personality", { about: { [name]: input.value } }), name);
       } catch (error) {
         const errors = (error.data && error.data.errors) || {};
         message.textContent = errors[`about.${name}`] || error.message;
@@ -487,7 +497,7 @@
     });
     reset.addEventListener("click", async () => {
       try {
-        renderPersonality(await api("DELETE", `/api/personality/${encodeURIComponent(`about.${name}`)}`));
+        renderPersonality(await api("DELETE", `/api/personality/${encodeURIComponent(`about.${name}`)}`), name);
       } catch (error) {
         message.textContent = error.message;
         message.className = "msg error";

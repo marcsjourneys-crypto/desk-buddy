@@ -39,8 +39,10 @@ CUT_OFF_NOTE_START = "(I cut you off before you replied, after you ran:"
 MAX_NOTE_RESULT = 160  # characters of each result in that note
 # Put after the stored user message of a turn in which CARL searched the web, so later
 # turns know where an answer came from. On the user side: Claude copies markers it sees
-# in its own replies. The search blocks and results themselves are never stored.
-SEARCH_NOTE_START = "(To answer this, you searched the web for:"
+# in its own replies. It is marked as a system note: the queries are Claude's (and web
+# text may have steered them), never the user's words. The search blocks and results
+# themselves are never stored.
+SEARCH_NOTE_START = "(System note: to answer this, you ran web searches for:"
 MAX_NOTE_QUERY = 100  # characters of each query in that note
 
 # "karl": Whisper often spells the name that way.
@@ -192,12 +194,14 @@ def _action(use: Mapping[str, Any], result: Mapping[str, Any]) -> str:
 
 
 def _search_note(queries: Iterable[str]) -> str | None:
-    """'(To answer this, you searched the web for: "q1"; "q2")', or None for no search.
-    Each query is one line, at most MAX_NOTE_QUERY characters, with its double quotes
-    made single so it can't end its quote early."""
+    """'(System note: to answer this, you ran web searches for: "q1"; "q2")', or None
+    for no search. Each query is one line, at most MAX_NOTE_QUERY characters, with its
+    double quotes made single and its parentheses made spaces, so it can't end its
+    quote or the note early."""
     shown = []
     for query in queries:
-        text = " ".join(str(query).split()).replace('"', "'")
+        plain = str(query).replace("(", " ").replace(")", " ")
+        text = " ".join(plain.split()).replace('"', "'")
         if len(text) > MAX_NOTE_QUERY:
             text = text[:MAX_NOTE_QUERY] + "..."
         if text:

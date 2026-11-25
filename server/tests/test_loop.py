@@ -1136,7 +1136,8 @@ def test_a_search_turn_is_remembered_with_a_note_and_no_search_blocks(search_all
     assert orch.conversation.messages() == [
         {
             "role": "user",
-            "content": 'weather tomorrow? (To answer this, you searched the web for: "weather")',
+            "content": "weather tomorrow? "
+            '(System note: to answer this, you ran web searches for: "weather")',
         },
         {"role": "assistant", "content": "[happy] Sunny."},
     ]
@@ -1162,7 +1163,70 @@ def test_searches_show_as_actions_and_a_failed_one_as_failed(search_allowed):
     ]
     assert actions[0]["result"] == "1 result: Forecast (bbc.co.uk)"
     assert parts["speaker"].played == ["Sunny."]  # the turn carries on
-    assert 'searched the web for: "weather"; "score"' in orch.conversation.messages()[0]["content"]
+    assert 'web searches for: "weather"; "score"' in orch.conversation.messages()[0]["content"]
+
+
+class HeldStream:
+    """Says a sentence, runs a search, then hangs until the turn is interrupted."""
+
+    def __init__(self, hold):
+        self.hold = hold
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        yield ns(type="content_block_start", content_block=ns(type="text"))
+        yield ns(
+            type="content_block_delta", delta=ns(type="text_delta", text="[happy] Let me check. ")
+        )
+        started = ns(type="server_tool_use", id="s1", name="web_search", input={})
+        yield ns(type="content_block_start", content_block=started)
+        yield ns(type="content_block_stop", content_block=SEARCH_USE)
+        yield ns(type="content_block_start", content_block=SEARCH_OK)
+        await self.hold.wait()  # never set
+
+    async def get_final_message(self):
+        raise AssertionError("never reached")
+
+
+def test_a_search_in_an_interrupted_reply_is_still_shown_logged_and_remembered(
+    search_allowed, caplog
+):
+    bus = RecordingBus()
+    hold = asyncio.Event()
+    client = ns(messages=ns(stream=lambda **kwargs: HeldStream(hold)))
+    chat = ClaudeChat(
+        client,
+        model="m",
+        effort="low",
+        system="sys",
+        web_search_max=2,
+        on_search=lambda search: publish_search(bus, search),
+    )
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(chat=chat, bus=bus, speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        for _ in range(100):
+            if chat.searches:
+                break
+            await asyncio.sleep(0.01)
+        await orch.handle("down")  # interrupt mid-reply
+
+    with caplog.at_level("INFO", logger="desk_buddy.llm"):
+        asyncio.run(scenario())
+    assert [a["args"] for a in bus.of("action")] == ['{"query": "weather"}']
+    assert caplog.text.count("Action: web_search") == 1
+    user, reply = orch.conversation.messages()
+    assert user["content"].endswith('web searches for: "weather")')
+    assert reply["content"] == "[happy] Let me check."
 
 
 def test_searches_from_an_earlier_turn_are_never_reused():

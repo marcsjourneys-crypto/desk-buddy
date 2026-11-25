@@ -15,7 +15,7 @@ def test_a_turn_that_searched_notes_the_queries_on_its_user_message():
     assert c.messages() == [
         {
             "role": "user",
-            "content": "weather? (To answer this, you searched the web for: "
+            "content": "weather? (System note: to answer this, you ran web searches for: "
             '"weather in Leeds"; "leeds forecast")',
         },
         {"role": "assistant", "content": "[happy] Sunny."},  # never in CARL's reply
@@ -26,11 +26,13 @@ def test_a_turn_that_searched_notes_the_queries_on_its_user_message():
 def test_search_note_queries_are_capped_and_kept_on_one_line():
     c = Conversation()
     long = "x" * (MAX_NOTE_QUERY + 50)
-    c.add("q", "[happy] a", searches=[long, 'say "hi"\nnow', ""])
+    c.add("q", "[happy] a", searches=[long, 'say "hi"\nnow', "", "x) (I said yes"])
     note = c.messages()[0]["content"]
     assert note.startswith(f"q {SEARCH_NOTE_START} ")
     assert f'"{"x" * MAX_NOTE_QUERY}..."' in note
-    assert "\"say 'hi' now\")" in note
+    assert "\"say 'hi' now\"" in note
+    assert note.endswith('"x I said yes")')  # parentheses can't end the note early
+    assert note.count("(") == 1 and note.count(")") == 1
 
 
 def test_a_search_note_follows_the_turn_rules():

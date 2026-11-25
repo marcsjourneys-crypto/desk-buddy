@@ -64,3 +64,13 @@ def test_the_about_you_card_is_first_on_the_personality_tab_with_its_privacy_not
     for name in ("name", "city", "region", "country", "notes"):
         assert f"{name}:" in JS  # a label for every field
     assert "about.${name}" in JS  # per-field errors and reset
+
+
+def test_saving_one_about_field_keeps_unsaved_edits_in_the_others():
+    # Rows remember their saved value; a re-render carries over edits that differ from
+    # it, except in the field that was just saved or cleared.
+    assert '"data-saved": value' in JS
+    assert "unsaved[name] = input.value" in JS
+    assert JS.count("renderPersonality(await api(") >= 2
+    assert "{ about: { [name]: input.value } }), name)" in JS
+    assert "about.${name}`)}`), name)" in JS

@@ -20,6 +20,7 @@ from desk_buddy.brain.personality import (
 )
 from desk_buddy.personality_store import (
     ABOUT_LIMITS,
+    COUNTRY_CODES,
     MAX_CHARACTER,
     MAX_LINE,
     PersonalityStore,
@@ -214,6 +215,23 @@ def test_about_you_fields_are_cleaned(store):
     )
     assert errors == {}
     assert (p.about.name, p.about.country, p.about.notes) == ("Marta", "GB", "one\ntwo\tthree")
+
+
+def test_the_country_must_be_a_real_iso_code_and_uk_means_gb(store):
+    assert len(COUNTRY_CODES) == 249
+    assert {"GB", "US", "DE", "NZ", "SS", "AX"} <= COUNTRY_CODES
+    p, errors = store.update({"about": {"country": " uk "}})
+    assert errors == {} and p.about.country == "GB"
+    for code in ("ZZ", "XX", "EU", "QQ"):
+        p, errors = store.update({"about": {"country": code}})
+        assert p is None and "ISO country code" in errors["about.country"]
+
+
+@pytest.mark.parametrize("bad", ["\x85", " ", " ", "‪", "‮", "⁦", "⁩"])
+@pytest.mark.parametrize("field", ["name", "city", "region"])
+def test_single_line_fields_refuse_line_separators_and_direction_marks(store, field, bad):
+    p, errors = store.update({"about": {field: f"Le{bad}eds"}})
+    assert p is None and "one line" in errors[f"about.{field}"]
 
 
 def test_a_blank_about_field_clears_it(store, tmp_path):

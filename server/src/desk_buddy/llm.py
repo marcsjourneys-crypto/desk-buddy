@@ -229,9 +229,14 @@ class ClaudeChat:
     ) -> AsyncGenerator[str, None]:
         """Yield text deltas as they arrive, running tools between rounds.
 
-        A "\\n" goes between text blocks (a new round, or text around a web search), so
-        their sentences never run together. A paused turn (stop_reason "pause_turn",
-        during a long web search) is resumed; it uses up a round like a tool call.
+        A "\\n" goes before text that follows something else (a new round, a web search,
+        a tool call, thinking), so those sentences never run together. Text blocks that
+        follow each other (a cited answer is split into several) join with nothing.
+        A paused turn (stop_reason "pause_turn", during a long web search) is resumed; it
+        uses up a round like a tool call.
+
+        Each web search is reported as soon as its result arrives, so a reply cut off
+        later still shows and remembers it.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
         after some text was already yielded, so callers must handle a partial reply.
@@ -241,13 +246,14 @@ class ClaudeChat:
         self.last_tool_rounds = []
         self.searches = []
         searching: dict[str, str] = {}  # web search id -> query, until its result arrives
+        reported: set[str] = set()  # web search ids already reported
         spoke = False
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             last = round_no == MAX_TOOL_ROUNDS
             retried = False
             while True:
-                web = self.web_search
-                new_block = True  # the first text of a round starts a new block
+                web = self.web_search and not retried
+                new_block = True  # the first text of a round follows the last round
                 said_here = False
                 try:
                     async with self._client.messages.stream(
@@ -255,28 +261,40 @@ class ClaudeChat:
                     ) as stream:
                         async for event in stream:
                             if event.type == "content_block_start":
-                                if event.content_block.type == "text":
+                                if event.content_block.type != "text":
                                     new_block = True
+                                self._note_block(event.content_block, searching, reported)
+                            elif event.type == "content_block_stop":
+                                block = getattr(event, "content_block", None)
+                                if block is not None:
+                                    self._note_block(block, searching, reported)
                             elif (
                                 event.type == "content_block_delta"
                                 and event.delta.type == "text_delta"
                             ):
                                 if new_block and spoke:
-                                    yield "\n"  # keep sentences from separate blocks apart
+                                    yield "\n"  # keep sentences from separate parts apart
                                 new_block = False
                                 spoke = said_here = True
                                 yield event.delta.text
                         message = await stream.get_final_message()
                     break
                 except anthropic.BadRequestError as exc:
-                    if web and not retried and not said_here and _about_web_search(exc):
-                        _block_web_search()
+                    if web and not said_here and _mentions_web_search(exc):
+                        if _search_not_enabled(exc):
+                            _block_web_search()
+                        else:
+                            log.warning(
+                                "Web search request refused (%s); trying without search",
+                                _api_message(exc),
+                            )
                         retried = True
                         continue  # this round again, without search
                     raise _llm_error(exc) from exc
                 except anthropic.APIError as exc:
                     raise _llm_error(exc) from exc
-            self._note_searches(message.content, searching)
+            for block in message.content:
+                self._note_block(block, searching, reported)
             if message.stop_reason == "refusal":
                 raise LLMRefusal("Claude declined to answer")
             if message.stop_reason == "max_tokens":
@@ -366,20 +384,22 @@ class ClaudeChat:
             tool["user_location"] = {"type": "approximate", **where}
         return tool
 
-    def _note_searches(self, content: Sequence[Any], searching: dict[str, str]) -> None:
-        """Pick this message's web searches out of its content: each server_tool_use
-        matched by id to its web_search_tool_result (which may come in a later message
-        after a pause)."""
-        for block in content:
-            kind = _field(block, "type")
-            if kind == "server_tool_use" and _field(block, "name") == "web_search":
-                query = _field(block, "input") or {}
-                text = query.get("query", "") if isinstance(query, Mapping) else ""
-                searching[str(_field(block, "id"))] = " ".join(str(text).split())
-            elif kind == "web_search_tool_result":
-                query = searching.pop(str(_field(block, "tool_use_id")), None)
-                if query is not None:
-                    self._report(_search(query, _field(block, "content")))
+    def _note_block(self, block: Any, searching: dict[str, str], reported: set[str]) -> None:
+        """Note a web search from one content block, seen while streaming (a finished
+        server_tool_use, or a web_search_tool_result, which arrives whole) or in the final
+        message. Each result is matched by id to its query (which may come in an earlier
+        message, before a pause) and reported once."""
+        kind = _field(block, "type")
+        if kind == "server_tool_use" and _field(block, "name") == "web_search":
+            query = _field(block, "input") or {}
+            text = query.get("query", "") if isinstance(query, Mapping) else ""
+            searching[str(_field(block, "id"))] = " ".join(str(text).split())
+        elif kind == "web_search_tool_result":
+            search_id = str(_field(block, "tool_use_id"))
+            query = searching.get(search_id)
+            if query is not None and search_id not in reported:
+                reported.add(search_id)
+                self._report(_search(query, _field(block, "content")))
 
     def _report(self, search: Search) -> None:
         self.searches.append(search)
@@ -423,11 +443,24 @@ def _search(query: str, content: Any) -> Search:
         return Search(query, ok=False, error=str(_field(content, "error_code") or "unknown"))
     sources = []
     for result in content[:MAX_SOURCES]:
-        title = " ".join(str(_field(result, "title") or "").split())
+        title = _plain(str(_field(result, "title") or ""))
         if len(title) > MAX_TITLE:
             title = title[:MAX_TITLE] + "..."
         sources.append((title or "Untitled", _site(str(_field(result, "url") or ""))))
     return Search(query, ok=True, count=len(content), sources=tuple(sources))
+
+
+# Bidi controls: shown text from the web must not flip the dashboard's text direction.
+_BIDI = dict.fromkeys(
+    [*range(0x202A, 0x202F), *range(0x2066, 0x206A)],
+    " ",
+)
+
+
+def _plain(text: str) -> str:
+    """One line of plain text: bidi controls and every line break (including U+0085,
+    U+2028 and U+2029, which split() counts as whitespace) become single spaces."""
+    return " ".join(text.translate(_BIDI).split())
 
 
 def _site(url: str) -> str:
@@ -435,7 +468,7 @@ def _site(url: str) -> str:
         host = urlsplit(url).hostname or ""
     except ValueError:
         return ""
-    return host.removeprefix("www.")
+    return _plain(host.removeprefix("www."))
 
 
 def _search_args(search: Search) -> str:
@@ -443,10 +476,26 @@ def _search_args(search: Search) -> str:
     return args if len(args) <= 200 else args[:200] + "..."
 
 
-def _about_web_search(exc: anthropic.BadRequestError) -> bool:
-    """A 400 that blames web search (e.g. it is turned off for this organisation)."""
+def _mentions_web_search(exc: anthropic.BadRequestError) -> bool:
+    """A 400 that names web search: the round is retried once without it."""
     text = str(exc).lower()
     return "web search" in text or "web_search" in text
+
+
+_NOT_ENABLED = ("not enabled", "not available", "disabled")
+
+
+def _search_not_enabled(exc: anthropic.BadRequestError) -> bool:
+    """A 400 saying web search is turned off for this account or organisation: then
+    search stays off until the next restart. Any other web-search 400 doesn't count."""
+    text = str(exc).lower()
+    return _mentions_web_search(exc) and any(phrase in text for phrase in _NOT_ENABLED)
+
+
+def _api_message(exc: anthropic.APIStatusError) -> str:
+    """The API's own error message, on one line and bounded, for the log."""
+    text = " ".join(str(getattr(exc, "api_message", None) or exc).split())
+    return text if len(text) <= 200 else text[:200] + "..."
 
 
 def publish_search(bus: Any, search: Search) -> None:

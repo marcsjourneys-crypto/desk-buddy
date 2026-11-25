@@ -61,7 +61,7 @@ No new dependencies: the `anthropic` SDK already supports server tools.
 ## Part 3: Chat loop, memory and errors
 
 **`llm.py` (`ClaudeChat`)**
-- **Sentence breaks:** add a `"\n"` before the first text of every new text content block after any text has already been yielded. That covers both a new round and text → search → text within one message. The stream events tell us where a block starts.
+- **Sentence breaks:** once any text has been yielded, add a `"\n"` before the first text that follows a new round or a non-text block (a search, a search result, a tool call, thinking). That covers both a new round and text → search → text within one message. Text blocks that follow each other get no break: a cited answer arrives as several text blocks split mid-sentence. The stream events tell us where a block starts.
 - **`pause_turn`:** send the assistant content back as is, with no extra user message, and stream again. It uses one of the `MAX_TOOL_ROUNDS` (3) rounds, so it can never loop for ever. Search stays enabled on a resumed round unless it's the last.
 - **Searches seen:** collect each search from the final message: the `server_tool_use` block with name `web_search` and `input.query`, matched by `tool_use_id` to its `web_search_tool_result`. A result is either a list of results (`title`, `url`) or an error (`error_code`).
 - **Reporting searches:** a `searches` list on the chat (reset per reply, like `last_tool_rounds`) holds the query, ok/failed and up to 3 `(title, site)` pairs. The chat emits the action event and the log line through a small callback the loop passes in. The event bus must never raise into the turn.
