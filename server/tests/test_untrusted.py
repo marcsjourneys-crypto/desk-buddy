@@ -40,6 +40,26 @@ def test_a_limit_caps_the_whole_result_after_escaping():
     assert not body.split("\n(and more)")[0].endswith(("&", "&l", "&lt", "&g", "&gt"))
 
 
+def test_shorten_keeps_a_prefixed_block_well_formed():
+    from desk_buddy.tools.untrusted import shorten
+
+    text = "Started playing on Spotify: " + wrap("spotify", "<Queen> " * 200)
+    out = shorten(text, 300)
+    assert len(out) <= 300
+    assert out.startswith('Started playing on Spotify: <untrusted source="spotify">\n')
+    assert out.endswith("\n(and more)\n</untrusted>")
+    assert out.count("(and more)") == 1
+
+
+def test_shorten_never_doubles_and_more():
+    from desk_buddy.tools.untrusted import shorten
+
+    already = wrap("notes", "x" * 5000, limit=1000)
+    out = shorten(already, 300)
+    assert out.count("(and more)") == 1
+    assert len(out) <= 300
+
+
 def test_a_short_text_under_the_limit_is_untouched():
     assert wrap("notes", "hi", limit=1000) == wrap("notes", "hi")
 

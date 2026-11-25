@@ -96,6 +96,8 @@ class SentenceSplitter:
 
 MAX_TOKENS = 2048  # thinking counts toward this; spoken replies are short
 MAX_TOOL_ROUNDS = 3  # API calls per reply; the last one may not call tools
+# Remembered for a tool call whose result never came (the turn was cut off).
+INTERRUPTED_RESULT = "Interrupted; the action may have completed."
 
 
 class LLMError(Exception):
@@ -203,8 +205,14 @@ class ClaudeChat:
             if not uses:
                 log.warning("stop_reason=tool_use but no tool_use blocks; ending the reply")
                 return
-            results = [await self._run_tool(block) for block in uses]
-            # For memory: plain tool_use blocks (no thinking, no text, which was spoken).
+            # For memory: plain tool_use blocks (no thinking, no text, which was spoken),
+            # recorded before they run. Each result starts as a placeholder and is filled
+            # in as its tool finishes, so a call cut off mid-run (or never reached) is
+            # still remembered, and every tool_use keeps a result.
+            results: list[dict[str, Any]] = [
+                {"type": "tool_result", "tool_use_id": b.id, "content": INTERRUPTED_RESULT}
+                for b in uses
+            ]
             self.last_tool_rounds.append(
                 (
                     [
@@ -214,6 +222,8 @@ class ClaudeChat:
                     results,
                 )
             )
+            for i, block in enumerate(uses):
+                results[i] = await self._run_tool(block)
             # New list each round: the content list goes back unchanged (thinking blocks too).
             messages = [
                 *messages,

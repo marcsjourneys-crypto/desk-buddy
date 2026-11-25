@@ -216,6 +216,33 @@ def test_play_music_is_bounded_when_spotify_wont_start():
     assert names(client, "start_playback") == []
 
 
+def test_running_out_of_the_overall_deadline_says_not_ready():
+    class FakeTime:
+        now = 0.0
+
+    t = FakeTime()
+
+    class SlowSearch(FakeSpotify):
+        def search(self, q, limit=10, offset=0, type="track", market=None):
+            t.now += 20  # the search alone uses up the deadline
+            return super().search(q, limit, offset, type, market)
+
+    client = SlowSearch(search={"track": [track("x")]})
+    control = SpotifyControl(client, pc_name="marc-laptop", clock=lambda: t.now)
+    tools = ToolRegistry(MusicTools(control, ActionGuard(True)).tools())
+    out = tools.run("play_music", {"query": "x", "kind": "track"})
+    assert out.is_error and out.text == "Spotify isn't ready yet."
+    assert names(client, "start_playback") == []
+
+
+def test_very_long_names_from_spotify_are_capped_and_stay_well_formed():
+    client = FakeSpotify(search={"track": [track("<la> " * 500)]})
+    tools, _ = make(client)
+    text = tools.run("play_music", {"query": "x", "kind": "track"}).text
+    assert len(text) < 400
+    assert text.count("</untrusted>") == 1 and text.endswith("</untrusted>")
+
+
 def test_nothing_found_is_said_plainly_and_nothing_plays():
     client = FakeSpotify()
     tools, _ = make(client)

@@ -167,6 +167,19 @@ def test_a_failure_to_launch_spotify_is_a_clear_error():
         control.ensure_device()
 
 
+def test_any_launch_failure_is_a_clear_error():
+    def broken():
+        raise RuntimeError("shell said no")
+
+    import time
+
+    control = SpotifyControl(FakeSpotify([]), pc_name=PC, start_app=broken)
+    started = time.monotonic()
+    with pytest.raises(MusicError, match="Spotify didn't open"):
+        control.ensure_device()
+    assert time.monotonic() - started < 2  # at once, not after the whole wait
+
+
 def test_music_errors_are_tool_errors():
     assert issubclass(MusicError, ToolError)
 

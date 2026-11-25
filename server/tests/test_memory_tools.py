@@ -2,6 +2,7 @@
 actually did (a "Queen is playing" reply has the play_music call behind it)."""
 
 from desk_buddy.brain.memory import (
+    CUT_OFF_NOTE_START,
     INTERRUPTED_NOTE,
     MAX_STORED_RESULT,
     Conversation,
@@ -112,17 +113,56 @@ def test_an_error_result_keeps_its_flag():
     assert c.messages()[2]["content"][0]["is_error"] is True
 
 
-def test_a_tool_turn_without_a_reply_merges_into_the_next_user_message():
-    # Interrupted before CARL said anything: the action still happened.
+def test_a_tool_turn_without_a_reply_becomes_a_note_on_the_next_user_message():
+    # Cut off before CARL said anything: the action still happened. No dangling tool
+    # blocks and no made-up assistant text: a note on the next user message instead.
     c = Conversation()
     c.add("play queen", None, interrupted=True, tool_rounds=[([use("t")], [result("t")])])
+    assert c.messages() == []
+    note = c.user_message("louder")
+    assert note.startswith(CUT_OFF_NOTE_START)
+    assert 'play_music {"query": "Queen"} -> Started playing on Spotify.' in note
+    assert note.endswith(" louder")
+    assert INTERRUPTED_NOTE not in note
     c.add("louder", "[happy] Louder it is.")
     messages = c.messages()
-    assert messages[2] == {
-        "role": "user",
-        "content": [result("t"), {"type": "text", "text": f"{INTERRUPTED_NOTE} louder"}],
-    }
-    check_api_order(messages)
+    assert messages == [
+        {"role": "user", "content": note},
+        {"role": "assistant", "content": "[happy] Louder it is."},
+    ]
+    # The note was used once: the message after that is plain.
+    assert c.user_message("thanks") == "thanks"
+
+
+def test_the_note_keeps_untrusted_results_well_formed_and_short():
+    c = Conversation()
+    long_result = "Started playing on Spotify: " + wrap("spotify", "x" * 2000)
+    c.add("play x", None, tool_rounds=[([use("t")], [result("t", long_result)])])
+    note = c.user_message("hi")
+    assert len(note) < 1000
+    assert note.count('<untrusted source="spotify">') == 1
+    assert note.count("</untrusted>") == 1
+
+
+def test_notes_from_several_cut_off_turns_add_up_and_forget_clears_them():
+    c = Conversation()
+    c.add("play queen", None, tool_rounds=[([use("a")], [result("a")])])
+    c.add(
+        "pause",
+        None,
+        tool_rounds=[([use("b", "music_control", action="pause")], [result("b", "Paused.")])],
+    )
+    note = c.user_message("hi")
+    assert "play_music" in note and "music_control" in note
+    c.forget()
+    assert c.user_message("hi") == "hi"
+
+
+def test_a_cut_off_turn_without_tools_leaves_no_note():
+    c = Conversation()
+    c.add("hello", None)
+    assert c.messages() == []
+    assert c.user_message("hi") == "hi"
 
 
 def test_merge_consecutive_joins_user_messages_tool_results_first():

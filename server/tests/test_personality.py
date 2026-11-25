@@ -78,6 +78,14 @@ def test_prompt_explains_interrupted_marker():
     assert INTERRUPTED_NOTE in system_prompt(2)
 
 
+def test_prompt_explains_the_cut_off_actions_note():
+    from desk_buddy.brain.memory import CUT_OFF_NOTE_START
+
+    prompt = system_prompt(2)
+    assert CUT_OFF_NOTE_START in prompt
+    assert "really happened" in prompt
+
+
 def test_canned_lines_use_known_emotions_and_have_text():
     for line in (ERROR_LINE, REFUSAL_LINE, FORGET_LINE, GREETING, FAREWELL, PONDERING, TASK_DONE):
         assert line.emotion in EMOTIONS

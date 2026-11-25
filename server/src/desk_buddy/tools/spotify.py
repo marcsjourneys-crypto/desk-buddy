@@ -295,12 +295,12 @@ class SpotifyControl:
         """Open the app on its own thread: os.startfile can block while Windows launches
         it. Wait at most START_APP_WAIT_S, only to report a launch that fails at once."""
         log.info("Starting Spotify")
-        failed: list[OSError] = []
+        failed: list[Exception] = []
 
         def launch() -> None:
             try:
                 self._start_app()
-            except OSError as exc:
+            except Exception as exc:  # any failure to launch, not only OSError
                 failed.append(exc)
 
         thread = threading.Thread(target=launch, name="spotify-start", daemon=True)
@@ -339,6 +339,7 @@ PLAYLIST_PAGE = 50
 PLAYLIST_PAGES = 4  # up to 200 of the user's playlists (made or followed)
 PLAYLIST_MATCH = 0.6  # difflib ratio for a fuzzy playlist-name match
 SOURCE = "spotify"
+MAX_NAMES = 250  # characters of an untrusted block of names from Spotify
 
 _CONTROL_DONE = {
     "pause": "Paused.",
@@ -474,8 +475,11 @@ class MusicTools:
         """One overall deadline for an action, starting Spotify included, so a turn never
         waits on Spotify for long (an interrupt doesn't wait for it at all: the tool runs
         in a worker thread the turn stops awaiting)."""
-        with self._control.time_limit(PLAY_DEADLINE_S):
-            return action(*args)
+        try:
+            with self._control.time_limit(PLAY_DEADLINE_S):
+                return action(*args)
+        except _OutOfTime as exc:
+            raise MusicError(NOT_READY) from exc
 
     def _play(self, query: str, kind: str) -> str:
         item = self._own_playlist(query) if kind == "playlist" else None
@@ -488,7 +492,7 @@ class MusicTools:
         else:
             self._control.call("start_playback", device_id=device, context_uri=item["uri"])
         self._music_started()
-        return "Started playing on Spotify: " + wrap(SOURCE, _describe(kind, item))
+        return "Started playing on Spotify: " + wrap(SOURCE, _describe(kind, item), limit=MAX_NAMES)
 
     def _music_started(self) -> None:
         if self._ducker is not None:
@@ -570,7 +574,7 @@ class MusicTools:
         else:
             desc = _describe("track", item)
         state = "playing" if playback.get("is_playing") else "paused"
-        return f"Spotify is {state}: " + wrap(SOURCE, desc)
+        return f"Spotify is {state}: " + wrap(SOURCE, desc, limit=MAX_NAMES)
 
 
 _PLAYLIST_FILLER = frozenset({"my", "the", "a", "an", "playlist", "playlists", "please"})

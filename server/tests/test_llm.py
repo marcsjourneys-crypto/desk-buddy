@@ -8,7 +8,14 @@ import httpx2
 import pytest
 
 from desk_buddy.config import Settings
-from desk_buddy.llm import MAX_TOOL_ROUNDS, ClaudeChat, LLMError, LLMRefusal, create_chat
+from desk_buddy.llm import (
+    INTERRUPTED_RESULT,
+    MAX_TOOL_ROUNDS,
+    ClaudeChat,
+    LLMError,
+    LLMRefusal,
+    create_chat,
+)
 from desk_buddy.tools.registry import Tool, ToolError, ToolRegistry
 
 URL = "https://api.anthropic.com/v1/messages"
@@ -409,3 +416,48 @@ def test_cancel_while_a_tool_runs_propagates():
     asyncio.run(run())
     assert first.closed
     assert len(client.calls) == 1
+    # The tool was cut off mid-run: it's still recorded, with a placeholder result.
+    assert chat.last_tool_rounds == [
+        (
+            [{"type": "tool_use", "id": "t1", "name": "take_note", "input": {"text": "buy milk"}}],
+            [{"type": "tool_result", "tool_use_id": "t1", "content": INTERRUPTED_RESULT}],
+        )
+    ]
+
+
+def test_a_multi_tool_round_cancelled_midway_records_every_call():
+    started, release = threading.Event(), threading.Event()
+    done = []
+
+    def note(text):
+        if text == "slow":
+            started.set()
+            release.wait(5)
+        done.append(text)
+        return f"Saved {text}"
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, note)])
+    uses = [tool_use("a", "fast"), tool_use("b", "slow"), tool_use("c", "never")]
+    first = FakeStream([], stop_reason="tool_use", content=uses)
+    chat, _ = make_chat(first, FakeStream(["never"]), tools=registry)
+
+    async def consume():
+        async with contextlib.aclosing(chat.stream_reply([], "hi")) as agen:
+            async for _ in agen:
+                pass
+
+    async def run():
+        task = asyncio.create_task(consume())
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+
+    asyncio.run(run())
+    ((recorded_uses, results),) = chat.last_tool_rounds
+    assert [u["id"] for u in recorded_uses] == ["a", "b", "c"]
+    assert [r["tool_use_id"] for r in results] == ["a", "b", "c"]
+    assert results[0]["content"] == "Saved fast"
+    assert results[1]["content"] == INTERRUPTED_RESULT
+    assert results[2]["content"] == INTERRUPTED_RESULT

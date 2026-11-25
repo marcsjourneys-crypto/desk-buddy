@@ -7,7 +7,7 @@ import pytest
 
 import desk_buddy.loop as loop_module
 from desk_buddy.audio import BYTES_PER_SECOND
-from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation
+from desk_buddy.brain.memory import CUT_OFF_NOTE_START, INTERRUPTED_NOTE, Conversation
 from desk_buddy.brain.personality import (
     ERROR_LINE,
     FAREWELL,
@@ -939,12 +939,11 @@ def test_tools_that_ran_are_kept_even_if_the_reply_was_cut_off_before_speech():
         await orch.handle("down")  # interrupt while it's thinking
 
     asyncio.run(scenario())
-    messages = orch.conversation.messages()
-    assert messages[1:] == [
-        {"role": "assistant", "content": [USE]},
-        {"role": "user", "content": [RESULT]},
-    ]
-    assert orch.conversation.user_message("louder").startswith(INTERRUPTED_NOTE)
+    # No dangling tool blocks; the action is a note on the next message instead.
+    assert orch.conversation.messages() == []
+    note = orch.conversation.user_message("louder")
+    assert note.startswith(CUT_OFF_NOTE_START)
+    assert 'play_music {"query": "Queen"} -> Started playing.' in note
 
 
 def test_tools_that_ran_are_kept_when_the_reply_fails_but_the_error_line_is_not():
@@ -952,11 +951,9 @@ def test_tools_that_ran_are_kept_when_the_reply_fails_but_the_error_line_is_not(
     orch, parts, _ = make(chat=chat)
     asyncio.run(talk(orch))
     assert parts["speaker"].played == [ERROR_LINE.text]
-    messages = orch.conversation.messages()
-    assert messages[1:] == [
-        {"role": "assistant", "content": [USE]},
-        {"role": "user", "content": [RESULT]},
-    ]
+    assert orch.conversation.messages() == []
+    assert "play_music" in orch.conversation.user_message("again")
+    assert ERROR_LINE.text not in orch.conversation.user_message("again")
 
 
 def test_tool_rounds_from_an_earlier_turn_are_never_reused():

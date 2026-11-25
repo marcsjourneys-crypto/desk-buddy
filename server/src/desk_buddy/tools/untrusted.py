@@ -11,7 +11,8 @@ import html
 import re
 
 _SOURCE = re.compile(r"[a-z_]+")
-_WRAPPED = re.compile(r'(<untrusted source="[a-z_]+">\n)(.*)(\n</untrusted>)', re.DOTALL)
+# An optional plain prefix ("Started playing on Spotify: "), then one untrusted block.
+_WRAPPED = re.compile(r'(.*?)(<untrusted source="[a-z_]+">\n)(.*)(\n</untrusted>)', re.DOTALL)
 MORE = "\n(and more)"
 
 
@@ -29,19 +30,22 @@ def wrap(source: str, text: str, limit: int | None = None) -> str:
 
 
 def shorten(text: str, limit: int) -> str:
-    """`text` cut to at most `limit` characters. An untrusted block stays well formed: the
-    cut is made inside it (never mid-escape), keeping its opening and closing tags."""
+    """`text` cut to at most `limit` characters. An untrusted block (after an optional
+    plain prefix) stays well formed: only its body is cut (never mid-escape), keeping the
+    prefix and both tags."""
     if len(text) <= limit:
         return text
     match = _WRAPPED.fullmatch(text)
     if match is None:
         return _cut(text, limit)
-    head, body, tail = match.groups()
-    return head + _cut(body, limit - len(head) - len(tail)) + tail
+    prefix, head, body, tail = match.groups()
+    return prefix + head + _cut(body, limit - len(prefix) - len(head) - len(tail)) + tail
 
 
 def _cut(body: str, room: int) -> str:
-    """`body` cut so that it plus "(and more)" fits in `room` characters."""
+    """`body` cut so that it plus "(and more)" fits in `room` characters (one "(and more)"
+    even if the body was already cut once)."""
+    body = body.removesuffix(MORE)
     body = body[: max(room - len(MORE), 0)]
     amp = body.rfind("&", max(len(body) - 5, 0))  # "&amp;" is the longest escape
     if amp != -1 and ";" not in body[amp:]:
