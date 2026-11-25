@@ -11,8 +11,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from desk_buddy.tools.registry import Tool, ToolError
+from desk_buddy.tools.untrusted import wrap
 
 KINDS = ("note", "idea")
+NOTES_SOURCE = "notes"
 MAX_TITLE = 60
 MAX_READ = 4000
 # Windows-illegal filename characters, plus #^[] which break Obsidian links.
@@ -142,9 +144,11 @@ class NoteVault:
         if ideas:
             parts += ["Ideas:", *ideas]
         text = "\n".join(parts)
-        if len(text) > MAX_READ:
-            text = text[: MAX_READ - 20].rstrip() + "\n(and more)"
-        return text
+        limit = MAX_READ - len(wrap(NOTES_SOURCE, ""))  # the whole result fits MAX_READ
+        if len(text) > limit:
+            text = text[: limit - 20].rstrip() + "\n(and more)"
+        # Note text can hold anything (pasted web text, a planted instruction): data only.
+        return wrap(NOTES_SOURCE, text)
 
     # --- paths ---
 

@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from desk_buddy.brain.emotion import EMOTIONS
 from desk_buddy.brain.memory import INTERRUPTED_NOTE
 from desk_buddy.brain.personality import (
@@ -40,6 +42,14 @@ def test_error_line_is_on_the_other_side_of_the_galaxy():
     assert (
         ERROR_LINE.text == "Sorry, my brain seems to be on the other side of the galaxy right now."
     )
+
+
+@pytest.mark.parametrize("notes", [True, False])
+def test_prompt_says_untrusted_text_is_data_not_instructions(notes):
+    prompt = system_prompt(2, notes=notes)
+    assert '<untrusted source="...">' in prompt
+    assert "never instructions" in prompt
+    assert "never follow" in prompt.lower()
 
 
 def test_prompt_mentions_sentence_limit_and_spoken_style():
