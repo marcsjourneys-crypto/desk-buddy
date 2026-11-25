@@ -136,62 +136,71 @@ class SettingsStore:
             log.warning("Dashboard settings: %s", self.error)
 
     def settings(self) -> Settings:
+        """The settings with the saved values that still validate (as at startup)."""
         with self._lock:
-            return self._load(self.values)
+            return self._load(self._good(self.values)[0])
 
     def view(self) -> list[dict[str, Any]]:
         """Every editable setting: its value, where it comes from and when it applies.
-        Never a secret: only editable keys are in it."""
+        Never a secret: only editable keys are in it. A saved value that no longer
+        validates shows source "invalid" with why, and the value CARL falls back to."""
         with self._lock:
             values = dict(self.values)
-        settings = self._load_lenient(values)
+        good, bad = self._good(values)
+        settings = self._load(good)
         env = read_env(self.env_path, self._environ)
         out = []
         for item in EDITABLE:
-            if item.key in values:
+            if item.key in bad:
+                source = "invalid"
+            elif item.key in good:
                 source = "dashboard"
             elif env.get(item.key, "").strip():
                 source = "env"
             else:
                 source = "default"
-            out.append(
-                {
-                    "key": item.key,
-                    "label": item.label,
-                    "group": item.group,
-                    "kind": item.kind,
-                    "choices": list(item.choices),
-                    "value": getattr(settings, item.attr),
-                    "source": source,
-                    "applies": item.applies,
-                }
-            )
+            entry: dict[str, Any] = {
+                "key": item.key,
+                "label": item.label,
+                "group": item.group,
+                "kind": item.kind,
+                "choices": list(item.choices),
+                "value": getattr(settings, item.attr),
+                "source": source,
+                "applies": item.applies,
+            }
+            if item.key in bad:
+                entry["error"] = bad[item.key]
+            out.append(entry)
         return out
 
     def update(self, changes: Mapping[str, Any]) -> tuple[Settings | None, dict[str, str]]:
-        """Validate every change (all or nothing), then save. Returns the new settings,
-        or None and an error per field."""
+        """Validate every change (all or nothing) against the saved values that are still
+        good, then save. Returns the new settings, or None and an error per field. A bad
+        saved value never blocks other edits; it stays in the file until fixed or reset."""
         with self._lock:
+            good, _ = self._good(self.values)
             errors: dict[str, str] = {}
-            new = dict(self.values)
+            accepted: dict[str, str] = {}
             for key, value in changes.items():
                 if key not in _BY_KEY:
                     errors[key] = "This setting can't be changed here."
                     continue
                 try:
                     text = _as_text(value)
-                    self._load({**self.values, key: text})
+                    self._load({**good, key: text})
                 except (ValueError, ConfigError) as exc:
                     errors[key] = str(exc)
                     continue
-                new[key] = text
+                accepted[key] = text
             if not errors:
                 try:
-                    settings = self._load(new)
+                    settings = self._load({**good, **accepted})
                 except ConfigError as exc:  # each was fine alone, not together
                     errors = {key: str(exc) for key in changes}
             if errors:
                 return None, errors
+            new = {**self.values, **accepted}
             write_json_atomic(self.path, new)
             self.values, self.error = new, None
             return settings, {}
@@ -202,7 +211,7 @@ class SettingsStore:
             raise KeyError(key)
         with self._lock:
             new = {k: v for k, v in self.values.items() if k != key}
-            settings = self._load(new)
+            settings = self._load(self._good(new)[0])
             write_json_atomic(self.path, new)
             self.values, self.error = new, None
             return settings
@@ -210,20 +219,23 @@ class SettingsStore:
     def _load(self, values: Mapping[str, str]) -> Settings:
         return load_settings(self.env_path, self._environ, dashboard=values)
 
-    def _load_lenient(self, values: Mapping[str, str]) -> Settings:
-        """For the view: a saved value that no longer validates (a deleted folder) shows
-        the value CARL falls back to, as at startup."""
+    def _good(self, values: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+        """Split saved values into those that validate and those that don't (with why),
+        the way startup skips bad ones."""
         try:
-            return self._load(values)
+            self._load(values)
+            return dict(values), {}
         except ConfigError:
-            good = {}
-            for key, value in values.items():
-                try:
-                    self._load({key: value})
-                    good[key] = value
-                except ConfigError:
-                    pass
-            return self._load(good)
+            pass
+        good: dict[str, str] = {}
+        bad: dict[str, str] = {}
+        for key, value in values.items():
+            try:
+                self._load({key: value})
+                good[key] = value
+            except ConfigError as exc:
+                bad[key] = str(exc)
+        return good, bad
 
 
 Hook = Callable[[Settings, Settings], None]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import secrets
 import socket
@@ -15,7 +16,13 @@ from typing import Any
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.brain.personality import Personality
-from desk_buddy.config import ConfigError, Settings, load_settings
+from desk_buddy.config import (
+    ConfigError,
+    Settings,
+    dashboard_settings_path,
+    load_settings,
+    read_dashboard_values,
+)
 from desk_buddy.dashboard import build_status, create_dashboard, start_dashboard
 from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
@@ -73,18 +80,25 @@ async def _run(settings: Settings) -> None:
             settings.stt_model,
         )
         try:
-            transcriber = await asyncio.to_thread(
-                WhisperTranscriber,
-                settings.stt_model,
-                device=settings.stt_device,
-                compute_type=settings.stt_compute_type,
-            )
+            transcriber = await _load_whisper(settings)
         except Exception as exc:
-            raise StartupError(
-                f"Can't load Whisper model {settings.stt_model!r} on {settings.stt_device} "
-                f"({settings.stt_compute_type}): {exc}"
-            ) from exc
-        synthesizer = await _make_synthesizer(settings)
+            # A dashboard value may be what broke it: try once more without it.
+            fallback = _settings_without(_STT_KEYS)
+            if fallback is None:
+                raise _whisper_error(settings, exc) from exc
+            log.warning(
+                "Speech-to-text didn't load with the dashboard's settings (%s); "
+                "using .env and defaults for it this time",
+                exc,
+            )
+            settings = dataclasses.replace(
+                settings, **{key.lower(): getattr(fallback, key.lower()) for key in _STT_KEYS}
+            )
+            try:
+                transcriber = await _load_whisper(settings)
+            except Exception as exc2:
+                raise _whisper_error(settings, exc2) from exc2
+        synthesizer, settings = await _make_synthesizer(settings)
         stack.callback(synthesizer.close)
         mic = Microphone()
         stack.callback(mic.close)
@@ -92,7 +106,10 @@ async def _run(settings: Settings) -> None:
         stack.callback(speaker.close)
         bus = EventBus()  # live events for the dashboard; never blocks the voice loop
         personality = PersonalityStore()  # edited on the dashboard; defaults otherwise
-        brain = Brain(settings, bus=bus, personality=personality.current)
+        guard = ActionGuard(settings.computer_control, bus=bus)
+        # Reads the Spotify login from disk: off the event loop.
+        music = await asyncio.to_thread(_music_tools, settings, guard)
+        brain = Brain(settings, bus=bus, personality=personality.current, guard=guard, music=music)
         stack.callback(brain.close)  # runs after the farewell, which restores the music
         conversation = Conversation(settings.history_turns)
         # A connected robot takes over the mic, speaker and button; else the PC's are used.
@@ -101,6 +118,8 @@ async def _run(settings: Settings) -> None:
 
         def on_question() -> None:
             live.apply()  # dashboard changes land between turns, never during one
+            brain.before_question()
+            orchestrator.chat = brain.chat
             brain.guard.new_question()
 
         def on_state(state: State) -> None:
@@ -122,9 +141,9 @@ async def _run(settings: Settings) -> None:
         )
         stack.push_async_callback(orchestrator.shutdown)
         live.on_question(brain.on_settings)
-        live.on_question(lambda old, new: setattr(orchestrator, "chat", brain.chat))
         live.on_question(lambda old, new: conversation.set_max_turns(new.history_turns))
         live.on_now(lambda old, new: _set_speed(synthesizer, new.tts_speed))
+        live.on_now(brain.on_settings_now)  # computer control off: at once
 
         events: asyncio.Queue[str] = asyncio.Queue()
         if settings.robot_token:
@@ -172,6 +191,7 @@ async def _run(settings: Settings) -> None:
                 robot=switch.robot,
                 state=orchestrator.state.value,
                 dashboard_port=settings.dashboard_port,
+                computer_control=brain.guard.enabled,  # what's in force right now
             ),
             preview=lambda: prompt_for(live.current, brain.tools, personality.current()),
         )
@@ -197,7 +217,6 @@ async def _run(settings: Settings) -> None:
 # Settings whose change means new tools and a new chat (prompt, model, effort, tools).
 _CHAT_SETTINGS = (
     "computer_control",
-    "music_duck",
     "max_sentences",
     "llm_model",
     "llm_effort",
@@ -205,13 +224,22 @@ _CHAT_SETTINGS = (
     "obsidian_daily_folder",
     "obsidian_ideas_folder",
 )
-_MUSIC_SETTINGS = ("computer_control", "music_duck")
+_STT_KEYS = ("STT_MODEL", "STT_DEVICE", "STT_COMPUTE_TYPE")
 
 
 class Brain:
     """What a turn uses that a live setting can change: the action guard, the music tools
-    and their ducker, the tool registry and the chat. Rebuilt between turns (from
-    LiveSettings.apply at the start of a question), never during one."""
+    and their ducker, the tool registry and the chat.
+
+    - The tools and chat are rebuilt between turns (LiveSettings.apply at the start of a
+      question), never during one.
+    - The music tools and their ducker are made once, the first time computer control is
+      on with a Spotify login, then kept: turning computer control off just leaves the
+      music tools out, and MUSIC_DUCK just switches the ducker. A ducker is never
+      replaced, so no handover can leave the music low.
+    - Making them later (computer control turned on from the dashboard) reads the
+      Spotify login on a worker thread; they join at the next question.
+    """
 
     def __init__(
         self,
@@ -219,20 +247,48 @@ class Brain:
         *,
         bus: EventBus,
         personality: Callable[[], Personality] = Personality,
+        guard: ActionGuard | None = None,
+        music: tuple[MusicTools | None, MusicDucker | None] = (None, None),
     ) -> None:
-        self.guard = ActionGuard(settings.computer_control, bus=bus)
+        self.guard = guard or ActionGuard(settings.computer_control, bus=bus)
         self._personality = personality
-        self.music: MusicTools | None = None
-        self.ducker: MusicDucker | None = None
-        self._build(settings, music=True)
+        self._settings = settings
+        self._state = State.IDLE
+        self._music, self.ducker = music
+        self._building = False
+        self._rebuild_due = False
+        self._switch_ducker()
+        self._rebuild()
+
+    @property
+    def music(self) -> MusicTools | None:
+        return self._music if self._settings.computer_control else None
+
+    def on_settings_now(self, old: Settings, new: Settings) -> None:
+        """At once, from the dashboard: turning computer control off can't wait."""
+        if not new.computer_control:
+            self.guard.enabled = False
+            if self.ducker is not None:
+                self.ducker.set_enabled(False, self._state)
 
     def on_settings(self, old: Settings, new: Settings) -> None:
+        """At the start of a question, on the event loop."""
+        self._settings = new
         self.guard.enabled = new.computer_control
-        music = any(getattr(old, a) != getattr(new, a) for a in _MUSIC_SETTINGS)
-        if music or any(getattr(old, a) != getattr(new, a) for a in _CHAT_SETTINGS):
-            self._build(new, music=music)
+        self._switch_ducker()
+        if new.computer_control and self._music is None and not self._building:
+            self._make_music(new)
+        if any(getattr(old, a) != getattr(new, a) for a in _CHAT_SETTINGS):
+            self._rebuild()
+
+    def before_question(self) -> None:
+        """Music tools made in the background since the last question join now."""
+        if self._rebuild_due:
+            self._rebuild_due = False
+            self._rebuild()
 
     def on_state(self, state: State) -> None:
+        self._state = state
         if self.ducker is not None:
             self.ducker.on_state(state)
 
@@ -240,21 +296,48 @@ class Brain:
         if self.ducker is not None:
             self.ducker.close()
 
-    def _build(self, settings: Settings, *, music: bool) -> None:
-        if music:
-            old = self.ducker
-            self.music, self.ducker = _music_tools(settings, self.guard)
-            if old is not None:
-                # It restores the music, which can take a moment: never on the event loop.
-                threading.Thread(target=old.close, name="duck-close", daemon=True).start()
-        self.tools = build_tools(settings, music=self.music)
+    def _switch_ducker(self) -> None:
+        if self.ducker is not None:
+            s = self._settings
+            self.ducker.set_enabled(s.computer_control and s.music_duck, self._state)
+
+    def _make_music(self, settings: Settings) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # not on the loop (tests): just do it
+            self._music_made(*_music_tools(settings, self.guard))
+            return
+        self._building = True
+
+        def make() -> None:
+            try:
+                made = _music_tools(settings, self.guard)
+            except Exception:
+                log.warning("Couldn't set up the music tools", exc_info=True)
+                made = (None, None)
+            loop.call_soon_threadsafe(self._music_made, *made)
+
+        threading.Thread(target=make, name="music-setup", daemon=True).start()
+
+    def _music_made(self, music: MusicTools | None, ducker: MusicDucker | None) -> None:
+        self._building = False
+        if music is None:
+            return
+        self._music, self.ducker = music, ducker
+        self._switch_ducker()
+        self._rebuild_due = True
+
+    def _rebuild(self) -> None:
+        settings = self._settings
+        tools = build_tools(settings, music=self.music)
+        chat = create_chat(settings, tools, personality=self._personality)
         log.info(
             "Note tools: %s",
             f"on ({settings.obsidian_vault_path})"
-            if "take_note" in self.tools
+            if "take_note" in tools
             else "off (no OBSIDIAN_VAULT_PATH)",
         )
-        self.chat = create_chat(settings, self.tools, personality=self._personality)
+        self.tools, self.chat = tools, chat  # both or neither
 
 
 def _set_speed(synthesizer: Any, speed: float) -> None:
@@ -265,8 +348,9 @@ def _set_speed(synthesizer: Any, speed: float) -> None:
 def _music_tools(
     settings: Settings, guard: ActionGuard
 ) -> tuple[MusicTools | None, MusicDucker | None]:
-    """The music tools (and the ducker, with MUSIC_DUCK), only when computer control is on
-    and Spotify is set up and logged in. Otherwise CARL's prompt says music isn't set up."""
+    """The music tools and their ducker (switched by MUSIC_DUCK), only when computer
+    control is on and Spotify is set up and logged in. Otherwise CARL's prompt says music
+    isn't set up. Blocking (reads the login from disk): call it off the event loop."""
     if not settings.computer_control:
         reason = "COMPUTER_CONTROL is off"
     elif not settings.spotify_client_id:
@@ -274,38 +358,84 @@ def _music_tools(
     elif (control := create_control(settings.spotify_client_id)) is None:
         reason = "not logged in: run uv run python -m desk_buddy.spotify_login"
     else:
-        ducker = None
-        if settings.music_duck:
-            # Its own client with a short timeout and no retries: a duck is only worth
-            # doing at once.
-            duck_control = create_control(
-                settings.spotify_client_id, timeout=DUCK_TIMEOUT_S, retries=0
-            )
-            ducker = MusicDucker(duck_control) if duck_control is not None else None
-        log.info("Music tools: on (Spotify%s)", ", ducking" if ducker else "")
+        # Its own client with a short timeout and no retries: a duck is only worth doing
+        # at once.
+        duck_control = create_control(settings.spotify_client_id, timeout=DUCK_TIMEOUT_S, retries=0)
+        ducker = (
+            MusicDucker(duck_control, enabled=settings.music_duck)
+            if duck_control is not None
+            else None
+        )
+        log.info("Music tools: on (Spotify%s)", ", ducking" if settings.music_duck else "")
         return MusicTools(control, guard, ducker=ducker), ducker
     log.info("Music tools: off (%s)", reason)
     return None, None
 
 
-async def _make_synthesizer(settings: Settings) -> SapiSynthesizer | PiperSynthesizer:
-    """The TTS engine from settings. Piper may download its voice first (blocking, in a
-    worker thread; Ctrl+C waits for it, like the Whisper download)."""
+async def _load_whisper(settings: Settings) -> WhisperTranscriber:
+    return await asyncio.to_thread(
+        WhisperTranscriber,
+        settings.stt_model,
+        device=settings.stt_device,
+        compute_type=settings.stt_compute_type,
+    )
+
+
+def _whisper_error(settings: Settings, exc: Exception) -> StartupError:
+    return StartupError(
+        f"Can't load Whisper model {settings.stt_model!r} on {settings.stt_device} "
+        f"({settings.stt_compute_type}): {exc}"
+    )
+
+
+def _settings_without(keys: tuple[str, ...]) -> Settings | None:
+    """The settings as if the dashboard hadn't set `keys`, for a second try when one of
+    its values (checked, but still unusable, e.g. a model that won't load) breaks startup.
+    None if the dashboard sets none of them, so there's nothing to fall back from."""
+    values, _ = read_dashboard_values(dashboard_settings_path())
+    if not any(key in values for key in keys):
+        return None
+    try:
+        return load_settings(dashboard={k: v for k, v in values.items() if k not in keys})
+    except ConfigError:
+        return None
+
+
+async def _make_synthesizer(
+    settings: Settings,
+) -> tuple[SapiSynthesizer | PiperSynthesizer, Settings]:
+    """The TTS engine from settings, and the settings it was made with (a voice from the
+    dashboard that won't load falls back to .env's). Piper may download its voice first
+    (blocking, in a worker thread; Ctrl+C waits for it, like the Whisper download)."""
     if settings.tts_engine == "sapi":
         try:
             synthesizer = SapiSynthesizer()
         except Exception as exc:
             raise StartupError(f"Can't start Windows SAPI voice: {exc}") from exc
         log.info("Voice: sapi")
-        return synthesizer
+        return synthesizer, settings
     try:
-        synthesizer = await asyncio.to_thread(
-            load_piper, settings.tts_voice, settings.voices_dir, speed=settings.tts_speed
-        )
+        synthesizer = await _load_voice(settings)
     except VoiceError as exc:
-        raise StartupError(f"{exc}; or set TTS_ENGINE=sapi to use the Windows voice") from exc
+        fallback = _settings_without(("TTS_VOICE",))
+        if fallback is None or fallback.tts_voice == settings.tts_voice:
+            raise StartupError(f"{exc}; or set TTS_ENGINE=sapi to use the Windows voice") from exc
+        log.warning(
+            "The dashboard's voice didn't load (%s); using %s this time", exc, fallback.tts_voice
+        )
+        settings = dataclasses.replace(settings, tts_voice=fallback.tts_voice)
+        try:
+            synthesizer = await _load_voice(settings)
+        except VoiceError as exc2:
+            raise StartupError(f"{exc2}; or set TTS_ENGINE=sapi to use the Windows voice") from exc2
     log.info("Voice: piper %s", settings.tts_voice)
-    return synthesizer
+    return synthesizer, settings
+
+
+async def _load_voice(settings: Settings) -> PiperSynthesizer:
+    return await asyncio.to_thread(
+        load_piper, settings.tts_voice, settings.voices_dir, speed=settings.tts_speed
+    )
 
 
 async def _say_farewell(orchestrator: Orchestrator) -> None:

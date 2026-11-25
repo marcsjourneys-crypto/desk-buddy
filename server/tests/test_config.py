@@ -166,6 +166,49 @@ def test_tests_and_tools_never_read_the_dashboard_file(monkeypatch, tmp_path):
     assert s.max_sentences == 2
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("MAX_SENTENCES", "11"),
+        ("HISTORY_TURNS", "51"),
+        ("STT_COMPUTE_TYPE", "int4"),
+        ("STT_MODEL", "../../evil"),
+        ("STT_MODEL", "base en"),
+        ("LLM_MODEL", "claude haiku"),
+        ("LLM_MODEL", "x/y"),
+    ],
+)
+def test_more_values_are_checked_so_startup_cant_be_broken(key, value):
+    with pytest.raises(ConfigError, match=key):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("MAX_SENTENCES", "10"),
+        ("HISTORY_TURNS", "50"),
+        ("STT_COMPUTE_TYPE", "float16"),
+        ("STT_MODEL", "small.en"),
+        ("STT_MODEL", "Systran/faster-whisper-large-v3"),
+        ("LLM_MODEL", "claude-sonnet-5-5"),
+        ("LLM_MODEL", "us.anthropic.claude-haiku-5-5:0"),
+    ],
+)
+def test_good_values_still_pass(key, value):
+    load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
+
+
+def test_a_vault_cant_be_a_drive_root_or_the_home_folder(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    for bad in (Path(tmp_path.anchor), Path.home()):
+        with pytest.raises(ConfigError, match="OBSIDIAN_VAULT_PATH"):
+            load_settings(
+                env_path=None, environ={"ANTHROPIC_API_KEY": "k", "OBSIDIAN_VAULT_PATH": str(bad)}
+            )
+
+
 def test_dashboard_port():
     assert load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"}).dashboard_port == 8766
     s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "DASHBOARD_PORT": "9000"})

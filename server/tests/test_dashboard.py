@@ -161,7 +161,12 @@ def test_no_secret_ever_appears_in_any_response(tmp_path):
 
 
 def test_status_has_no_secrets_only_whether_things_are_on():
-    s = Settings(anthropic_api_key=SECRETS[0], robot_token=SECRETS[1], spotify_client_id=SECRETS[2])
+    s = Settings(
+        anthropic_api_key=SECRETS[0],
+        robot_token=SECRETS[1],
+        spotify_client_id=SECRETS[2],
+        computer_control=True,
+    )
     status = build_status(
         s, voice="piper x", tools=("play_music",), robot=None, state="idle", dashboard_port=8766
     )
@@ -170,6 +175,17 @@ def test_status_has_no_secrets_only_whether_things_are_on():
     assert status["dashboard"] == "http://127.0.0.1:8766"
     for secret in SECRETS:
         assert secret not in json.dumps(status)
+    # Computer control turned off a moment ago: the status says so, music too.
+    off = build_status(
+        s,
+        voice="piper x",
+        tools=("play_music",),
+        robot=None,
+        state="idle",
+        dashboard_port=8766,
+        computer_control=False,
+    )
+    assert (off["computer_control"], off["music"]) == (False, False)
 
 
 def test_settings_change_and_reset_with_the_token(tmp_path):
@@ -239,6 +255,96 @@ def test_personality_change_preview_and_reset(tmp_path):
             assert status == 404
 
     asyncio.run(run())
+
+
+def test_a_failed_save_is_a_json_error_never_a_500(tmp_path, monkeypatch):
+    import desk_buddy.settings_store as settings_store
+
+    def disk_full(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings_store, "write_json_atomic", disk_full)
+    import desk_buddy.personality_store as personality_store
+
+    monkeypatch.setattr(personality_store, "write_json_atomic", disk_full)
+
+    async def run():
+        async with running(tmp_path) as d:
+            results = [
+                await call(
+                    "PUT",
+                    d.base + "/api/settings",
+                    body={"MAX_SENTENCES": 4},
+                    headers=change_headers(d),
+                ),
+                await call(
+                    "DELETE", d.base + "/api/settings/MAX_SENTENCES", headers=change_headers(d)
+                ),
+                await call(
+                    "PUT",
+                    d.base + "/api/personality",
+                    body={"character": "Hi."},
+                    headers=change_headers(d),
+                ),
+                await call(
+                    "DELETE", d.base + "/api/personality/character", headers=change_headers(d)
+                ),
+            ]
+            return results
+
+    for status, _, body in asyncio.run(run()):
+        assert status == 503
+        assert "Couldn't save" in json.loads(body)["error"]
+
+
+@pytest.mark.parametrize("length", ["abc", "-5", str(10**9)])
+def test_odd_or_huge_content_lengths_are_refused_cleanly(tmp_path, length):
+    import http.client
+
+    async def run():
+        async with running(tmp_path) as d:
+
+            def send():
+                conn = http.client.HTTPConnection("127.0.0.1", d.port, timeout=5)
+                conn.putrequest("PUT", "/api/settings", skip_accept_encoding=True)
+                conn.putheader("Origin", d.origin)
+                conn.putheader("X-CARL-Token", TOKEN)
+                conn.putheader("Content-Length", length)
+                conn.endheaders()
+                try:
+                    return conn.getresponse().status
+                finally:
+                    conn.close()
+
+            return await asyncio.to_thread(send)
+
+    assert asyncio.run(run()) in (400, 413)
+
+
+def test_a_body_bigger_than_the_cap_is_refused_even_without_a_length(tmp_path):
+    import http.client
+
+    async def run():
+        async with running(tmp_path) as d:
+
+            def send():
+                conn = http.client.HTTPConnection("127.0.0.1", d.port, timeout=5)
+                big = b'{"x": "' + b"a" * (200 * 1024) + b'"}'
+                conn.request(
+                    "PUT",
+                    "/api/settings",
+                    body=iter([big]),  # chunked: no Content-Length
+                    headers={"Origin": d.origin, "X-CARL-Token": TOKEN},
+                    encode_chunked=True,
+                )
+                try:
+                    return conn.getresponse().status
+                finally:
+                    conn.close()
+
+            return await asyncio.to_thread(send)
+
+    assert asyncio.run(run()) == 413
 
 
 # --- CSRF and rebinding ---

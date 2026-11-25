@@ -26,9 +26,10 @@ CLOSE_WAIT_S = 3.0  # at shutdown, give a pending restore this long
 
 
 class MusicDucker:
-    def __init__(self, control: Any) -> None:
+    def __init__(self, control: Any, *, enabled: bool = True) -> None:
         self._control = control
-        self._lock = threading.Lock()  # guards _want, _saved and _closed
+        self._enabled = enabled  # MUSIC_DUCK (and computer control) can change live
+        self._lock = threading.Lock()  # guards _want, _saved, _enabled and _closed
         # Held for a whole duck or restore, and for a volume the user sets: they never
         # interleave, so the user's level always wins.
         self._volume_lock = threading.Lock()
@@ -40,8 +41,23 @@ class MusicDucker:
     def on_state(self, state: Any) -> None:
         """Called with every state change, on the event loop. Never blocks or raises."""
         try:
-            want = str(state) != "idle"
             with self._lock:
+                want = self._enabled and str(state) != "idle"
+                if want == self._want or self._closed:
+                    return
+                self._want = want
+            self._executor.submit(self._apply)
+        except Exception:
+            log.warning("Music duck failed to queue", exc_info=True)
+
+    def set_enabled(self, enabled: bool, state: Any = "idle") -> None:
+        """Turn ducking on or off live. Off restores the music now (through the same
+        worker, so it can't race a duck in flight); on is primed with CARL's current
+        state, so it ducks at once mid-turn. Never blocks or raises."""
+        try:
+            with self._lock:
+                self._enabled = enabled
+                want = enabled and str(state) != "idle"
                 if want == self._want or self._closed:
                     return
                 self._want = want

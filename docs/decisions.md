@@ -166,3 +166,22 @@ Plan: `docs/plans/2026-11-25-m8-dashboard.md`.
 - **Live apply:** `LiveSettings` holds the running settings. A change is proposed at once (TTS speed is set on Piper immediately: the next sentence) and applied when the next turn starts. Then the `Brain` in `__main__` sets the guard switch, rebuilds the music tools and ducker if computer control or ducking changed (an old ducker is closed off the loop, restoring the music), and rebuilds the tools and chat for the vault, model, effort or sentence limit; the conversation trims to the new history size. Speech recognition, the key and the voice apply after a restart.
 - **Personality file:** `%LOCALAPPDATA%\desk-buddy\personality.json` holds only the character paragraph (at most 3000 characters, no `{`/`}`, not empty) and the seven canned lines (each at most 200 characters, one line, an emotion from the tags). Missing items fall back to the code's defaults; bad items in the file are skipped with a banner. The prompt is the character joined to the locked rules, never formatted. The chat rebuilds the prompt for every request and the loop reads lines when it speaks them, so edits apply at the next question and the greeting and farewell when spoken. The page shows the full assembled prompt as a read-only preview.
 - **Tests never touch the user's app data:** `test_main` points `LOCALAPPDATA` at a temp folder.
+- **Local trust model:**
+  - **What the dashboard stops:** web pages in the user's browser (Host, Origin and token checks).
+  - **What it doesn't:** other programs running as the user on this PC. They can read the token from the served page, or the settings files, and the user's account already has full control of this PC anyway. That's the boundary we accept for a personal desk robot.
+  - **Never exposed:** secrets never go to the page at all, so even a local reader of the page learns nothing it couldn't read from `.env` itself.
+- **Review fixes (same day):**
+  - **The ducker is never replaced.** The music tools and ducker are made once, the first time computer control is on with a Spotify login, and kept. MUSIC_DUCK and computer control just switch the ducker (`set_enabled`). Off restores through the ducker's own worker, so it can't race a duck in flight; on is primed with CARL's current state. This fixes a handover that could save a ducked level as the "original" and leave the music low.
+  - **Making them later** (computer control turned on from the page) reads the Spotify login on a worker thread; the tools join at the next question.
+  - **Turning computer control off applies at once** (an `on_now` hook disables the guard and the ducker), and the status shows it. Turning it on waits for the next question.
+  - **A saved value that no longer validates never blocks other edits.** Edits are checked against the good saved values only; the bad one stays in the file, shown as `source: "invalid"` with its error, until fixed or reset. Save failures come back as JSON errors (400 or 503), never a 500.
+  - **Startup can't be broken from the page:**
+    - `STT_COMPUTE_TYPE` is allowlisted (`default int8 int8_float16 int16 float16 float32`), `STT_MODEL` must look like a model name or repo id (no `..`), and `LLM_MODEL` like a model id;
+    - `MAX_SENTENCES` is 1–10 and `HISTORY_TURNS` 1–50;
+    - the vault can't be a drive root or the home folder;
+    - if Whisper or the Piper voice still won't load with the dashboard's values, startup logs a warning and tries once more with `.env` and defaults for those keys.
+  - **Hardening:**
+    - Content-Length is parsed safely;
+    - the body is capped as it streams (a chunked body can't get past 64 KB);
+    - the event socket's pending `queue.get()` is always cancelled;
+    - the Brain builds its tools and chat into locals and swaps them in together.

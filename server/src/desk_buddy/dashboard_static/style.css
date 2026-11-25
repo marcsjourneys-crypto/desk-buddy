@@ -174,6 +174,7 @@ fieldset.panel legend { color: var(--brass); padding: 0 6px; font-weight: 600; }
 .source, .applies { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .source.dashboard { color: var(--brass); }
 .source.env { color: var(--teal); }
+.source.invalid { color: var(--red); }
 
 input[type="text"], input[type="number"], select, textarea {
   width: 100%;

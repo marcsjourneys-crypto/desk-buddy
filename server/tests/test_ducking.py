@@ -133,6 +133,41 @@ def test_a_volume_set_by_the_user_while_ducked_is_not_undone():
     ducker.close()
 
 
+def test_turning_ducking_off_and_on_mid_question_ends_at_the_original_volume():
+    client = FakeSpotify(volume=70)
+    ducker = ducker_for(client)
+    ducker.on_state(State.LISTENING)
+    settle(ducker)
+    assert client.volumes == [14]
+    ducker.set_enabled(False, State.THINKING)  # off mid-question: the music comes back now
+    settle(ducker)
+    assert client.volume_percent == 70
+    ducker.on_state(State.SPEAKING)  # ignored while off
+    settle(ducker)
+    assert client.volume_percent == 70
+    ducker.set_enabled(True, State.SPEAKING)  # on again mid-reply: primed, ducks at once
+    settle(ducker)
+    assert client.volume_percent == 14
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volume_percent == 70
+    assert client.volumes == [14, 70, 14, 70]
+    ducker.close()
+
+
+def test_a_ducker_made_while_off_does_nothing_until_turned_on():
+    client = FakeSpotify(volume=70)
+    ducker = MusicDucker(SpotifyControl(client, pc_name="pc"), enabled=False)
+    ducker.on_state(State.LISTENING)
+    settle(ducker)
+    assert client.volumes == []
+    ducker.set_enabled(True, State.LISTENING)
+    settle(ducker)
+    assert client.volumes == [14]
+    ducker.close()
+    assert client.volumes == [14, 70]
+
+
 def test_close_restores_even_without_an_idle_state():
     # Shutdown mid-turn, or after a farewell that timed out: CARL never went idle.
     client = FakeSpotify(volume=40, delay=0.1)

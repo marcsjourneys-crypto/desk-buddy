@@ -31,7 +31,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import desk_buddy
-from desk_buddy.config import Settings
+from desk_buddy.config import ConfigError, Settings
 from desk_buddy.events import EventBus
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.server import RunningServer, ServerStartError, start_server
@@ -55,16 +55,20 @@ def build_status(
     robot: Any,
     state: str,
     dashboard_port: int,
+    computer_control: bool | None = None,
 ) -> dict[str, Any]:
-    """What the page's status bar shows. Whether things are on, never their secrets."""
+    """What the page's status bar shows. Whether things are on, never their secrets.
+    `computer_control` is what's in force now (turning it off applies at once)."""
     names = set(tools)
+    if computer_control is None:
+        computer_control = settings.computer_control
     return {
         "version": desk_buddy.__version__,
         "state": state,
         "voice": voice,
         "notes": "take_note" in names,
-        "music": "play_music" in names,
-        "computer_control": settings.computer_control,
+        "music": "play_music" in names and computer_control,
+        "computer_control": computer_control,
         "robot": {
             "enabled": bool(settings.robot_token),
             "connected": robot is not None,
@@ -99,12 +103,16 @@ def create_dashboard(
         if request.headers.get("host") not in hosts:
             return _refused("Unknown host.")
         if request.method in CHANGES:
-            if int(request.headers.get("content-length") or 0) > MAX_BODY:
+            try:
+                length = int(request.headers.get("content-length") or 0)
+            except ValueError:
+                return JSONResponse({"error": "Bad Content-Length."}, status_code=400)
+            if length > MAX_BODY or length < 0:
                 return JSONResponse({"error": "Too big."}, status_code=413)
             sent = request.headers.get("x-carl-token", "").encode()
             ours = request.headers.get("origin") in origins
             if not (ours and hmac.compare_digest(sent, token.encode())):
-                await request.body()  # read it, so the connection closes cleanly
+                await _read_capped(request)  # read it, so the connection closes cleanly
                 return _refused("Changes must come from the dashboard page.")
         response: Response = await call_next(request)
         response.headers["Content-Security-Policy"] = csp
@@ -145,9 +153,12 @@ def create_dashboard(
     @app.put("/api/settings")
     async def put_settings(request: Request) -> Response:
         changes = await _json_object(request)
-        if changes is None:
-            return JSONResponse({"error": "Send a JSON object."}, status_code=400)
-        new, errors = await asyncio.to_thread(settings.update, changes)
+        if isinstance(changes, Response):
+            return changes
+        try:
+            new, errors = await asyncio.to_thread(settings.update, changes)
+        except (ConfigError, OSError) as exc:
+            return _store_failed(exc)
         if errors:
             return JSONResponse({"errors": errors}, status_code=400)
         live.propose(new)
@@ -160,6 +171,8 @@ def create_dashboard(
             new = await asyncio.to_thread(settings.reset, key)
         except KeyError:
             return JSONResponse({"error": "No such setting."}, status_code=404)
+        except (ConfigError, OSError) as exc:
+            return _store_failed(exc)
         live.propose(new)
         log.info("Dashboard: %s reset", key)
         return JSONResponse(await asyncio.to_thread(settings_view))
@@ -176,9 +189,12 @@ def create_dashboard(
     @app.put("/api/personality")
     async def put_personality(request: Request) -> Response:
         changes = await _json_object(request)
-        if changes is None:
-            return JSONResponse({"error": "Send a JSON object."}, status_code=400)
-        _, errors = await asyncio.to_thread(personality.update, changes)
+        if isinstance(changes, Response):
+            return changes
+        try:
+            _, errors = await asyncio.to_thread(personality.update, changes)
+        except OSError as exc:
+            return _store_failed(exc)
         if errors:
             return JSONResponse({"errors": errors}, status_code=400)
         log.info("Dashboard: personality changed")
@@ -190,6 +206,8 @@ def create_dashboard(
             await asyncio.to_thread(personality.reset, item)
         except KeyError:
             return JSONResponse({"error": "No such item."}, status_code=404)
+        except OSError as exc:
+            return _store_failed(exc)
         log.info("Dashboard: personality %s reset", item)
         return JSONResponse(await asyncio.to_thread(personality_view))
 
@@ -203,6 +221,7 @@ def create_dashboard(
         await ws.accept()
         queue, history = bus.subscribe()
         receiver = asyncio.create_task(_until_closed(ws))
+        getter: asyncio.Task[Any] | None = None
         try:
             for event in history:
                 await ws.send_json(event)
@@ -212,7 +231,6 @@ def create_dashboard(
                     {getter, receiver}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if getter not in done:
-                    getter.cancel()
                     break
                 await ws.send_json(getter.result())
         except Exception:
@@ -220,6 +238,8 @@ def create_dashboard(
         finally:
             bus.unsubscribe(queue)
             receiver.cancel()
+            if getter is not None:
+                getter.cancel()  # never leave a queue.get() pending
             with contextlib.suppress(Exception):
                 await ws.close()
 
@@ -242,15 +262,37 @@ def _refused(message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=403)
 
 
-async def _json_object(request: Request) -> dict[str, Any] | None:
-    body = await request.body()
-    if len(body) > MAX_BODY:
-        return None
+def _store_failed(exc: Exception) -> JSONResponse:
+    """A save that failed (the disk, or settings that no longer load): a JSON error the
+    page can show, never a 500."""
+    log.warning("Dashboard: couldn't save: %s", exc)
+    if isinstance(exc, ConfigError):
+        return JSONResponse({"error": f"Couldn't save: {exc}"}, status_code=400)
+    return JSONResponse({"error": f"Couldn't save: {type(exc).__name__}"}, status_code=503)
+
+
+async def _read_capped(request: Request) -> bytes | None:
+    """The body, read as it streams in; None once it passes MAX_BODY (whatever
+    Content-Length said, e.g. a chunked body)."""
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_BODY:
+            return None
+    return bytes(body)
+
+
+async def _json_object(request: Request) -> dict[str, Any] | JSONResponse:
+    body = await _read_capped(request)
+    if body is None:
+        return JSONResponse({"error": "Too big."}, status_code=413)
     try:
         data = json.loads(body or b"null")
     except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+        data = None
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "Send a JSON object."}, status_code=400)
+    return data
 
 
 async def _until_closed(ws: WebSocket) -> None:

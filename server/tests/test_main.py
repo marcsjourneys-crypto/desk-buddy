@@ -586,7 +586,7 @@ def test_music_tools_are_on_with_a_login(monkeypatch, fakes, calls, caplog):
         spotify_client_id="cid",
         music_duck=False,
     )
-    assert made == [("cid", {})]
+    assert made[0] == ("cid", {})  # (the ducker is made too, switched off, for later)
     assert "play_music" in tools
     assert "Music tools: on (Spotify)" in caplog.messages
     # Each turn starts a new question for the action limits.
@@ -604,11 +604,14 @@ def test_music_ducking_follows_the_state_with_its_own_quick_client(
     ducked = []
 
     class Ducker:
-        def __init__(self, control):
+        def __init__(self, control, *, enabled=True):
             calls.append("ducker created")
 
         def on_state(self, state):
             ducked.append(state)
+
+        def set_enabled(self, enabled, state="idle"):
+            calls.append(("ducker enabled", enabled))
 
         def close(self):
             calls.append("ducker closed")
@@ -624,6 +627,150 @@ def test_music_ducking_follows_the_state_with_its_own_quick_client(
     assert ducked == [State.LISTENING]
     shutdown = steps(calls)
     assert shutdown.index("farewell") < shutdown.index("ducker closed")
+
+
+class VolumeSpotify:
+    """Just enough Spotify for ducking: a playing device with a volume."""
+
+    def __init__(self, volume):
+        self.volume_percent = volume
+
+    def current_playback(self, market=None, additional_types=None):
+        return {"is_playing": True, "device": {"id": "pc", "volume_percent": self.volume_percent}}
+
+    def volume(self, volume_percent, device_id=None):
+        self.volume_percent = volume_percent
+
+
+def test_changing_music_duck_mid_question_leaves_the_music_as_it_was(monkeypatch):
+    from desk_buddy.events import EventBus
+    from desk_buddy.loop import State
+    from desk_buddy.tools.ducking import MusicDucker
+    from desk_buddy.tools.spotify import MusicTools, SpotifyControl
+
+    monkeypatch.setattr(entry, "create_chat", lambda *a, **k: object())
+    client = VolumeSpotify(70)
+    control = SpotifyControl(client, pc_name="pc")
+    ducker = MusicDucker(control)
+    guard = entry.ActionGuard(True)
+    on = Settings(anthropic_api_key="k", computer_control=True, music_duck=True)
+    off = Settings(anthropic_api_key="k", computer_control=True, music_duck=False)
+    brain = entry.Brain(
+        on, bus=EventBus(), guard=guard, music=(MusicTools(control, guard, ducker=ducker), ducker)
+    )
+    brain.on_state(State.LISTENING)
+    assert ducker.flush(2) and client.volume_percent == 14
+    brain.on_settings(on, off)  # applied at the next question, mid-way through this one
+    brain.on_state(State.THINKING)
+    brain.on_state(State.SPEAKING)
+    brain.on_state(State.IDLE)
+    assert ducker.flush(2)
+    assert client.volume_percent == 70
+    assert brain.ducker is ducker  # switched, never replaced
+    brain.on_settings(off, on)  # and back on, mid-question again
+    brain.on_state(State.LISTENING)
+    brain.on_state(State.IDLE)
+    assert ducker.flush(2)
+    assert client.volume_percent == 70
+    brain.close()
+
+
+def test_turning_computer_control_off_applies_at_once_and_on_waits(monkeypatch, fakes, calls):
+    lives, guards, apps = [], [], []
+
+    class SpyLive(entry.LiveSettings):
+        def __init__(self, settings):
+            super().__init__(settings)
+            lives.append(self)
+
+    class SpyGuard(entry.ActionGuard):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            guards.append(self)
+
+    async def keep_app(app, port):
+        apps.append(app)
+        return None
+
+    monkeypatch.setattr(entry, "LiveSettings", SpyLive)
+    monkeypatch.setattr(entry, "ActionGuard", SpyGuard)
+    monkeypatch.setattr(entry, "start_dashboard", keep_app)
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", computer_control=True)
+    )
+    entry.main()
+    (live,), (guard,), (app,) = lives, guards, apps
+    status = next(r.endpoint for r in app.routes if getattr(r, "path", "") == "/api/status")
+
+    live.propose(Settings(anthropic_api_key="k", computer_control=False))
+    assert guard.enabled is False  # at once, mid-question
+    assert asyncio.run(status())["computer_control"] is False
+
+    live.propose(Settings(anthropic_api_key="k", computer_control=True))
+    assert guard.enabled is False  # turning on waits for the next question
+    orchestrator_kwargs(calls)["on_question"]()
+    assert guard.enabled is True
+
+
+def test_a_dashboard_stt_value_that_wont_load_falls_back_once(monkeypatch, fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    loaded = []
+
+    class PickyTranscriber:
+        def __init__(self, model, **kwargs):
+            loaded.append(model)
+            if model == "large-v9":
+                raise RuntimeError("no such model")
+            calls.append("transcriber created")
+
+    monkeypatch.setattr(entry, "WhisperTranscriber", PickyTranscriber)
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", stt_model="large-v9")
+    )
+    monkeypatch.setattr(entry, "_settings_without", lambda keys: Settings(anthropic_api_key="k"))
+    assert entry.main() == 0
+    assert loaded == ["large-v9", "base.en"]
+    assert "didn't load with the dashboard's settings" in caplog.text
+
+
+def test_a_dashboard_voice_that_wont_load_falls_back_once(monkeypatch, fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    tried = []
+
+    def picky_load_piper(voice, voices_dir, *, speed):
+        tried.append(voice)
+        if voice == "en_US-nope-medium":
+            raise VoiceError("Couldn't get voice 'en_US-nope-medium': 404")
+        calls.append("synthesizer created")
+
+        class Synth:
+            def close(self):
+                calls.append("synthesizer closed")
+
+        return Synth()
+
+    monkeypatch.setattr(entry, "load_piper", picky_load_piper)
+    monkeypatch.setattr(
+        entry,
+        "load_settings",
+        lambda: Settings(anthropic_api_key="k", tts_voice="en_US-nope-medium"),
+    )
+    monkeypatch.setattr(entry, "_settings_without", lambda keys: Settings(anthropic_api_key="k"))
+    assert entry.main() == 0
+    assert tried == ["en_US-nope-medium", "en_GB-northern_english_male-medium"]
+    assert "Voice: piper en_GB-northern_english_male-medium" in caplog.messages
+
+
+def test_settings_without_only_falls_back_from_what_the_dashboard_set(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert entry._settings_without(("STT_MODEL",)) is None  # no file: nothing to fall back from
+    (tmp_path / "desk-buddy").mkdir()
+    (tmp_path / "desk-buddy" / "settings.json").write_text(
+        json.dumps({"MAX_SENTENCES": "4"}), encoding="utf-8"
+    )
+    assert entry._settings_without(("STT_MODEL",)) is None  # it didn't set STT_MODEL
 
 
 def test_busy_port_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):

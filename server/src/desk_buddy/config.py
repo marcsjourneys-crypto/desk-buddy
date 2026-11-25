@@ -70,6 +70,11 @@ DASHBOARD_KEYS = frozenset(
 LLM_PROVIDERS = ("anthropic",)
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 STT_DEVICES = ("cpu", "cuda")
+STT_COMPUTE_TYPES = ("default", "int8", "int8_float16", "int16", "float16", "float32")
+_STT_MODEL = re.compile(r"[A-Za-z0-9._/-]+")
+_LLM_MODEL = re.compile(r"[\w.:-]+")
+MAX_SENTENCES = 10
+MAX_HISTORY = 50
 TTS_ENGINES = ("sapi", "piper")
 MIN_TTS_SPEED, MAX_TTS_SPEED = 0.5, 2.0
 # A Piper voice name: <language>_<REGION>-<name>-<quality>, e.g.
@@ -246,8 +251,8 @@ def _load(
             "ANTHROPIC_API_KEY is not set. Copy server/.env.example to server/.env and fill it in."
         )
 
-    max_sentences = _positive_int(get, "MAX_SENTENCES", Settings.max_sentences)
-    history_turns = _positive_int(get, "HISTORY_TURNS", Settings.history_turns)
+    max_sentences = _int_between(get, "MAX_SENTENCES", Settings.max_sentences, 1, MAX_SENTENCES)
+    history_turns = _int_between(get, "HISTORY_TURNS", Settings.history_turns, 1, MAX_HISTORY)
 
     provider = _choice(get, "LLM_PROVIDER", Settings.llm_provider, LLM_PROVIDERS)
     effort = _choice(get, "LLM_EFFORT", Settings.llm_effort, EFFORT_LEVELS)
@@ -263,11 +268,13 @@ def _load(
     return Settings(
         anthropic_api_key=api_key,
         llm_provider=provider,
-        llm_model=get("LLM_MODEL", Settings.llm_model),
+        llm_model=_matching(get, "LLM_MODEL", Settings.llm_model, _LLM_MODEL),
         llm_effort=effort,
-        stt_model=get("STT_MODEL", Settings.stt_model),
+        stt_model=_stt_model(get),
         stt_device=device,
-        stt_compute_type=get("STT_COMPUTE_TYPE", Settings.stt_compute_type),
+        stt_compute_type=_choice(
+            get, "STT_COMPUTE_TYPE", Settings.stt_compute_type, STT_COMPUTE_TYPES
+        ),
         tts_engine=engine,
         # Checked only for Piper, so TTS_ENGINE=sapi always works as the fallback.
         tts_voice=_tts_voice(get) if engine == "piper" else Settings.tts_voice,
@@ -355,8 +362,46 @@ def _port(get: Callable[[str, str], str], key: str, default: int) -> int:
 
 def _vault_path(get: Callable[[str, str], str]) -> str:
     raw = get("OBSIDIAN_VAULT_PATH", "")
-    if raw and not Path(raw).is_dir():
+    if not raw:
+        return raw
+    if not Path(raw).is_dir():
         raise ConfigError(f"OBSIDIAN_VAULT_PATH is not an existing folder: {raw!r}")
+    path = Path(raw).resolve()
+    if path == Path(path.anchor) or path == Path.home().resolve():
+        raise ConfigError(
+            "OBSIDIAN_VAULT_PATH must be a folder of its own, not a drive or your home folder"
+        )
+    return raw
+
+
+def _int_between(
+    get: Callable[[str, str], str], key: str, default: int, low: int, high: int
+) -> int:
+    raw = get(key, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = low - 1
+    if not low <= value <= high:
+        raise ConfigError(f"{key} must be a whole number {low}-{high}, got {raw!r}")
+    return value
+
+
+def _matching(
+    get: Callable[[str, str], str], key: str, default: str, pattern: re.Pattern[str]
+) -> str:
+    raw = get(key, default)
+    if not pattern.fullmatch(raw):
+        raise ConfigError(f"{key} doesn't look like a model name: {raw!r}")
+    return raw
+
+
+def _stt_model(get: Callable[[str, str], str]) -> str:
+    """A Whisper size (base.en) or a Hugging Face repo id (Systran/faster-whisper-small);
+    never a path that climbs out with ".."."""
+    raw = get("STT_MODEL", Settings.stt_model)
+    if not _STT_MODEL.fullmatch(raw) or ".." in raw:
+        raise ConfigError(f"STT_MODEL doesn't look like a Whisper model name: {raw!r}")
     return raw
 
 
@@ -370,17 +415,6 @@ def _vault_folder(get: Callable[[str, str], str], key: str, default: str) -> str
     if path.drive or path.root or ".." in path.parts:
         raise ConfigError(f"{key} must be a folder name inside the vault, got {raw!r}")
     return raw
-
-
-def _positive_int(get: Callable[[str, str], str], key: str, default: int) -> int:
-    raw = get(key, str(default))
-    try:
-        value = int(raw)
-    except ValueError:
-        value = 0
-    if value < 1:
-        raise ConfigError(f"{key} must be a whole number >= 1, got {raw!r}")
-    return value
 
 
 def _choice(

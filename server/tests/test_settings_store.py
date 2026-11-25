@@ -138,6 +138,31 @@ def test_saves_are_atomic(store, tmp_path, monkeypatch):
     assert store.settings().max_sentences == 4  # the failed change didn't stick
 
 
+def test_an_invalid_saved_value_never_blocks_other_edits(tmp_path, env):
+    path = tmp_path / "settings.json"
+    gone = tmp_path / "deleted-vault"
+    path.write_text(
+        json.dumps({"OBSIDIAN_VAULT_PATH": str(gone), "HISTORY_TURNS": "7"}), encoding="utf-8"
+    )
+    store = SettingsStore(path, env_path=env, environ={})
+    vault = entry(store, "OBSIDIAN_VAULT_PATH")
+    assert vault["source"] == "invalid"
+    assert "not an existing folder" in vault["error"]
+    assert vault["value"] == ""  # what CARL actually uses: the fallback
+    assert store.settings().history_turns == 7  # the good saved value still counts
+    settings, errors = store.update({"MAX_SENTENCES": 4})
+    assert errors == {}
+    assert settings.max_sentences == 4
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["OBSIDIAN_VAULT_PATH"] == str(gone)  # kept, so the user can see and fix it
+    assert store.reset("HISTORY_TURNS").history_turns == 20
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    store.update({"OBSIDIAN_VAULT_PATH": str(vault_dir)})  # fixing it clears the mark
+    assert entry(store, "OBSIDIAN_VAULT_PATH")["source"] == "dashboard"
+    assert "error" not in entry(store, "OBSIDIAN_VAULT_PATH")
+
+
 # --- live apply ---
 
 

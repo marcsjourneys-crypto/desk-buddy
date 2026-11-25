@@ -309,7 +309,12 @@
 
   // ---------------------------------------------------------------- settings
 
-  const SOURCE_TEXT = { dashboard: "set here", env: "from .env", default: "default" };
+  const SOURCE_TEXT = {
+    dashboard: "set here",
+    env: "from .env",
+    default: "default",
+    invalid: "saved value not usable",
+  };
 
   async function loadSettings() {
     try {
@@ -366,12 +371,14 @@
 
   function settingRow(item) {
     const input = settingInput(item);
-    const message = el("span", { class: "msg" });
+    // A saved value that no longer works (say, a deleted folder): CARL uses the fallback
+    // shown, and says why; fix it or reset it.
+    const message = el("span", { class: item.error ? "msg error" : "msg", text: item.error || "" });
     const reset = el("button", {
       type: "button",
       class: "secondary",
       text: "Reset",
-      hidden: item.source !== "dashboard",
+      hidden: item.source !== "dashboard" && item.source !== "invalid",
       title: "Back to .env or the default",
     });
     const save = async () => {
