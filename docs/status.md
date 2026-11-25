@@ -2,6 +2,21 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — M8 dashboard built (browser check pending)
+
+- **Built:**
+  - `http://127.0.0.1:8766` (`DASHBOARD_PORT`), served from CARL's own event loop. Its Live tab shows the state, an SVG eye, the transcript with timings, and actions. Its Settings tab edits non-secret settings: the dashboard wins over `.env`, and each one shows its source, when it applies and a reset. Its Personality tab edits the character and the signature lines, with a prompt preview.
+  - `events.py` (the event bus), `settings_store.py` (the settings file and live apply), `personality_store.py`, `dashboard.py` and `dashboard_static/`.
+  - Safety: Host, Origin and token checks, CSP, `textContent` only, and no secrets in any response (tested).
+- **Plan:** `docs/plans/2026-11-25-m8-dashboard.md`.
+- **Tests:** 782 server tests pass (16 integration tests deselected).
+- **Browser check by the user (pending):**
+  1. Open the page while talking to CARL: the transcript, state and actions update live.
+  2. Turn ducking off, then ask a question with music playing: the music doesn't duck.
+  3. Change the greeting, restart CARL, and hear the new one.
+  4. Make the character grumpier: the next answer sounds different. Then reset it.
+- **Next:** the browser check, the Spotify voice check, the servo check, then in-page controls or the rest of M7.
+
 ## 2026-11-25 — M7 Spotify control built (voice check pending)
 
 - **Built:**

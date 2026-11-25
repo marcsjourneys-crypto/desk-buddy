@@ -3,7 +3,12 @@
 The Python brain for Desk Buddy (Windows). Managed with [uv](https://docs.astral.sh/uv/).
 
 - Set up: `uv sync`, then copy `.env.example` to `.env` and fill it in.
-- Run: `uv run python -m desk_buddy`, then hold Right Ctrl to talk (change the key with `PTT_KEY`). The character is CARL-42 (CARL): it greets you at startup and says goodbye on Ctrl+C. Its personality and lines are in `src/desk_buddy/brain/personality.py`.
+- Run: `uv run python -m desk_buddy`, then hold Right Ctrl to talk (change the key with `PTT_KEY`). The character is CARL-42 (CARL): it greets you at startup and says goodbye on Ctrl+C. Its personality and lines are in `src/desk_buddy/brain/personality.py`, and can be edited on the dashboard.
+- Dashboard: while CARL runs, open `http://127.0.0.1:8766` (the startup log says `Dashboard: http://127.0.0.1:8766`; change the port with `DASHBOARD_PORT`). It only listens on this PC.
+  - **Live:** CARL's state and eye, what you said and what CARL said (with timings), and every action on this PC.
+  - **Settings:** non-secret settings. A value set here wins over `.env`, each shows where it comes from and when a change applies (next question, next sentence or after a restart), and Reset goes back to `.env` or the default. Saved in `%LOCALAPPDATA%\desk-buddy\settings.json`. Secrets, hosts and ports stay in `.env`.
+  - **Personality:** CARL's character paragraph and signature lines, with a reset for each and a read-only preview of the full prompt. Saved in `%LOCALAPPDATA%\desk-buddy\personality.json`.
+  - If the port is busy, CARL runs without the dashboard. If a saved file is broken, it is ignored and the page shows a banner. Delete the file to start afresh.
 - Voice: CARL speaks with Piper's `en_GB-northern_english_male-medium` by default. On the first run it is downloaded (about 60 MB) into `%LOCALAPPDATA%\desk-buddy\voices` (`VOICES_DIR`). Change it with `TTS_VOICE` (another Piper voice name, or a path to an `.onnx` file with its `.onnx.json` next to it) and the pace with `TTS_SPEED` (0.5–2.0). `TTS_ENGINE=sapi` uses the built-in Windows voice instead (no download). The startup log shows `Voice: piper <name>` or `Voice: sapi`.
 - Notes: set `OBSIDIAN_VAULT_PATH` in `.env` to an existing folder (CARL's own vault) to turn on `take_note` / `read_notes`. Daily notes go in `Daily/`, ideas in `Ideas/` (`OBSIDIAN_DAILY_FOLDER`, `OBSIDIAN_IDEAS_FOLDER`). Leave it blank to turn the tools off.
 - Music (Spotify Premium): CARL can play, pause, skip, change the music volume and say what's playing. Set it up once:

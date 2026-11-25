@@ -51,7 +51,12 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 ## Server stack (decided)
 
 - Python 3.12+, managed with uv. Tests with pytest.
-- Async core: asyncio, with FastAPI + uvicorn running in the same event loop as the voice loop (decided in M4). The same app will host the dashboard (M8) and expression library (M9).
+- Async core: asyncio, with FastAPI + uvicorn running in the same event loop as the voice loop (decided in M4). The dashboard (M8) is a second app and listener in that loop; the expression library (M9) will join it.
+- **Dashboard (M8):** `http://127.0.0.1:8766` (`DASHBOARD_PORT`), this PC only. Plain HTML/CSS/JS in `src/desk_buddy/dashboard_static` (no build step, no CDN), served by `dashboard.py`. Tabs: Live (state, an SVG eye, transcript, actions, via the `/api/events` WebSocket fed by `events.EventBus`), Settings, Personality.
+  - **Safety:** every request must carry our Host (stops DNS rebinding); every change needs our Origin and the per-process `X-CARL-Token` put into the served page; the event socket needs our Origin; strict CSP; the page renders text only with `textContent`. No secret is ever sent (tested by planting secrets).
+  - **The event bus never blocks or raises into the voice loop:** bounded queues per page, a slow page loses events, the newest 100 kept in memory only.
+  - **Never fatal:** a busy port, a corrupt settings or personality file only logs a warning (and shows a banner).
+- **Settings precedence: dashboard over `.env` (and the process environment) over defaults.** The dashboard's values live in `%LOCALAPPDATA%\desk-buddy\settings.json` (`settings_store.py`); only non-secret keys are editable (`config.DASHBOARD_KEYS`), validated by `config.py`'s own rules, saved atomically. Turn settings apply at the next question (`LiveSettings.apply` when a turn starts: the `Brain` in `__main__` rebuilds the guard, music tools, ducker, tools and chat between turns, never during one); TTS speed at the next sentence; speech recognition, the key and the voice after a restart. A saved value that no longer validates is skipped at startup, never fatal.
 - Python comes from uv's own builds only (`python-preference = "only-managed"`). The Microsoft Store Python can't open microphones.
 - VAD: Silero VAD — the ONNX model bundled with faster-whisper (`vad_filter`), no PyTorch.
 - Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
@@ -64,6 +69,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 
 - The character is **CARL-42** ("CARL" for short, said like the name Carl): the Cognitive Assistant Robot for Life. Only the character has this name; the repo, the `desk_buddy` package and the commands keep theirs.
 - An original character with a light *Hitchhiker's Guide* flavour: calm, helpful and unflappable, with a dry, cosmic aside roughly one reply in four (never when the user is frustrated or rushed, never more than one per reply). Short homage lines are fine ("Don't panic", 42, the fish), but CARL never imitates a character from the books or films (no Marvin) and never quotes them at length. No existing fictional characters or voice clones.
+- **Editable on the dashboard:** the character paragraph (at most 3000 characters, no `{`/`}`) and the seven canned lines (text at most 200 characters, emotion from the tags), saved in `%LOCALAPPDATA%\desk-buddy\personality.json` (`personality_store.py`); anything missing falls back to the defaults in code. The technical rules stay locked in `brain/personality.py` and are always appended: spoken style, emotion tags, the interruption and action notes, the untrusted-data rule, notes and music. The prompt is joined, never formatted. Edits apply at the next question; the greeting and farewell are read when spoken.
 - One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines: error ("…on the other side of the galaxy…"), refusal and "fresh start", and four signature lines. None of the canned lines is remembered, and a key press stops any of them:
   - `GREETING` "Don't panic. CARL is online." once at startup, and when a robot connects unless a greeting finished playing in the last 60 s (an interrupted one doesn't count);
   - `FAREWELL` "So long, and thanks for all the fish." on Ctrl+C, before the server and devices close, bounded to 5 s, hard cap 6 s (replaces the logged "Bye");
@@ -94,11 +100,11 @@ Every tool is a plain Python function with a strict JSON schema, registered in `
 
 Anyone (or any TV) near the robot can talk to it.
 
-- Off by default; a setting turns it on: `COMPUTER_CONTROL=on` in `.env` (M8 moves it to the dashboard). Music also needs `SPOTIFY_CLIENT_ID` and a saved Spotify login; `MUSIC_DUCK` (on by default) only lowers the music while CARL talks and is not an action.
+- Off by default; a setting turns it on: `COMPUTER_CONTROL=on` in `.env`, or the switch on the dashboard's Settings tab (it applies at the next question). Music also needs `SPOTIFY_CLIENT_ID` and a saved Spotify login; `MUSIC_DUCK` (on by default) only lowers the music while CARL talks and is not an action.
 - Allowlists only. The model chooses a name from a list; the server builds every command and URL. Never pass model text into a shell or command string. Always use argument lists, never `shell=True`. (Spotify: model text is only a search query; enums for kinds and actions; playback uses Spotify's URIs.)
 - Rate limits: max 3 actions per question, 8 per minute.
 - Anything powerful (e.g. running an allowlisted script, sleep/shutdown) requires a spoken "yes" on the next turn, checked by code. Music isn't powerful, so it needs no "yes"; the confirmation mechanism comes with the first powerful tool.
-- Every action is logged (`Action: <tool> <args> -> <result>`) and, from M8, shown on the dashboard.
+- Every action is logged (`Action: <tool> <args> -> <result>`) and shown on the dashboard's Live tab (ok, failed or refused).
 - **In code:** `tools/actions.py` `ActionGuard` enforces the switch, both limits (an attempt counts even if it fails) and the logging; every computer-control tool runs through `guard.run(...)`, and the loop calls `guard.new_question()` per turn. Untrusted data can never authorise or confirm an action.
 
 ## Robot ↔ server protocol (final: `docs/protocol.md`)
@@ -151,5 +157,6 @@ Anyone (or any TV) near the robot can talk to it.
   - the computer-control switch;
   - the vault path and other non-secret settings, which move from `.env` to a settings file the UI edits (secrets stay in `.env`);
   - personality editing (the prompt and canned lines move to an editable file).
+  (Built 2026-11-25: `docs/plans/2026-11-25-m8-dashboard.md`; the user's browser check is pending. In-page controls such as push-to-talk, stop, forget and music buttons come later.)
 - **M9 – Expression library** (after M6). Design and preview eye expressions in the browser and map them to emotions.
 - **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.
