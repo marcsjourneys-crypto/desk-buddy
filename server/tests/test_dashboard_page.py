@@ -50,9 +50,37 @@ def test_every_change_sends_the_token_and_reconnects_with_back_off():
     assert "30000" in JS  # back-off cap
 
 
-def test_the_three_tabs_are_there():
-    for tab in ("live", "settings", "personality"):
+def test_the_four_tabs_are_there():
+    for tab in ("live", "settings", "personality", "apps"):
         assert f'id="tab-{tab}"' in HTML
+        assert f'data-tab="{tab}"' in HTML
+        assert f'"{tab}"' in JS  # showTab knows it
+
+
+def test_the_apps_tab_finds_filters_ticks_and_saves():
+    tab = HTML[HTML.index('id="tab-apps"') :]
+    for part in (
+        'id="apps-find"',
+        'id="apps-filter"',
+        'id="apps-found"',
+        'id="apps-chosen"',
+        'id="apps-save"',
+        'id="bookmarks"',
+        'id="bookmark-add"',
+        'id="bookmarks-save"',
+    ):
+        assert part in tab
+    for call in (
+        '"/api/apps/available"',
+        'api("PUT", "/api/apps"',
+        'api("PUT", "/api/bookmarks"',
+        "apps.${i}",
+        "bookmarks.${i}",
+        'type: "checkbox"',
+    ):
+        assert call in JS
+    # Listing the apps is a GET that needs the token: every request sends it.
+    assert 'headers: { "X-CARL-Token": TOKEN }' in JS
 
 
 def test_the_about_you_card_is_first_on_the_personality_tab_with_its_privacy_note():

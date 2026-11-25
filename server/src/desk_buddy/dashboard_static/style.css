@@ -184,6 +184,51 @@ fieldset.panel legend { color: var(--brass); padding: 0 6px; font-weight: 600; }
   .about-field input, .about-field textarea { grid-column: 1 / -1; }
 }
 
+/* ------------------------------------------------------------------ apps */
+
+h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 4px; }
+.app-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.app-list[hidden] { display: none; }
+.app-list.found {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  columns: 2 260px;
+}
+.found-app { break-inside: avoid; padding: 2px 0; }
+.found-app label { display: flex; gap: 8px; align-items: center; cursor: pointer; overflow-wrap: anywhere; }
+.app, .site {
+  display: grid;
+  grid-template-columns: 220px minmax(160px, 1fr) auto;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--panel-2);
+}
+.site { grid-template-columns: 180px minmax(200px, 1fr) auto; }
+.app .label { overflow-wrap: anywhere; }
+.app .msg, .site .msg { grid-column: 1 / -1; font-size: 12px; }
+.app .msg:empty, .site .msg:empty { display: none; }
+input[type="search"] {
+  flex: 1;
+  max-width: 320px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 14px;
+}
+input[type="search"][hidden] { display: none; }
+button:disabled { opacity: 0.5; cursor: default; }
+
+@media (max-width: 800px) {
+  .app, .site { grid-template-columns: 1fr auto; }
+  .app .label, .site input:first-child { grid-column: 1 / -1; }
+}
+
 .label { color: var(--text); }
 .source, .applies { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .source.dashboard { color: var(--brass); }

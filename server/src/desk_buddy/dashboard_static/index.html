@@ -38,6 +38,7 @@
   <button type="button" role="tab" data-tab="live" aria-selected="true">Live</button>
   <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
   <button type="button" role="tab" data-tab="personality" aria-selected="false">Personality</button>
+  <button type="button" role="tab" data-tab="apps" aria-selected="false">Apps</button>
 </nav>
 
 <p id="banner" class="banner" hidden></p>
@@ -87,6 +88,40 @@
       <h2>What CARL is told</h2>
       <p class="hint">The full system prompt for the next question (read-only).</p>
       <pre id="preview" class="preview"></pre>
+    </div>
+  </section>
+
+  <section id="tab-apps" class="tab" role="tabpanel" hidden>
+    <p class="hint">What CARL may open on this PC when computer control is on (Settings). CARL only ever picks a name from these lists; nothing else can be opened. Changes apply at the next question.</p>
+    <div class="panel">
+      <h2>Apps</h2>
+      <p class="hint">Find apps asks Windows for the apps in its Start menu. Tick the ones CARL may open and give each one to three spoken names, separated by commas, like “browser, edge”. Names use letters, digits, spaces, - ' and .</p>
+      <div class="row">
+        <button type="button" id="apps-find">Find apps</button>
+        <input id="apps-filter" type="search" placeholder="Filter the list" aria-label="Filter the apps" spellcheck="false" hidden>
+        <span id="apps-find-msg" class="msg"></span>
+      </div>
+      <ul id="apps-found" class="app-list found" aria-label="Apps on this PC" hidden></ul>
+      <h3>CARL may open</h3>
+      <ul id="apps-chosen" class="app-list" aria-label="Apps CARL may open"></ul>
+      <p id="apps-empty" class="empty">No apps yet.</p>
+      <div class="row">
+        <span id="apps-count" class="count"></span>
+        <span id="apps-msg" class="msg"></span>
+        <button type="button" id="apps-save">Save apps</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Websites</h2>
+      <p class="hint">Bookmarks CARL may open in your browser: a spoken name and a full address starting with https:// or http://.</p>
+      <ul id="bookmarks" class="app-list" aria-label="Websites CARL may open"></ul>
+      <p id="bookmarks-empty" class="empty">No websites yet.</p>
+      <div class="row">
+        <button type="button" id="bookmark-add" class="secondary">Add a website</button>
+        <span id="bookmarks-count" class="count"></span>
+        <span id="bookmarks-msg" class="msg"></span>
+        <button type="button" id="bookmarks-save">Save websites</button>
+      </div>
     </div>
   </section>
 </main>

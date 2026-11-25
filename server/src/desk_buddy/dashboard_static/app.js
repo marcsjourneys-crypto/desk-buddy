@@ -24,8 +24,8 @@
   }
 
   async function api(method, path, body) {
-    const options = { method, headers: {} };
-    if (method !== "GET") options.headers["X-CARL-Token"] = TOKEN;
+    // Every request carries the token: changes need it, and so does listing the apps.
+    const options = { method, headers: { "X-CARL-Token": TOKEN } };
     if (body !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
@@ -63,9 +63,9 @@
 
   // ---------------------------------------------------------------- tabs
 
-  const loaders = { settings: loadSettings, personality: loadPersonality };
+  const loaders = { settings: loadSettings, personality: loadPersonality, apps: loadApps };
   function showTab(name) {
-    if (!["live", "settings", "personality"].includes(name)) name = "live";
+    if (!["live", "settings", "personality", "apps"].includes(name)) name = "live";
     for (const button of document.querySelectorAll("[data-tab]")) {
       button.setAttribute("aria-selected", String(button.dataset.tab === name));
     }
@@ -576,6 +576,254 @@
     } catch (error) {
       $("character-msg").textContent = error.message;
       $("character-msg").className = "msg error";
+    }
+  });
+
+  // ---------------------------------------------------------------- apps and websites
+
+  // Working copies, edited on the page until saved. App titles come from Windows and
+  // bookmark names from the user: all of it is shown as text only.
+  const apps = { chosen: [], found: null, dirty: false, limits: { apps: 50, names: 3, name: 40 } };
+  const sites = { list: [], dirty: false, limits: { bookmarks: 50, name: 40, url: 500 } };
+
+  async function loadApps() {
+    try {
+      const [appsView, sitesView] = await Promise.all([api("GET", "/api/apps"), api("GET", "/api/bookmarks")]);
+      setBanner("apps", appsView.error);
+      if (!apps.dirty) setChosen(appsView);
+      else apps.limits = appsView.limits;
+      if (!sites.dirty) setSites(sitesView);
+    } catch (error) {
+      setBanner("apps", `Couldn't load the apps: ${error.message}`);
+    }
+  }
+
+  function setChosen(view) {
+    setBanner("apps", view.error);
+    apps.limits = view.limits;
+    apps.chosen = view.apps.map((a) => ({ app_id: a.app_id, title: a.title, names: a.names.join(", "), error: "" }));
+    apps.dirty = false;
+    renderChosen();
+    renderFound();
+  }
+
+  function setSites(view) {
+    setBanner("apps", view.error);
+    sites.limits = view.limits;
+    sites.list = view.bookmarks.map((b) => ({ name: b.name, url: b.url, error: "" }));
+    sites.dirty = false;
+    renderSites();
+  }
+
+  // A first spoken name from an app's title: lowercase, only the allowed characters.
+  function spokenName(title) {
+    const name = title
+      .toLowerCase()
+      .replace(/[^\p{L}0-9 \-'.]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return name.slice(0, apps.limits.name).trim();
+  }
+
+  function splitNames(text) {
+    return text
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean);
+  }
+
+  function appsChanged() {
+    apps.dirty = true;
+    $("apps-msg").textContent = "not saved yet";
+    $("apps-msg").className = "msg";
+  }
+
+  function renderChosen() {
+    const list = $("apps-chosen");
+    list.replaceChildren();
+    apps.chosen.forEach((app) => {
+      const names = el("input", {
+        type: "text",
+        value: app.names,
+        spellcheck: false,
+        maxLength: (apps.limits.name + 2) * apps.limits.names,
+        "aria-label": `Spoken names for ${app.title}`,
+      });
+      names.addEventListener("input", () => {
+        app.names = names.value;
+        appsChanged();
+      });
+      const remove = el("button", { type: "button", class: "secondary", text: "Remove" });
+      remove.addEventListener("click", () => {
+        apps.chosen = apps.chosen.filter((a) => a !== app);
+        appsChanged();
+        renderChosen();
+        renderFound();
+      });
+      list.append(
+        el(
+          "li",
+          { class: "app" },
+          el("span", { class: "label", text: app.title, title: app.app_id }),
+          names,
+          remove,
+          el("span", { class: app.error ? "msg error" : "msg", text: app.error }),
+        ),
+      );
+    });
+    $("apps-empty").hidden = apps.chosen.length > 0;
+    $("apps-count").textContent = `${apps.chosen.length} / ${apps.limits.apps}`;
+  }
+
+  function renderFound() {
+    const list = $("apps-found");
+    if (apps.found === null) return;
+    const filter = $("apps-filter").value.trim().toLowerCase();
+    const ticked = new Set(apps.chosen.map((a) => a.app_id));
+    list.replaceChildren();
+    for (const app of apps.found) {
+      if (filter && !app.name.toLowerCase().includes(filter)) continue;
+      const box = el("input", { type: "checkbox", checked: ticked.has(app.app_id), "aria-label": app.name });
+      box.addEventListener("change", () => {
+        if (box.checked) {
+          if (apps.chosen.length >= apps.limits.apps) {
+            box.checked = false;
+            $("apps-msg").textContent = `At most ${apps.limits.apps} apps.`;
+            $("apps-msg").className = "msg error";
+            return;
+          }
+          apps.chosen.push({ app_id: app.app_id, title: app.name, names: spokenName(app.name), error: "" });
+        } else {
+          apps.chosen = apps.chosen.filter((a) => a.app_id !== app.app_id);
+        }
+        appsChanged();
+        renderChosen();
+      });
+      list.append(el("li", { class: "found-app" }, el("label", {}, box, el("span", { text: app.name }))));
+    }
+  }
+
+  $("apps-find").addEventListener("click", async () => {
+    const message = $("apps-find-msg");
+    const button = $("apps-find");
+    message.textContent = "Asking Windows…";
+    message.className = "msg";
+    button.disabled = true;
+    try {
+      apps.found = (await api("GET", "/api/apps/available")).apps;
+      message.textContent = `${apps.found.length} apps found. Tick the ones CARL may open.`;
+      $("apps-filter").hidden = false;
+      $("apps-found").hidden = false;
+      renderFound();
+    } catch (error) {
+      message.textContent = error.message;
+      message.className = "msg error";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $("apps-filter").addEventListener("input", renderFound);
+
+  $("apps-save").addEventListener("click", async () => {
+    const message = $("apps-msg");
+    for (const app of apps.chosen) app.error = "";
+    try {
+      const body = { apps: apps.chosen.map((a) => ({ app_id: a.app_id, names: splitNames(a.names) })) };
+      setChosen(await api("PUT", "/api/apps", body));
+      message.textContent = "saved: applies at the next question";
+      message.className = "msg";
+    } catch (error) {
+      const errors = (error.data && error.data.errors) || {};
+      apps.chosen.forEach((app, i) => {
+        app.error = errors[`apps.${i}`] || "";
+      });
+      renderChosen();
+      message.textContent = errors.apps || (error.data && error.data.errors ? "Not saved: see above." : error.message);
+      message.className = "msg error";
+    }
+  });
+
+  function sitesChanged() {
+    sites.dirty = true;
+    $("bookmarks-msg").textContent = "not saved yet";
+    $("bookmarks-msg").className = "msg";
+  }
+
+  function renderSites() {
+    const list = $("bookmarks");
+    list.replaceChildren();
+    sites.list.forEach((site) => {
+      const name = el("input", {
+        type: "text",
+        value: site.name,
+        placeholder: "spoken name",
+        spellcheck: false,
+        maxLength: sites.limits.name,
+        "aria-label": "Spoken name",
+      });
+      const url = el("input", {
+        type: "text",
+        value: site.url,
+        placeholder: "https://…",
+        spellcheck: false,
+        maxLength: sites.limits.url,
+        "aria-label": "Address",
+      });
+      name.addEventListener("input", () => {
+        site.name = name.value;
+        sitesChanged();
+      });
+      url.addEventListener("input", () => {
+        site.url = url.value;
+        sitesChanged();
+      });
+      const remove = el("button", { type: "button", class: "secondary", text: "Remove" });
+      remove.addEventListener("click", () => {
+        sites.list = sites.list.filter((s) => s !== site);
+        sitesChanged();
+        renderSites();
+      });
+      list.append(
+        el(
+          "li",
+          { class: "site" },
+          name,
+          url,
+          remove,
+          el("span", { class: site.error ? "msg error" : "msg", text: site.error }),
+        ),
+      );
+    });
+    $("bookmarks-empty").hidden = sites.list.length > 0;
+    $("bookmarks-count").textContent = `${sites.list.length} / ${sites.limits.bookmarks}`;
+    $("bookmark-add").disabled = sites.list.length >= sites.limits.bookmarks;
+  }
+
+  $("bookmark-add").addEventListener("click", () => {
+    sites.list.push({ name: "", url: "", error: "" });
+    sitesChanged();
+    renderSites();
+    const inputs = $("bookmarks").querySelectorAll("input");
+    if (inputs.length >= 2) inputs[inputs.length - 2].focus();
+  });
+
+  $("bookmarks-save").addEventListener("click", async () => {
+    const message = $("bookmarks-msg");
+    for (const site of sites.list) site.error = "";
+    try {
+      const body = { bookmarks: sites.list.map((s) => ({ name: s.name, url: s.url.trim() })) };
+      setSites(await api("PUT", "/api/bookmarks", body));
+      message.textContent = "saved: applies at the next question";
+      message.className = "msg";
+    } catch (error) {
+      const errors = (error.data && error.data.errors) || {};
+      sites.list.forEach((site, i) => {
+        site.error = errors[`bookmarks.${i}`] || "";
+      });
+      renderSites();
+      message.textContent =
+        errors.bookmarks || (error.data && error.data.errors ? "Not saved: see above." : error.message);
+      message.className = "msg error";
     }
   });
 
