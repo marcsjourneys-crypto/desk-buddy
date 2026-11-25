@@ -260,6 +260,8 @@ class Orchestrator:
             tools_before = _tools_succeeded(self.chat)
             if hasattr(self.chat, "last_tool_rounds"):
                 self.chat.last_tool_rounds = []  # never remember an earlier turn's tools
+            if hasattr(self.chat, "searches"):
+                self.chat.searches = []  # ...or its searches
             queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._produce(turn, queue))
@@ -293,9 +295,12 @@ class Orchestrator:
 
     def _remember(self, turn: _Turn) -> None:
         """Keep what the user actually heard, plus every tool call that ran (the action
-        happened even if the reply was cut off or failed). A failed reply's canned error
-        line isn't kept; a turn with neither a reply nor tools isn't kept at all."""
+        happened even if the reply was cut off or failed), and the queries of any web
+        searches (as a note; never the search blocks). A failed reply's canned error line
+        isn't kept; a turn with neither a reply nor tools isn't kept at all. Searches
+        don't count toward TASK_DONE: that stays tied to our own tools."""
         rounds = list(getattr(self.chat, "last_tool_rounds", None) or [])
+        searches = [s.query for s in getattr(self.chat, "searches", None) or []]
         heard = turn.spoken and not turn.failed
         if not heard and not rounds:
             return
@@ -305,6 +310,7 @@ class Orchestrator:
             reply,
             interrupted=not turn.complete and not turn.failed,
             tool_rounds=rounds,
+            searches=searches,
         )
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:

@@ -37,6 +37,11 @@ INTERRUPTED_NOTE = "(I interrupted you, so I only heard your reply up to that po
 # failed) before saying anything: the actions happened, so Claude must know about them.
 CUT_OFF_NOTE_START = "(I cut you off before you replied, after you ran:"
 MAX_NOTE_RESULT = 160  # characters of each result in that note
+# Put after the stored user message of a turn in which CARL searched the web, so later
+# turns know where an answer came from. On the user side: Claude copies markers it sees
+# in its own replies. The search blocks and results themselves are never stored.
+SEARCH_NOTE_START = "(To answer this, you searched the web for:"
+MAX_NOTE_QUERY = 100  # characters of each query in that note
 
 # "karl": Whisper often spells the name that way.
 _LEADING_FILLERS = frozenset(
@@ -58,6 +63,7 @@ class _Turn:
     interrupted: bool
     rounds: tuple[tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]], ...]
     note: str | None = None  # a cut-off note that went in front of this user message
+    searched: str | None = None  # the search note that goes after this user message
 
 
 class Conversation:
@@ -76,13 +82,16 @@ class Conversation:
         *,
         interrupted: bool = False,
         tool_rounds: Iterable[ToolRound] = (),
+        searches: Iterable[str] = (),
     ) -> None:
         """Keep one exchange. Tool results are capped at MAX_STORED_RESULT characters
-        (an untrusted block stays well formed).
+        (an untrusted block stays well formed). `searches` are the web search queries
+        the turn ran: they become a note after the user message.
 
         A turn with no reply is never stored as such (a history must not end a turn on
         tool results, and made-up assistant text would be copied). Its tool calls, which
-        did happen, become a note in front of the next user message instead."""
+        did happen, become a note in front of the next user message instead; its searches,
+        which only read, are dropped."""
         rounds = tuple(
             (tuple(dict(u) for u in uses), tuple(_compact(r) for r in results))
             for uses, results in tool_rounds
@@ -95,7 +104,7 @@ class Conversation:
             ]
             return
         note, self._pending = self._cut_off_note(), []
-        self._turns.append(_Turn(user, reply, interrupted, rounds, note))
+        self._turns.append(_Turn(user, reply, interrupted, rounds, note, _search_note(searches)))
 
     def forget(self) -> None:
         self._turns.clear()
@@ -135,6 +144,8 @@ class Conversation:
         previous_cut = False
         for turn in self._turns:
             text = f"{turn.note} {turn.user}" if turn.note else _noted(turn.user, previous_cut)
+            if turn.searched:
+                text = f"{text} {turn.searched}"
             out.append({"role": "user", "content": text})
             for uses, results in turn.rounds:
                 out.append({"role": "assistant", "content": [dict(u) for u in uses]})
@@ -178,6 +189,22 @@ def _action(use: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     if result.get("is_error"):
         outcome = f"failed: {outcome}"
     return f"{use.get('name', '?')} {args} -> {outcome}"
+
+
+def _search_note(queries: Iterable[str]) -> str | None:
+    """'(To answer this, you searched the web for: "q1"; "q2")', or None for no search.
+    Each query is one line, at most MAX_NOTE_QUERY characters, with its double quotes
+    made single so it can't end its quote early."""
+    shown = []
+    for query in queries:
+        text = " ".join(str(query).split()).replace('"', "'")
+        if len(text) > MAX_NOTE_QUERY:
+            text = text[:MAX_NOTE_QUERY] + "..."
+        if text:
+            shown.append(f'"{text}"')
+    if not shown:
+        return None
+    return f"{SEARCH_NOTE_START} {'; '.join(shown)})"
 
 
 def _compact(result: Mapping[str, Any]) -> dict[str, Any]:

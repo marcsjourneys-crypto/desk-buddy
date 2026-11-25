@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import anthropic
 
 from desk_buddy.brain.memory import merge_consecutive
 from desk_buddy.brain.personality import Personality, system_prompt
 from desk_buddy.config import Settings
+from desk_buddy.tools.actions import publish_action
 from desk_buddy.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -99,6 +103,53 @@ MAX_TOOL_ROUNDS = 3  # API calls per reply; the last one may not call tools
 # Remembered for a tool call whose result never came (the turn was cut off).
 INTERRUPTED_RESULT = "Interrupted; the action may have completed."
 
+# Anthropic's web search, a server tool: it runs on Anthropic's side and only reads, so
+# it lives outside the ToolRegistry and the ActionGuard.
+WEB_SEARCH_TOOL = "web_search_20250305"
+MAX_SOURCES = 3  # source titles shown per search on the dashboard
+MAX_TITLE = 80  # characters of each source title there
+WEB_SEARCH_OFF_HINT = (
+    "web search isn't enabled for this API key: turn it on in the Anthropic Console, "
+    "or set WEB_SEARCH=off"
+)
+# Set once a request with web search was refused because the account has it turned off.
+# Module-level on purpose: the chat is rebuilt between turns, and search must stay off
+# (and the prompt must say so) until the next restart.
+_web_search_blocked = False
+
+
+def web_search_blocked() -> bool:
+    """True once the API refused web search for this key (until the next restart)."""
+    return _web_search_blocked
+
+
+def _block_web_search() -> None:
+    global _web_search_blocked
+    if not _web_search_blocked:
+        log.warning("%s. Searching is off until the next restart.", WEB_SEARCH_OFF_HINT)
+    _web_search_blocked = True
+
+
+@dataclass(frozen=True)
+class Search:
+    """One web search Claude ran: the query, ok or failed, and what came back."""
+
+    query: str
+    ok: bool
+    count: int = 0  # results
+    sources: tuple[tuple[str, str], ...] = ()  # up to MAX_SOURCES (title, site)
+    error: str = ""  # the API's error_code when it failed
+
+    def summary(self) -> str:
+        """Plain text for the dashboard (untrusted titles: shown as text, never links)."""
+        if not self.ok:
+            return f"Search failed: {self.error}"
+        if not self.count:
+            return "No results"
+        shown = "; ".join(f"{title} ({site})" if site else title for title, site in self.sources)
+        noun = "result" if self.count == 1 else "results"
+        return f"{self.count} {noun}: {shown}"
+
 
 class LLMError(Exception):
     """Claude could not produce a reply (network, API error). Already retried by the SDK."""
@@ -110,8 +161,8 @@ class LLMRefusal(LLMError):
 
 class Chat(Protocol):
     """What the voice loop needs from any LLM provider. A provider that runs tools may
-    also keep a `tools_succeeded` count and `last_tool_rounds` (see ClaudeChat); the
-    loop reads them if present."""
+    also keep a `tools_succeeded` count, `last_tool_rounds` and `searches` (see
+    ClaudeChat); the loop reads them if present."""
 
     def stream_reply(
         self, history: Sequence[Mapping[str, Any]], user_text: str
@@ -142,24 +193,45 @@ class ClaudeChat:
         effort: str,
         system: str | Callable[[], str],
         tools: ToolRegistry | None = None,
+        web_search_max: int | None = None,
+        location: Callable[[], Mapping[str, str]] = dict,
+        on_search: Callable[[Search], None] | None = None,
     ) -> None:
+        """web_search_max: searches per request, or None for no web search. location:
+        the user's rough location ({"city", "region", "country"}, any subset), read for
+        every request. on_search: told about each search (the dashboard); never raises
+        into the reply."""
         # client: anthropic.AsyncAnthropic (typed Any so tests can pass a fake)
         self._client = client
         self._model = model
         self._effort = effort
         self._system = system if callable(system) else (lambda: system)
         self._tools = tools or ToolRegistry()
+        self._web_search_max = web_search_max
+        self._location = location
+        self._on_search = on_search
         # Tool calls that succeeded, ever. Only grows; the loop compares it before and
         # after a reply to tell whether that reply's turn ran a tool successfully.
         self.tools_succeeded = 0
         # The latest reply's tool rounds, (tool_use blocks, tool_result blocks) each, as
         # plain dicts for the conversation memory. Reset when a reply starts.
         self.last_tool_rounds: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+        # The latest reply's web searches. Reset when a reply starts.
+        self.searches: list[Search] = []
+
+    @property
+    def web_search(self) -> bool:
+        """Whether requests offer web search now (off once the API refused it)."""
+        return self._web_search_max is not None and not web_search_blocked()
 
     async def stream_reply(
         self, history: Sequence[Mapping[str, Any]], user_text: str
     ) -> AsyncGenerator[str, None]:
         """Yield text deltas as they arrive, running tools between rounds.
+
+        A "\\n" goes between text blocks (a new round, or text around a web search), so
+        their sentences never run together. A paused turn (stop_reason "pause_turn",
+        during a long web search) is resumed; it uses up a round like a tool call.
 
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
         after some text was already yielded, so callers must handle a partial reply.
@@ -167,31 +239,44 @@ class ClaudeChat:
         # A remembered turn can end on tool results: the new text then joins that message.
         messages: list[Any] = merge_consecutive([*history, {"role": "user", "content": user_text}])
         self.last_tool_rounds = []
+        self.searches = []
+        searching: dict[str, str] = {}  # web search id -> query, until its result arrives
         spoke = False
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
-            params: dict[str, Any] = {
-                "model": self._model,
-                "max_tokens": MAX_TOKENS,
-                "system": self._system(),
-                "output_config": {"effort": self._effort},
-                "messages": messages,
-            }
-            if self._tools:
-                params["tools"] = self._tools.schemas()
-                if round_no == MAX_TOOL_ROUNDS:
-                    params["tool_choice"] = {"type": "none"}
-            first = True
-            try:
-                async with self._client.messages.stream(**params) as stream:
-                    async for text in stream.text_stream:
-                        if first and spoke:
-                            yield "\n"  # keep sentences from separate rounds apart
-                        first = False
-                        spoke = True
-                        yield text
-                    message = await stream.get_final_message()
-            except anthropic.APIError as exc:
-                raise _llm_error(exc) from exc
+            last = round_no == MAX_TOOL_ROUNDS
+            retried = False
+            while True:
+                web = self.web_search
+                new_block = True  # the first text of a round starts a new block
+                said_here = False
+                try:
+                    async with self._client.messages.stream(
+                        **self._params(messages, last=last, web=web)
+                    ) as stream:
+                        async for event in stream:
+                            if event.type == "content_block_start":
+                                if event.content_block.type == "text":
+                                    new_block = True
+                            elif (
+                                event.type == "content_block_delta"
+                                and event.delta.type == "text_delta"
+                            ):
+                                if new_block and spoke:
+                                    yield "\n"  # keep sentences from separate blocks apart
+                                new_block = False
+                                spoke = said_here = True
+                                yield event.delta.text
+                        message = await stream.get_final_message()
+                    break
+                except anthropic.BadRequestError as exc:
+                    if web and not retried and not said_here and _about_web_search(exc):
+                        _block_web_search()
+                        retried = True
+                        continue  # this round again, without search
+                    raise _llm_error(exc) from exc
+                except anthropic.APIError as exc:
+                    raise _llm_error(exc) from exc
+            self._note_searches(message.content, searching)
             if message.stop_reason == "refusal":
                 raise LLMRefusal("Claude declined to answer")
             if message.stop_reason == "max_tokens":
@@ -199,6 +284,17 @@ class ClaudeChat:
                 if not spoke:
                     raise LLMError("reply ran out of room before saying anything")
                 return
+            if message.stop_reason == "pause_turn":
+                if last:
+                    log.warning("reply paused on the last round; ending it")
+                    if not spoke:
+                        raise LLMError("reply paused before saying anything")
+                    return
+                # Resume: the content goes back as is, with no new user message.
+                messages = merge_consecutive(
+                    [*messages, {"role": "assistant", "content": message.content}]
+                )
+                continue
             if message.stop_reason != "tool_use":
                 return
             uses = [block for block in message.content if block.type == "tool_use"]
@@ -224,12 +320,79 @@ class ClaudeChat:
             )
             for i, block in enumerate(uses):
                 results[i] = await self._run_tool(block)
-            # New list each round: the content list goes back unchanged (thinking blocks too).
-            messages = [
-                *messages,
-                {"role": "assistant", "content": message.content},
-                {"role": "user", "content": results},
-            ]
+            # New list each round: the content goes back unchanged (thinking and search
+            # blocks too), joined to a paused round's content if there was one.
+            messages = merge_consecutive(
+                [
+                    *messages,
+                    {"role": "assistant", "content": message.content},
+                    {"role": "user", "content": results},
+                ]
+            )
+
+    def _params(self, messages: list[Any], *, last: bool, web: bool) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": MAX_TOKENS,
+            "system": self._system(),
+            "output_config": {"effort": self._effort},
+            "messages": messages,
+        }
+        tools = self._tools.schemas()
+        if web:
+            tools.append(self._web_tool())
+        if tools:
+            params["tools"] = tools
+            if last:  # also stops a search
+                params["tool_choice"] = {"type": "none"}
+        return params
+
+    def _web_tool(self) -> dict[str, Any]:
+        tool: dict[str, Any] = {
+            "type": WEB_SEARCH_TOOL,
+            "name": "web_search",
+            "max_uses": self._web_search_max,
+        }
+        try:
+            where = {
+                k: v
+                for k, v in dict(self._location()).items()
+                if k in ("city", "region", "country") and isinstance(v, str) and v
+            }
+        except Exception:
+            log.warning("Couldn't read the location for web search", exc_info=True)
+            where = {}
+        if where:
+            tool["user_location"] = {"type": "approximate", **where}
+        return tool
+
+    def _note_searches(self, content: Sequence[Any], searching: dict[str, str]) -> None:
+        """Pick this message's web searches out of its content: each server_tool_use
+        matched by id to its web_search_tool_result (which may come in a later message
+        after a pause)."""
+        for block in content:
+            kind = _field(block, "type")
+            if kind == "server_tool_use" and _field(block, "name") == "web_search":
+                query = _field(block, "input") or {}
+                text = query.get("query", "") if isinstance(query, Mapping) else ""
+                searching[str(_field(block, "id"))] = " ".join(str(text).split())
+            elif kind == "web_search_tool_result":
+                query = searching.pop(str(_field(block, "tool_use_id")), None)
+                if query is not None:
+                    self._report(_search(query, _field(block, "content")))
+
+    def _report(self, search: Search) -> None:
+        self.searches.append(search)
+        args = _search_args(search)
+        if search.ok:
+            log.info("Action: web_search %s -> ok (%d results)", args, search.count)
+        else:
+            log.info("Action: web_search %s -> failed: %s", args, search.error)
+        if self._on_search is not None:
+            try:
+                self._on_search(search)
+            except Exception:
+                log.debug("Search report failed", exc_info=True)
 
     async def _run_tool(self, block: Any) -> dict[str, Any]:
         # If the turn is cancelled here the thread still finishes (a note may be saved),
@@ -247,13 +410,61 @@ class ClaudeChat:
         return result
 
 
+def _field(obj: Any, name: str) -> Any:
+    """An attribute of an SDK block, or a key of the same block as a plain dict."""
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _search(query: str, content: Any) -> Search:
+    """A Search from a web_search_tool_result's content: a list of results, or an error."""
+    if not isinstance(content, (list, tuple)):
+        return Search(query, ok=False, error=str(_field(content, "error_code") or "unknown"))
+    sources = []
+    for result in content[:MAX_SOURCES]:
+        title = " ".join(str(_field(result, "title") or "").split())
+        if len(title) > MAX_TITLE:
+            title = title[:MAX_TITLE] + "..."
+        sources.append((title or "Untitled", _site(str(_field(result, "url") or ""))))
+    return Search(query, ok=True, count=len(content), sources=tuple(sources))
+
+
+def _site(url: str) -> str:
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
+
+
+def _search_args(search: Search) -> str:
+    args = json.dumps({"query": search.query}, ensure_ascii=False)
+    return args if len(args) <= 200 else args[:200] + "..."
+
+
+def _about_web_search(exc: anthropic.BadRequestError) -> bool:
+    """A 400 that blames web search (e.g. it is turned off for this organisation)."""
+    text = str(exc).lower()
+    return "web search" in text or "web_search" in text
+
+
+def publish_search(bus: Any, search: Search) -> None:
+    """A web search as an action event on the dashboard. Never raises."""
+    publish_action(
+        bus, "web_search", _search_args(search), search.summary(), "ok" if search.ok else "failed"
+    )
+
+
 def create_chat(
     settings: Settings,
     tools: ToolRegistry | None = None,
     personality: Callable[[], Personality] = Personality,
+    bus: Any = None,
 ) -> Chat:
     """Build the chat client for settings.llm_provider. Add new providers here. The
-    system prompt is rebuilt for every request, with the personality as it is then."""
+    system prompt (and web search's location) is rebuilt for every request, with the
+    personality as it is then. Each web search is shown on `bus` (the dashboard)."""
     if settings.llm_provider == "anthropic":
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
@@ -261,17 +472,21 @@ def create_chat(
             effort=settings.llm_effort,
             system=lambda: prompt_for(settings, tools, personality()),
             tools=tools,
+            web_search_max=settings.web_search_max if settings.web_search else None,
+            location=lambda: personality().about.location,
+            on_search=None if bus is None else (lambda search: publish_search(bus, search)),
         )
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")
 
 
 def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Personality) -> str:
-    """The full system prompt CARL gets (also the dashboard's read-only preview)."""
+    """The full system prompt CARL gets (also the dashboard's read-only preview). Web
+    search counts as off once the API refused it for this key."""
     return system_prompt(
         settings.max_sentences,
         notes=tools is not None and "take_note" in tools,
         music=tools is not None and "play_music" in tools,
-        web=settings.web_search,
+        web=settings.web_search and not web_search_blocked(),
         character=personality.character,
         about=personality.about,
     )

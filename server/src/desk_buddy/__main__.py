@@ -253,6 +253,7 @@ class Brain:
         music: tuple[MusicTools | None, MusicDucker | None] = (None, None),
     ) -> None:
         self.guard = guard or ActionGuard(settings.computer_control, bus=bus)
+        self._bus = bus  # each web search is shown on the dashboard
         self._personality = personality
         self._settings = settings
         self._state = State.IDLE
@@ -332,7 +333,7 @@ class Brain:
     def _rebuild(self) -> None:
         settings = self._settings
         tools = build_tools(settings, music=self.music)
-        chat = create_chat(settings, tools, personality=self._personality)
+        chat = create_chat(settings, tools, personality=self._personality, bus=self._bus)
         log.info(
             "Note tools: %s",
             f"on ({settings.obsidian_vault_path})"

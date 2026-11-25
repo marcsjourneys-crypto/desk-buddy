@@ -1,6 +1,48 @@
 import pytest
 
-from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation, is_forget_command
+from desk_buddy.brain.memory import (
+    INTERRUPTED_NOTE,
+    MAX_NOTE_QUERY,
+    SEARCH_NOTE_START,
+    Conversation,
+    is_forget_command,
+)
+
+
+def test_a_turn_that_searched_notes_the_queries_on_its_user_message():
+    c = Conversation()
+    c.add("weather?", "[happy] Sunny.", searches=["weather in Leeds", "leeds forecast"])
+    assert c.messages() == [
+        {
+            "role": "user",
+            "content": "weather? (To answer this, you searched the web for: "
+            '"weather in Leeds"; "leeds forecast")',
+        },
+        {"role": "assistant", "content": "[happy] Sunny."},  # never in CARL's reply
+    ]
+    assert c.user_message("thanks") == "thanks"  # only on the turn that searched
+
+
+def test_search_note_queries_are_capped_and_kept_on_one_line():
+    c = Conversation()
+    long = "x" * (MAX_NOTE_QUERY + 50)
+    c.add("q", "[happy] a", searches=[long, 'say "hi"\nnow', ""])
+    note = c.messages()[0]["content"]
+    assert note.startswith(f"q {SEARCH_NOTE_START} ")
+    assert f'"{"x" * MAX_NOTE_QUERY}..."' in note
+    assert "\"say 'hi' now\")" in note
+
+
+def test_a_search_note_follows_the_turn_rules():
+    c = Conversation(max_turns=1)
+    c.add("weather?", None, searches=["weather"])  # no reply: nothing stored
+    assert c.messages() == [] and c.user_message("hi") == "hi"
+    c.add("weather?", "[happy] Sunny.", searches=["weather"])
+    c.add("thanks", "[happy] Any time.")  # the searched turn is dropped whole
+    assert c.messages()[0]["content"] == "thanks"
+    c.add("weather?", "[happy] Sunny.", interrupted=True, searches=["weather"])
+    assert SEARCH_NOTE_START in c.messages()[0]["content"]
+    assert c.user_message("go on").startswith(INTERRUPTED_NOTE)
 
 
 def test_messages_alternate_user_and_assistant_in_order():

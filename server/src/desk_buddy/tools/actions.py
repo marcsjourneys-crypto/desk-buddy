@@ -108,17 +108,21 @@ class ActionGuard:
         return result
 
     def _publish(self, tool: str, args: str, result: str, outcome: str) -> None:
-        """An action event for the dashboard (the result can hold untrusted text: the page
-        shows it as plain text). Never raises into the tool."""
-        if self._bus is None:
-            return
-        try:
-            self._bus.publish(
-                "action",
-                tool=tool,
-                args=args,
-                result=_bounded(str(result), RESULT_PREVIEW),
-                outcome=outcome,
-            )
-        except Exception:
-            log.debug("Dashboard action event failed", exc_info=True)
+        publish_action(self._bus, tool, args, result, outcome)
+
+
+def publish_action(bus: Any, tool: str, args: str, result: str, outcome: str) -> None:
+    """An action event for the dashboard (the result can hold untrusted text: the page
+    shows it as plain text). Never raises into the caller."""
+    if bus is None:
+        return
+    try:
+        bus.publish(
+            "action",
+            tool=tool,
+            args=args,
+            result=_bounded(str(result), RESULT_PREVIEW),
+            outcome=outcome,
+        )
+    except Exception:
+        log.debug("Dashboard action event failed", exc_info=True)

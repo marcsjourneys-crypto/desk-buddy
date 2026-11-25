@@ -562,7 +562,7 @@ def test_the_personality_file_feeds_the_chat_and_the_loop(monkeypatch, fakes, ca
     monkeypatch.setattr(
         entry,
         "create_chat",
-        lambda s, tools=None, personality=None: providers.append(personality) or object(),
+        lambda s, tools=None, personality=None, **_: providers.append(personality) or object(),
     )
     entry.main()
     assert providers[0]().character == "You are grumpy."

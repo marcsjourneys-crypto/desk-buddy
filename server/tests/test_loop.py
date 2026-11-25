@@ -2,9 +2,11 @@ import asyncio
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
+import desk_buddy.llm as llm_module
 import desk_buddy.loop as loop_module
 from desk_buddy.audio import BYTES_PER_SECOND
 from desk_buddy.brain.memory import CUT_OFF_NOTE_START, INTERRUPTED_NOTE, Conversation
@@ -17,7 +19,7 @@ from desk_buddy.brain.personality import (
     REFUSAL_LINE,
     TASK_DONE,
 )
-from desk_buddy.llm import LLMError, LLMRefusal
+from desk_buddy.llm import ClaudeChat, LLMError, LLMRefusal, Search, publish_search
 from desk_buddy.loop import Orchestrator, State
 
 ONE_SECOND = b"\x00" * BYTES_PER_SECOND
@@ -1071,3 +1073,102 @@ def test_tool_rounds_from_an_earlier_turn_are_never_reused():
     orch, _, _ = make(chat=StaleChat())
     asyncio.run(talk(orch))
     assert all(isinstance(m["content"], str) for m in orch.conversation.messages())
+
+
+# --- Web search ---
+
+
+def ns(**fields):
+    return SimpleNamespace(**fields)
+
+
+SEARCH_USE = ns(type="server_tool_use", id="s1", name="web_search", input={"query": "weather"})
+SEARCH_OK = ns(
+    type="web_search_tool_result",
+    tool_use_id="s1",
+    content=[ns(type="web_search_result", title="Forecast", url="https://bbc.co.uk/w")],
+)
+SEARCH_FAILED = ns(
+    type="web_search_tool_result",
+    tool_use_id="s2",
+    content=ns(type="web_search_tool_result_error", error_code="unavailable"),
+)
+
+
+class SearchStream:
+    """One API response, as the SDK's message stream yields it."""
+
+    def __init__(self, text, content):
+        self.text, self.content = text, content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        yield ns(type="content_block_start", content_block=ns(type="text"))
+        yield ns(type="content_block_delta", delta=ns(type="text_delta", text=self.text))
+
+    async def get_final_message(self):
+        return ns(stop_reason="end_turn", content=self.content)
+
+
+def search_chat(content, text="[happy] Sunny. ", bus=None):
+    client = ns(messages=ns(stream=lambda **kwargs: SearchStream(text, content)))
+    on_search = None if bus is None else (lambda search: publish_search(bus, search))
+    return ClaudeChat(
+        client, model="m", effort="low", system="sys", web_search_max=2, on_search=on_search
+    )
+
+
+@pytest.fixture
+def search_allowed(monkeypatch):
+    monkeypatch.setattr(llm_module, "_web_search_blocked", False)
+
+
+def test_a_search_turn_is_remembered_with_a_note_and_no_search_blocks(search_allowed):
+    chat = search_chat([SEARCH_USE, SEARCH_OK, ns(type="text", text="[happy] Sunny.")])
+    orch, parts, _ = make(chat=chat, transcriber=FakeTranscriber("weather tomorrow?"))
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Sunny."]
+    assert orch.conversation.messages() == [
+        {
+            "role": "user",
+            "content": 'weather tomorrow? (To answer this, you searched the web for: "weather")',
+        },
+        {"role": "assistant", "content": "[happy] Sunny."},
+    ]
+
+
+def test_a_search_alone_never_says_task_done(search_allowed):
+    chat = search_chat([SEARCH_USE, SEARCH_OK])
+    orch, parts, _ = make(chat=chat, random=lambda: 0.0)
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Sunny."]
+
+
+def test_searches_show_as_actions_and_a_failed_one_as_failed(search_allowed):
+    bus = RecordingBus()
+    failed_use = ns(type="server_tool_use", id="s2", name="web_search", input={"query": "score"})
+    chat = search_chat([SEARCH_USE, SEARCH_OK, failed_use, SEARCH_FAILED], bus=bus)
+    orch, parts, _ = make(chat=chat, bus=bus)
+    asyncio.run(talk(orch))
+    actions = bus.of("action")
+    assert [(a["tool"], a["args"], a["outcome"]) for a in actions] == [
+        ("web_search", '{"query": "weather"}', "ok"),
+        ("web_search", '{"query": "score"}', "failed"),
+    ]
+    assert actions[0]["result"] == "1 result: Forecast (bbc.co.uk)"
+    assert parts["speaker"].played == ["Sunny."]  # the turn carries on
+    assert 'searched the web for: "weather"; "score"' in orch.conversation.messages()[0]["content"]
+
+
+def test_searches_from_an_earlier_turn_are_never_reused():
+    class StaleChat(FakeChat):
+        searches = [Search("old", ok=True)]  # left over, never reset
+
+    orch, _, _ = make(chat=StaleChat())
+    asyncio.run(talk(orch))
+    assert "searched" not in orch.conversation.messages()[0]["content"]
