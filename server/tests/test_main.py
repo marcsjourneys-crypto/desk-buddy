@@ -123,6 +123,21 @@ def fakes(monkeypatch, calls, tmp_path):
 
     monkeypatch.setattr(entry, "start_dashboard", fake_start_dashboard)
 
+    class FakeSessionDucker:  # never the real volume mixer
+        def __init__(self, *, enabled):
+            calls.append(("apps ducker", enabled))
+
+        def on_state(self, state):
+            pass
+
+        def set_enabled(self, enabled, state="idle"):
+            calls.append(("apps ducker enabled", enabled))
+
+        def close(self):
+            calls.append(("apps ducker", "closed"))
+
+    monkeypatch.setattr(entry, "SessionDucker", FakeSessionDucker)
+
 
 def steps(calls):
     """The plain string entries (created/closed/started/stopped)."""

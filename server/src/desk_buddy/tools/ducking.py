@@ -1,4 +1,6 @@
-"""Duck the music while CARL listens, thinks and talks (MUSIC_DUCK, on by default).
+"""Duck the music while CARL listens, thinks and talks (MUSIC_DUCK, on by default):
+MusicDucker lowers Spotify through its API, SessionDucker lowers every other app in the
+Windows volume mixer.
 
 Driven by the orchestrator's state: anything but idle ducks Spotify to DUCK_FACTOR of its
 level if music is playing; idle restores it. Every way a turn ends (reply, interrupt,
@@ -12,6 +14,7 @@ and never touches the turn. A failed restore is kept and tried again after the n
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -149,6 +152,162 @@ class MusicDucker:
                     if self._saved == saved:
                         self._saved = None
             raise
+
+
+LEVEL_MATCH = 0.005  # mixer levels this close count as unchanged (they're float32)
+SKIPPED_PROGRAMS = frozenset({"spotify.exe"})  # Spotify has MusicDucker (never twice)
+
+
+class SessionDucker:
+    """Duck other apps (YouTube in the browser, a podcast) while CARL isn't idle: each
+    audio session in the Windows volume mixer, except CARL's own process and Spotify, goes
+    to DUCK_FACTOR of its level; at idle each is put back to its exact earlier level,
+    unless the user changed it in the meantime (then it's left alone).
+
+    MUSIC_DUCK switches it (computer control isn't needed: ducking isn't an action); off
+    restores at once. Sessions that start mid-turn aren't ducked. A session whose program
+    can't be identified isn't ducked either.
+
+    Best effort, like MusicDucker: all Core Audio calls run on one COM worker thread,
+    never on the event loop; on_state never blocks or raises; each kind of failure is
+    logged once as a warning. A failed restore is kept and tried again after the next turn.
+    """
+
+    def __init__(
+        self,
+        backend: Any = None,
+        *,
+        enabled: bool = True,
+        own_pid: int | None = None,
+        process_name: Callable[[int], str | None] | None = None,
+        executor: Any = None,
+    ) -> None:
+        """backend: a winaudio.SessionBackend (the default), or a fake with sessions().
+        executor: where the calls run (default: a winaudio COM worker)."""
+        from desk_buddy.tools import winaudio
+
+        self._backend = backend if backend is not None else winaudio.SessionBackend()
+        self._process_name = process_name or winaudio.process_name
+        self._executor = executor or winaudio.com_worker("duck-apps")
+        self._own_pid = os.getpid() if own_pid is None else own_pid
+        self._enabled = enabled
+        self._lock = threading.Lock()  # guards _want, _saved, _enabled, _closed, _warned
+        self._want = False
+        self._saved: dict[str, tuple[float, float]] = {}  # session id: (before, ducked)
+        self._warned: set[tuple[str, str]] = set()
+        self._closed = False
+
+    def on_state(self, state: Any) -> None:
+        """Called with every state change, on the event loop. Never blocks or raises."""
+        self._switch(lambda: self._enabled and str(state) != "idle")
+
+    def set_enabled(self, enabled: bool, state: Any = "idle") -> None:
+        """MUSIC_DUCK changed: off restores at once, on ducks at once mid-turn. Never
+        blocks or raises."""
+
+        def want() -> bool:
+            self._enabled = enabled
+            return enabled and str(state) != "idle"
+
+        self._switch(want)
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until queued ducks/restores are done. False on timeout."""
+        try:
+            self._executor.submit(lambda: None).result(timeout=timeout)
+        except (FutureTimeout, RuntimeError):
+            return False
+        return True
+
+    def close(self) -> None:
+        """Restore every app whatever state CARL was in, wait for it (bounded), then stop
+        the worker."""
+        with self._lock:
+            closed, self._closed = self._closed, True
+            self._want = False
+        if closed:
+            return
+        try:
+            self._executor.submit(self._apply)
+        except RuntimeError:
+            pass
+        self.flush(CLOSE_WAIT_S)
+        self._executor.shutdown(wait=False)
+
+    def _switch(self, decide: Callable[[], bool]) -> None:
+        try:
+            with self._lock:
+                want = decide()
+                if want == self._want or self._closed:
+                    return
+                self._want = want
+            self._executor.submit(self._apply)
+        except Exception:
+            log.warning("Ducking other apps failed to queue", exc_info=True)
+
+    # --- on the COM worker thread ---
+
+    def _apply(self) -> None:
+        with self._lock:
+            want, saved = self._want, dict(self._saved)
+        try:
+            if want and not saved:
+                self._duck()
+            elif not want and saved:
+                self._restore(saved)
+        except Exception as exc:
+            self._warn("list", exc)
+
+    def _duck(self) -> None:
+        for session in self._backend.sessions():
+            if session.pid == self._own_pid or not self._may_duck(session.pid):
+                continue
+            try:
+                before = session.get()
+                if before <= 0:
+                    continue
+                session.set(before * DUCK_FACTOR)
+                ducked = session.get()  # as the mixer stored it
+            except Exception as exc:
+                self._warn("duck", exc)
+                continue
+            with self._lock:
+                self._saved[session.id] = (before, ducked)
+
+    def _may_duck(self, pid: int) -> bool:
+        try:
+            name = self._process_name(pid)
+        except Exception as exc:
+            self._warn("name", exc)
+            return False
+        return name is not None and name.lower() not in SKIPPED_PROGRAMS
+
+    def _restore(self, saved: dict[str, tuple[float, float]]) -> None:
+        sessions = self._backend.sessions()  # if this fails, everything is kept for later
+        for session in sessions:
+            if session.id not in saved:
+                continue
+            before, ducked = saved[session.id]
+            try:
+                if abs(session.get() - ducked) <= LEVEL_MATCH:
+                    session.set(before)
+                else:
+                    log.info("An app's volume was changed while ducked: left as it is")
+            except Exception as exc:
+                self._warn("restore", exc)
+        with self._lock:
+            for key in saved:  # done, or dropped: the session ended or failed to restore
+                self._saved.pop(key, None)
+
+    def _warn(self, what: str, exc: Exception) -> None:
+        kind = (what, type(exc).__name__)
+        with self._lock:
+            first = kind not in self._warned
+            self._warned.add(kind)
+        if first:
+            log.warning("Ducking other apps failed (%s): %s", what, exc)
+        else:
+            log.debug("Ducking other apps failed (%s): %s", what, exc)
 
 
 def _definitely_failed(exc: BaseException) -> bool:

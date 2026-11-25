@@ -37,7 +37,7 @@ from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
 from desk_buddy.tools.confirm import Confirmations
-from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
+from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker, SessionDucker
 from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.media import MediaKeys
 from desk_buddy.tools.spotify import MusicTools, create_control
@@ -123,6 +123,7 @@ async def _run(settings: Settings) -> None:
             guard=guard,
             music=music,
             apps=apps,
+            apps_ducker=_apps_ducker(settings),
         )
         stack.callback(brain.close)  # runs after the farewell, which restores the music
         conversation = Conversation(settings.history_turns)
@@ -271,8 +272,12 @@ class Brain:
         guard: ActionGuard | None = None,
         music: tuple[MusicTools | None, MusicDucker | None] = (None, None),
         apps: AppsStore | None = None,
+        apps_ducker: SessionDucker | None = None,
     ) -> None:
+        """apps_ducker: lowers other apps while CARL is busy (MUSIC_DUCK only; it needs no
+        computer control). Closed with the brain."""
         self.guard = guard or ActionGuard(settings.computer_control, bus=bus)
+        self.apps_ducker = apps_ducker
         # Kept across rebuilds: the action waiting for a spoken yes, and the search
         # result addresses open_search_result may open (the loop moves them along).
         self.confirmations = Confirmations(bus=bus)
@@ -303,6 +308,8 @@ class Brain:
             )
             if self.ducker is not None:
                 self.ducker.set_enabled(False, self._state)
+        if self.apps_ducker is not None and not new.music_duck:
+            self.apps_ducker.set_enabled(False, self._state)  # off: restore at once
 
     def on_settings(self, old: Settings, new: Settings) -> None:
         """At the start of a question, on the event loop."""
@@ -328,15 +335,21 @@ class Brain:
         self._state = state
         if self.ducker is not None:
             self.ducker.on_state(state)
+        if self.apps_ducker is not None:
+            self.apps_ducker.on_state(state)
 
     def close(self) -> None:
         if self.ducker is not None:
             self.ducker.close()
+        if self.apps_ducker is not None:
+            self.apps_ducker.close()
 
     def _switch_ducker(self) -> None:
+        s = self._settings
         if self.ducker is not None:
-            s = self._settings
             self.ducker.set_enabled(s.computer_control and s.music_duck, self._state)
+        if self.apps_ducker is not None:
+            self.apps_ducker.set_enabled(s.music_duck, self._state)
 
     def _make_music(self, settings: Settings) -> None:
         try:
@@ -468,6 +481,18 @@ def _music_tools(
         return MusicTools(control, guard, ducker=ducker), ducker
     log.info("Music tools: off (%s)", reason)
     return None, None
+
+
+def _apps_ducker(settings: Settings) -> SessionDucker | None:
+    """The ducker for other apps (the Windows volume mixer). Made whatever MUSIC_DUCK
+    says, so turning it on from the dashboard works; never fatal."""
+    try:
+        ducker = SessionDucker(enabled=settings.music_duck)
+    except Exception as exc:
+        log.warning("Ducking other apps: off (%s)", exc)
+        return None
+    log.info("Ducking other apps: %s", "on" if settings.music_duck else "off (MUSIC_DUCK is off)")
+    return ducker
 
 
 async def _load_whisper(settings: Settings) -> WhisperTranscriber:

@@ -9,14 +9,14 @@ Approved by the user on 2026-11-25.
 CARL can:
 - play a YouTube video, or open a YouTube search;
 - press the play/pause, next and previous media keys for whatever is playing;
-- set the PC's master volume;
+- ~~set the PC's master volume~~ (dropped by the user, 2026-11-25);
 - lower other apps (YouTube in the browser, podcasts) while it listens and talks.
 
 This finishes M7.
 
 ## Decisions
 
-- **The usual rules:** all four tools need `COMPUTER_CONTROL=on` and go through `ActionGuard`, which applies the 3-per-question and 8-per-minute limits, logs every call, and shows `ok`, `failed` or `refused` on the Live tab. Unknown or invalid input is refused through `guard.refuse`. None of these needs a spoken "yes".
+- **The usual rules:** all three tools need `COMPUTER_CONTROL=on` and go through `ActionGuard`, which applies the 3-per-question and 8-per-minute limits, logs every call, and shows `ok`, `failed` or `refused` on the Live tab. Unknown or invalid input is refused through `guard.refuse`. None of these needs a spoken "yes".
 - **Model text is only ever** a search query, or a choice from an enum or a number. The server builds every URL and key press.
 - **No new dependencies:**
   - HTTPS uses `urllib.request`;
@@ -50,16 +50,12 @@ This finishes M7.
   - If it's unclear and Spotify is what CARL last played, use `music_control`.
   - Play/pause is one toggle, so press it only when asked to pause, play or resume.
 
-## Part 3: PC volume and ducking other apps
+## Part 3: Ducking other apps (PC volume dropped)
 
-- **`tools/winaudio.py`:** small comtypes bindings for Core Audio.
-  - `IMMDeviceEnumerator`, then the default render endpoint, then `IAudioEndpointVolume` for the master level and mute.
-  - `IAudioSessionManager2`, then the session enumerator, then `ISimpleAudioVolume` for each session, with each session's process ID.
-  - All calls run on one worker thread that has COM initialised, with a timeout. The tests use a fake backend, and real COM only runs in a marked integration test.
-- **`pc_volume`:** takes exactly one of `level` (0–100), `change` (−50..50) or `mute` (true/false), the same rule as `music_volume`.
-  - **When the PC speakers are CARL's voice** (no robot attached, read from `DeviceSwitch.robot`), it refuses a level below 10 and refuses mute, with: "I'd lose my voice: connect the robot or turn it down on the PC."
-  - **The result:** "Volume's at N." or "Muted."
-- **Prompt rules:** "the music" means Spotify (`music_volume`). "The computer", "the PC", "the video" or "everything" means `pc_volume`.
+- **Dropped by the user (2026-11-25):** the `pc_volume` tool, its voice guard (refusing a low level or mute while the PC speakers are CARL's voice), its prompt rules and `IAudioEndpointVolume`. CARL doesn't set the PC's master volume.
+- **`tools/winaudio.py`:** small comtypes bindings for Core Audio's sessions.
+  - `IMMDeviceEnumerator`, then the default render endpoint, then `IAudioSessionManager2`, then the session enumerator, then `ISimpleAudioVolume` for each session, with each session's process ID.
+  - All calls run on one worker thread that has COM initialised. The tests use a fake backend, and real COM only runs in a marked integration test.
 - **Ducking other apps:**
   - **When:** with `MUSIC_DUCK=on`, while CARL isn't idle.
   - **What's lowered:** every audio session except CARL's own process and Spotify (Spotify keeps its API duck, so it's never lowered twice) is set to 20 % of its current volume.
@@ -85,16 +81,9 @@ This finishes M7.
    - tests with a fake sender: the right key codes, down then up.
 
    Commit: `Add media key control`.
-4. **PC volume:**
-   - `tools/winaudio.py` (the endpoint part) and `pc_volume`;
-   - the voice guard while there's no robot;
-   - the prompt rules;
-   - tests with a fake backend: level, change and clamp, mute, the voice guard with and without a robot, failures;
-   - one marked integration test that reads (but doesn't change) the real volume.
-
-   Commit: `Let CARL set the PC volume`.
+4. **PC volume:** dropped by the user (2026-11-25); not built.
 5. **Ducking other apps:**
-   - `winaudio` sessions and `SessionDucker`, wired next to `MusicDucker` in `__main__`;
+   - `tools/winaudio.py` (sessions only) and `SessionDucker`, wired next to `MusicDucker` in `__main__`;
    - tests with fake sessions: CARL's own process and Spotify are skipped; levels are restored exactly; a user change wins; it never blocks; the `MUSIC_DUCK` switch; shutdown;
    - a marked integration test that lists the real sessions.
 
@@ -107,5 +96,4 @@ This finishes M7.
 2. "Play the latest video from <a channel you like>."
 3. "Search YouTube for bread recipes": the results page opens.
 4. "Pause the video", then "resume it". Then "pause the music" while Spotify plays: Spotify pauses, and the video doesn't toggle.
-5. "Set the computer volume to 30" (with the robot connected). Without the robot, "mute the computer" is refused, and CARL says why.
-6. Ask a question while a YouTube video plays: the video dips while CARL listens and talks, then comes back.
+5. Ask a question while a YouTube video plays: the video dips while CARL listens and talks, then comes back.
