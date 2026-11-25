@@ -368,6 +368,21 @@ void test_ring_partial_write_when_full() {
   TEST_ASSERT_EQUAL_UINT32(0, r.write(a, 1));
 }
 
+void test_ring_drop_oldest() {
+  int16_t store[4];
+  Int16Ring r(store, 4);
+  const int16_t a[] = {1, 2, 3, 4};
+  r.write(a, 4);
+  TEST_ASSERT_EQUAL_UINT32(2, r.drop(2));
+  const int16_t b[] = {5, 6};
+  TEST_ASSERT_EQUAL_UINT32(2, r.write(b, 2));  // across the wrap
+  int16_t out[4];
+  TEST_ASSERT_EQUAL_UINT32(4, r.read(out, 4));
+  const int16_t want[] = {3, 4, 5, 6};
+  TEST_ASSERT_EQUAL_INT16_ARRAY(want, out, 4);
+  TEST_ASSERT_EQUAL_UINT32(0, r.drop(3));  // nothing left to drop
+}
+
 void test_ring_clear_and_counts() {
   int16_t store[8];
   Int16Ring r(store, 8);
@@ -503,6 +518,7 @@ void setup() {
   RUN_TEST(test_dc_block_reset);
   RUN_TEST(test_ring_wraps);
   RUN_TEST(test_ring_partial_write_when_full);
+  RUN_TEST(test_ring_drop_oldest);
   RUN_TEST(test_ring_clear_and_counts);
   RUN_TEST(test_backoff);
   RUN_TEST(test_parse_messages);

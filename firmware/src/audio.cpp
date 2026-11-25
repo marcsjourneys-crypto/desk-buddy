@@ -3,10 +3,18 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
 
-#include <algorithm>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+#include <string.h>
 
+#include <algorithm>
+#include <atomic>
+
+#include "dc_block.h"
 #include "dsp.h"
 #include "pins.h"
+#include "ring_buffer.h"
 
 namespace {
 
@@ -117,5 +125,146 @@ void playTone(float hz, uint32_t ms) {
   }
   writeSilence(100);  // return only after the tone has finished playing
 }
+
+}  // namespace audio
+
+// ---------------------------------------------------------------------------------------
+// Streaming: a playback task drains a PSRAM ring into the speaker, and a mic task queues
+// DC-blocked 20 ms frames for the main loop to send. Both run on core 1; the WebSocket and
+// the eyes stay in the main loop.
+namespace {
+
+constexpr size_t kRingSamples = dsp::kRate;  // 1 s; the server paces only ~200 ms ahead
+constexpr size_t kMicQueueDepth = 8;         // 160 ms of frames
+constexpr UBaseType_t kPlaybackPriority = 5;
+constexpr UBaseType_t kMicPriority = 4;
+constexpr BaseType_t kAudioCore = 1;
+
+Int16Ring* ring = nullptr;
+portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
+std::atomic<bool> accepting{false};  // between streamBegin() and streamStop()
+bool started = false;
+
+static_assert(kBlock * sizeof(int16_t) == audio::kFrameBytes, "a mic frame is one block");
+
+QueueHandle_t micQueue = nullptr;
+std::atomic<bool> micWanted{false};
+std::atomic<uint32_t> micStarts{0};  // bumped per setMicStreaming(true): a fresh flush
+std::atomic<uint32_t> micDrops{0};
+
+void playbackTask(void*) {
+  int16_t block[kBlock];
+  for (;;) {
+    portENTER_CRITICAL(&ringMux);
+    const size_t n = ring->read(block, kBlock);
+    portEXIT_CRITICAL(&ringMux);
+    if (n == 0) {
+      vTaskDelay(pdMS_TO_TICKS(5));  // starved: auto_clear plays silence meanwhile
+      continue;
+    }
+    const int v = vol;
+    for (size_t i = 0; i < n; i++) block[i] = dsp::scale(block[i], v);
+    write(block, n);  // blocks while the DMA is full, which paces this loop
+  }
+}
+
+void micTask(void*) {
+  int16_t frame[kBlock];
+  DcBlocker dc;
+  uint32_t seen = 0;  // the micStarts this stream belongs to
+  bool seed = false;  // the next frame starts a stream
+  for (;;) {
+    if (!micWanted.load()) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    const uint32_t starts = micStarts.load();
+    if (starts != seen) {
+      audio::flushMic();  // drop what the DMA recorded while nobody listened
+      seen = starts;
+      seed = true;
+    }
+    if (audio::readMic(frame, kBlock) != kBlock) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    // Seed with the first sample, so the mic's DC offset doesn't start with a thump.
+    if (seed) {
+      dc.reset(frame[0]);
+      seed = false;
+    }
+    dc.processBlock(frame, kBlock);
+    if (xQueueSend(micQueue, frame, 0) != pdTRUE) micDrops++;
+  }
+}
+
+}  // namespace
+
+namespace audio {
+
+bool startStreaming() {
+  if (started) return true;
+  if (!speakerOk || !micOk) return false;
+  auto* store = static_cast<int16_t*>(ps_malloc(kRingSamples * sizeof(int16_t)));
+  if (store == nullptr) return false;
+  ring = new Int16Ring(store, kRingSamples);
+  micQueue = xQueueCreate(kMicQueueDepth, kFrameBytes);
+  if (micQueue == nullptr) return false;
+  if (xTaskCreatePinnedToCore(playbackTask, "playback", 4096, nullptr, kPlaybackPriority,
+                              nullptr, kAudioCore) != pdPASS ||
+      xTaskCreatePinnedToCore(micTask, "micstream", 4096, nullptr, kMicPriority, nullptr,
+                              kAudioCore) != pdPASS) {
+    return false;  // out of memory at boot-ish time: not worth unwinding
+  }
+  started = true;
+  return true;
+}
+
+bool streaming() { return started; }
+
+void streamBegin() { accepting = true; }
+
+void streamPush(const uint8_t* pcm, size_t len) {
+  if (!started || !accepting) return;
+  len &= ~static_cast<size_t>(1);  // an odd trailing byte isn't a sample
+  // Copy through an aligned buffer: the payload may not be 2-byte aligned.
+  int16_t chunk[kBlock];
+  while (len > 0) {
+    const size_t bytes = std::min(len, sizeof(chunk));
+    memcpy(chunk, pcm, bytes);
+    const size_t n = bytes / sizeof(int16_t);
+    portENTER_CRITICAL(&ringMux);
+    if (ring->space() < n) ring->drop(n - ring->space());  // full: lose the oldest
+    ring->write(chunk, n);
+    portEXIT_CRITICAL(&ringMux);
+    pcm += bytes;
+    len -= bytes;
+  }
+}
+
+void streamEnd() {}  // nothing to do: what's in the ring plays out
+
+void streamStop() {
+  accepting = false;
+  if (!started) return;
+  portENTER_CRITICAL(&ringMux);
+  ring->clear();
+  portEXIT_CRITICAL(&ringMux);
+}
+
+void setMicStreaming(bool on) {
+  if (!started) return;
+  if (on && !micWanted.load()) {
+    xQueueReset(micQueue);  // no stale frames from last time
+    micStarts++;
+  }
+  micWanted = on;
+}
+
+bool popMicFrame(uint8_t out[kFrameBytes]) {
+  return micQueue != nullptr && xQueueReceive(micQueue, out, 0) == pdTRUE;
+}
+
+uint32_t micDropped() { return micDrops.load(); }
 
 }  // namespace audio

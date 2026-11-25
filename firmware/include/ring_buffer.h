@@ -31,6 +31,15 @@ class Int16Ring {
     return n;
   }
 
+  // Discards up to n of the oldest samples (to make room); returns how many.
+  size_t drop(size_t n) {
+    if (n > count_) n = count_;
+    if (n == 0) return 0;
+    tail_ = (tail_ + n) % cap_;
+    count_ -= n;
+    return n;
+  }
+
   size_t available() const { return count_; }
   size_t space() const { return cap_ - count_; }
   size_t capacity() const { return cap_; }

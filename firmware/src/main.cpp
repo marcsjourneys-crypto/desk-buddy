@@ -14,6 +14,7 @@
 namespace {
 
 constexpr char kFwVersion[] = "0.2.0-m6";
+bool linkActive = false;  // stub until the link exists (net::connected())
 
 char line[301];  // room for "token " plus a 256-char token
 size_t lineLen = 0;
@@ -230,6 +231,12 @@ void handle(char* cmd) {
   if (handleSettings(name, raw)) return;
   char* rest = trimmed(raw);
   char* arg = rest ? strtok(rest, " ") : nullptr;
+  const bool usesAudio = !strcmp(name, "tone") || !strcmp(name, "mic") ||
+                         !strcmp(name, "rec") || !strcmp(name, "play");
+  if (usesAudio && linkActive) {  // the streaming tasks own the speaker and mic now
+    Serial.println("Not while the robot link is connected");
+    return;
+  }
   if (!strcmp(name, "help")) {
     printHelp();
   } else if (!strcmp(name, "info")) {
