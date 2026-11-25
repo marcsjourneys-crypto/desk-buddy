@@ -18,10 +18,15 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any, NamedTuple
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 
-from desk_buddy.tools.registry import ToolError
+from desk_buddy.tools.launch import OPEN_WAIT_S, open_page, open_url
+from desk_buddy.tools.registry import Tool, ToolError
+from desk_buddy.tools.untrusted import wrap
+from desk_buddy.tools.urls import MAX_URL
 
 log = logging.getLogger(__name__)
 
@@ -218,3 +223,155 @@ def _http_message(endpoint: str, status: int, body: Any) -> str:
     if status == 404:
         return NOT_FOUND
     return NETWORK
+
+
+# --- The YouTube tools ---
+
+KINDS = ("video", "latest_from_channel")
+MAX_QUERY = 200
+SOURCE = "youtube"
+MAX_NAMES = 250  # characters of the untrusted block with the title and channel
+DEADLINE_S = 15.0  # all the API calls of one play_youtube together
+SEARCH_PAGE = "https://www.youtube.com/results?search_query="
+LABEL = "YouTube"  # "I couldn't open YouTube."
+
+BAD_QUERY = f"The search must be 1 to {MAX_QUERY} characters."
+BAD_KIND = "kind must be video or latest_from_channel."
+TOO_LONG = "That search is too long for YouTube."
+NO_KEY = "Playing YouTube videos isn't set up."
+
+# API calls run here so a whole play_youtube can be given up on at DEADLINE_S. A call
+# given up on finishes in the background (each request has its own timeout) and its
+# result is dropped.
+_CALLS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="youtube")
+
+
+def _query(value: Any) -> str:
+    return " ".join(str(value).split())
+
+
+def _describe(video: Video) -> str:
+    title = video.title or "a video"
+    return f"{title} by {video.channel}" if video.channel else title
+
+
+class YouTubeTools:
+    """play_youtube (only with a client, i.e. an API key) and youtube_search (no key
+    needed). Every call goes through the ActionGuard, refusals included. Model text is
+    only ever a search query: the server builds every address (a watch page from a checked
+    video ID, or the search page with the query encoded) and opens it with the shared
+    opener (launch.open_page). Titles and channel names are wrapped as untrusted."""
+
+    def __init__(
+        self,
+        guard: Any,
+        client: YouTubeClient | None = None,
+        *,
+        opener: Callable[[str], None] = open_url,
+        open_wait: float = OPEN_WAIT_S,
+        deadline: float = DEADLINE_S,
+    ) -> None:
+        self._guard = guard
+        self._client = client
+        self._opener = opener
+        self._open_wait = open_wait
+        self._deadline = deadline
+
+    @property
+    def can_play(self) -> bool:
+        return self._client is not None
+
+    # --- the tool functions (their signatures are the tool inputs) ---
+
+    def play_youtube(self, query: str, kind: str) -> str:
+        text = _query(query)
+        args = {"query": text[:MAX_QUERY], "kind": str(kind)[:40]}
+        if not text or len(text) > MAX_QUERY:
+            self._guard.refuse("play_youtube", args, BAD_QUERY)
+        if kind not in KINDS:
+            self._guard.refuse("play_youtube", args, BAD_KIND)
+        if self._client is None:
+            self._guard.refuse("play_youtube", args, NO_KEY)
+        return self._guard.run("play_youtube", args, lambda: self._play(text, kind))
+
+    def youtube_search(self, query: str) -> str:
+        text = _query(query)
+        args = {"query": text[:MAX_QUERY]}
+        if not text or len(text) > MAX_QUERY:
+            self._guard.refuse("youtube_search", args, BAD_QUERY)
+        url = SEARCH_PAGE + quote_plus(text)
+        if len(url) > MAX_URL:  # many non-ASCII characters grow a lot when encoded
+            self._guard.refuse("youtube_search", args, TOO_LONG)
+        return self._guard.run("youtube_search", args, lambda: self._open_search(url))
+
+    def tools(self) -> list[Tool]:
+        tools: list[Tool] = []
+        if self._client is not None:
+            tools.append(
+                Tool(
+                    name="play_youtube",
+                    description=(
+                        "Play a YouTube video in the user's browser. query is what to search "
+                        "for, in the user's words (at most 200 characters). kind: video for "
+                        "the best matching video, latest_from_channel for the newest upload "
+                        "of a channel (query is then the channel's name)."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "What to search for."},
+                            "kind": {"type": "string", "enum": list(KINDS)},
+                        },
+                        "required": ["query", "kind"],
+                        "additionalProperties": False,
+                    },
+                    func=self.play_youtube,
+                )
+            )
+        tools.append(
+            Tool(
+                name="youtube_search",
+                description=(
+                    "Open YouTube's search results for a query in the user's browser, so "
+                    "they can pick a video themselves. query is at most 200 characters."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "What to search for."}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                func=self.youtube_search,
+            )
+        )
+        return tools
+
+    # --- the actions (run inside the guard, in a worker thread) ---
+
+    def _play(self, query: str, kind: str) -> str:
+        assert self._client is not None
+        find = self._client.search_video if kind == "video" else self._client.latest_from_channel
+        video = self._bounded(find, query)
+        if video is None:
+            raise YouTubeError(NOT_FOUND)
+        try:
+            url = watch_url(video.video_id)  # again: only a checked ID goes into an address
+        except ValueError:
+            raise YouTubeError(NOT_FOUND) from None
+        open_page(url, LABEL, opener=self._opener, wait=self._open_wait)
+        return "Playing on YouTube: " + wrap(SOURCE, _describe(video), limit=MAX_NAMES)
+
+    def _open_search(self, url: str) -> str:
+        open_page(url, LABEL, opener=self._opener, wait=self._open_wait)
+        return "Opened the YouTube search results."
+
+    def _bounded(self, find: Callable[[str], Video | None], query: str) -> Video | None:
+        """One overall deadline for the API calls, so a turn never waits long on YouTube."""
+        future = _CALLS.submit(find, query)
+        try:
+            return future.result(timeout=self._deadline)
+        except FutureTimeout:
+            log.warning("YouTube took over %.0f s: gave up", self._deadline)
+            raise YouTubeError(NETWORK) from None

@@ -237,29 +237,42 @@ class LaunchTools:
         return self._open_url(site.url, site.name)
 
     def _open_url(self, url: str, label: str) -> str:
-        """Open a page in the default browser, after check_url passes again. `label`
-        names it in the result ("Opened <label>.") and the failure."""
-        try:
-            url = check_url(url)  # again, right before it's opened
-        except ValueError as exc:
-            raise ToolError(BAD_SITE) from exc
-        failed: list[Exception] = []
-
-        def open_it() -> None:
-            try:
-                self._opener(url)
-            except Exception as exc:
-                failed.append(exc)
-
-        # os.startfile can block while Windows starts the browser: wait only long enough
-        # to report a failure that comes at once.
-        thread = threading.Thread(target=open_it, name="open-website", daemon=True)
-        thread.start()
-        thread.join(self._open_wait)
-        if failed:
-            log.warning("Couldn't open %s: %s", label, failed[0])
-            raise ToolError(SITE_FAILED.format(name=label)) from failed[0]
+        """Open a page in the default browser (open_page). `label` names it in the
+        result ("Opened <label>.") and the failure."""
+        open_page(url, label, opener=self._opener, wait=self._open_wait)
         return f"Opened {label}."
+
+
+def open_page(
+    url: str,
+    label: str,
+    *,
+    opener: Callable[[str], None] = open_url,
+    wait: float = OPEN_WAIT_S,
+) -> None:
+    """The one way CARL opens a web page: check_url again right before it's opened, then
+    `opener` (the default browser) on its own thread. Raises ToolError (BAD_SITE, or
+    "I couldn't open <label>.") if it isn't allowed or fails at once."""
+    try:
+        url = check_url(url)
+    except ValueError as exc:
+        raise ToolError(BAD_SITE) from exc
+    failed: list[Exception] = []
+
+    def open_it() -> None:
+        try:
+            opener(url)
+        except Exception as exc:
+            failed.append(exc)
+
+    # os.startfile can block while Windows starts the browser: wait only long enough to
+    # report a failure that comes at once.
+    thread = threading.Thread(target=open_it, name="open-website", daemon=True)
+    thread.start()
+    thread.join(wait)
+    if failed:
+        log.warning("Couldn't open %s: %s", label, failed[0])
+        raise ToolError(SITE_FAILED.format(name=label)) from failed[0]
 
 
 def _name_schema(names: list[str], description: str) -> dict[str, Any]:

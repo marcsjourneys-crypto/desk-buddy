@@ -41,6 +41,7 @@ from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
 from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tools.urls import SearchResults
+from desk_buddy.tools.youtube import YouTubeClient, YouTubeTools
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
 
 log = logging.getLogger("desk_buddy")
@@ -391,9 +392,26 @@ class Brain:
             confirmations=self.confirmations,
         )
 
+    def _youtube_tools(self, settings: Settings) -> YouTubeTools | None:
+        """youtube_search whenever computer control is on; play_youtube only with a
+        YOUTUBE_API_KEY too. Otherwise CARL's prompt says why not."""
+        if not settings.computer_control:
+            log.info("YouTube: off (COMPUTER_CONTROL is off)")
+            return None
+        if not settings.youtube_api_key:
+            log.info("YouTube: search only (no YOUTUBE_API_KEY)")
+            return YouTubeTools(self.guard)
+        log.info("YouTube: on (play and search)")
+        return YouTubeTools(self.guard, YouTubeClient(settings.youtube_api_key))
+
     def _rebuild(self) -> None:
         settings = self._settings
-        tools = build_tools(settings, music=self.music, launch=self._launch_tools(settings))
+        tools = build_tools(
+            settings,
+            music=self.music,
+            launch=self._launch_tools(settings),
+            youtube=self._youtube_tools(settings),
+        )
         chat = create_chat(
             settings,
             tools,
