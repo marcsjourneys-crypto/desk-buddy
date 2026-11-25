@@ -15,6 +15,8 @@ import os
 import platform
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +40,15 @@ SCOPES = (
     "user-read-playback-state user-modify-playback-state user-read-currently-playing "
     "playlist-read-private"
 )
-REQUEST_TIMEOUT_S = 10  # spotipy's PKCE token calls have no timeout by default
-API_RETRIES = 2
+REQUEST_TIMEOUT_S = 10  # login token calls (spotipy's PKCE has no timeout by default)
+API_TIMEOUT_S = 5  # each Web API request
+API_RETRIES = 1  # connection retries
+API_STATUS_RETRIES = 0  # never retry on 429/5xx: urllib3 would sleep for any Retry-After
+CALL_DEADLINE_S = 12.0  # the most one spotipy call may take, retries and token refresh included
 START_WAIT_SECONDS = 8.0
 POLL_SECONDS = 0.5
+TRANSFER_TRIES = 3  # a just-started Spotify can 404 on transfer for a moment
+TRANSFER_RETRY_S = 0.5
 
 # What CARL says (tool error results).
 NOT_LOGGED_IN = "Music isn't set up: run the Spotify login."
@@ -49,7 +56,14 @@ PREMIUM = "Spotify control needs Premium."
 NOT_FOUND = "I couldn't find that one."
 NO_START = "Spotify didn't open."
 NO_DEVICE = "Spotify isn't open on any device."
+NOT_READY = "Spotify isn't ready yet."
 NETWORK = "I can't reach Spotify right now."
+BUSY = "Spotify is busy, try again in a moment."
+REFUSED = "Spotify said no to that."
+
+# spotipy calls run here so each can be given up on at CALL_DEADLINE_S. A call given up on
+# finishes in the background and its result is dropped.
+_CALLS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spotify")
 
 
 class MusicError(ToolError):
@@ -99,7 +113,7 @@ def create_control(
     client_id: str,
     cache_path: str | Path | None = None,
     *,
-    timeout: float = REQUEST_TIMEOUT_S,
+    timeout: float = API_TIMEOUT_S,
     retries: int = API_RETRIES,
 ) -> SpotifyControl | None:
     """A SpotifyControl, or None if music isn't set up (no client ID or no saved login)."""
@@ -110,6 +124,7 @@ def create_control(
         auth_manager=server_auth(client_id, cache_path),
         requests_timeout=timeout,
         retries=retries,
+        status_retries=API_STATUS_RETRIES,
     )
     return SpotifyControl(client)
 
@@ -138,9 +153,14 @@ class SpotifyControl:
         self._start_app = start_app
 
     def call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        """Call a spotipy method, turning Spotify errors into a MusicError CARL can say."""
+        """Call a spotipy method, turning Spotify errors into a MusicError CARL can say.
+        Gives up after CALL_DEADLINE_S whatever spotipy is doing."""
+        future = _CALLS.submit(getattr(self.client, method), *args, **kwargs)
         try:
-            return getattr(self.client, method)(*args, **kwargs)
+            return future.result(timeout=CALL_DEADLINE_S)
+        except FutureTimeout as exc:
+            log.warning("Spotify %s took over %.0f s: gave up", method, CALL_DEADLINE_S)
+            raise MusicError(NETWORK) from exc
         except MusicError:
             raise
         except SpotifyOauthError as exc:
@@ -154,20 +174,27 @@ class SpotifyControl:
 
     def ensure_device(self) -> str:
         """The device to play on, made active: this PC's Spotify, else the active device,
-        else start Spotify here and wait up to START_WAIT_SECONDS for it."""
+        else any computer running Spotify (its name can differ from the PC's), else start
+        Spotify here and wait up to START_WAIT_SECONDS for it. Devices without an id, or
+        restricted ones (they can't be controlled), are ignored."""
         devices = self._devices()
-        device = self._this_pc(devices) or next((d for d in devices if d.get("is_active")), None)
+        device = (
+            self._this_pc(devices)
+            or next((d for d in devices if d.get("is_active")), None)
+            or self._a_computer(devices)
+        )
         if device is None:
-            device = self._start_and_wait({d.get("id") for d in devices})
+            device = self._start_and_wait()
         if not device.get("is_active"):
             # Without an active device, pause/next/volume fail; don't start music yet.
-            self.call("transfer_playback", device["id"], force_play=False)
+            self._activate(device["id"])
         return device["id"]
 
     # --- internals ---
 
     def _devices(self) -> list[dict[str, Any]]:
-        return list((self.call("devices") or {}).get("devices") or [])
+        devices = (self.call("devices") or {}).get("devices") or []
+        return [d for d in devices if d and d.get("id") and not d.get("is_restricted")]
 
     def _this_pc(self, devices: list[dict[str, Any]]) -> dict[str, Any] | None:
         return next(
@@ -179,7 +206,23 @@ class SpotifyControl:
             None,
         )
 
-    def _start_and_wait(self, known: set[Any]) -> dict[str, Any]:
+    def _a_computer(self, devices: list[dict[str, Any]]) -> dict[str, Any] | None:
+        return next((d for d in devices if d.get("type") == "Computer"), None)
+
+    def _activate(self, device_id: str) -> None:
+        for attempt in range(TRANSFER_TRIES):
+            try:
+                self.call("transfer_playback", device_id, force_play=False)
+                return
+            except MusicError as exc:
+                cause = exc.__cause__
+                if not (isinstance(cause, SpotifyException) and cause.http_status == 404):
+                    raise
+                if attempt == TRANSFER_TRIES - 1:
+                    raise MusicError(NOT_READY) from exc
+                self._sleep(TRANSFER_RETRY_S)
+
+    def _start_and_wait(self) -> dict[str, Any]:
         log.info("Starting Spotify")
         try:
             self._start_app()
@@ -190,10 +233,7 @@ class SpotifyControl:
         while self._clock() < deadline:
             self._sleep(POLL_SECONDS)
             devices = self._devices()
-            device = self._this_pc(devices) or next(
-                (d for d in devices if d.get("type") == "Computer" and d.get("id") not in known),
-                None,
-            )
+            device = self._this_pc(devices) or self._a_computer(devices)
             if device is not None:
                 return device
         raise MusicError(NO_START)
@@ -210,6 +250,10 @@ def _message(exc: SpotifyException) -> str:
         return NO_DEVICE
     if exc.http_status == 404:
         return NOT_FOUND
+    if exc.http_status == 429:
+        return BUSY
+    if exc.http_status in (400, 403):  # e.g. pausing what's already paused
+        return REFUSED
     return NETWORK
 
 

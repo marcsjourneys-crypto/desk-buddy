@@ -143,12 +143,9 @@ class NoteVault:
         parts = [f"Notes for {day_heading(day)}:", *notes]
         if ideas:
             parts += ["Ideas:", *ideas]
-        text = "\n".join(parts)
-        limit = MAX_READ - len(wrap(NOTES_SOURCE, ""))  # the whole result fits MAX_READ
-        if len(text) > limit:
-            text = text[: limit - 20].rstrip() + "\n(and more)"
         # Note text can hold anything (pasted web text, a planted instruction): data only.
-        return wrap(NOTES_SOURCE, text)
+        # The cap applies after escaping, to the whole result.
+        return wrap(NOTES_SOURCE, "\n".join(parts), limit=MAX_READ)
 
     # --- paths ---
 

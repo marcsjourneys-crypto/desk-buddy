@@ -108,6 +108,25 @@ def test_every_action_is_logged_on_one_line(caplog):
     assert all("\n" not in line for line in lines)
 
 
+def test_long_args_are_cut_short_in_the_log(caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.tools.actions")
+    guard, _ = make()
+    guard.run("play_music", {"query": "x" * 10_000, "kind": "track"}, lambda: "ok")
+    (line,) = caplog.messages
+    assert len(line) < 400
+    assert line.endswith("-> ok")
+
+
+def test_args_that_arent_json_still_log():
+    guard, _ = make()
+
+    class Odd:
+        def __repr__(self):
+            return "Odd()"
+
+    assert guard.run("x", {"thing": Odd(), "raw": b"\x00"}, lambda: "done") == "done"
+
+
 def test_off_switch_refusals_are_logged(caplog):
     caplog.set_level(logging.INFO, logger="desk_buddy.tools.actions")
     guard, _ = make(enabled=False)

@@ -15,14 +15,16 @@ PC = "MARC-LAPTOP"
 MINE = {"id": "pc", "name": "marc-laptop", "type": "Computer", "is_active": False}
 PHONE = {"id": "phone", "name": "Pixel", "type": "Smartphone", "is_active": True}
 OTHER_PC = {"id": "other", "name": "STUDIO", "type": "Computer", "is_active": False}
+PHONE_IDLE = {**PHONE, "is_active": False}
 
 
 class FakeSpotify:
     """Returns the next device list on each devices() call (the last one repeats)."""
 
-    def __init__(self, *device_lists, error=None):
+    def __init__(self, *device_lists, error=None, transfer_404s=0):
         self.device_lists = list(device_lists) or [[]]
         self.error = error
+        self.transfer_404s = transfer_404s  # the first N transfers fail: device not ready
         self.calls = []
 
     def devices(self):
@@ -34,6 +36,9 @@ class FakeSpotify:
 
     def transfer_playback(self, device_id, force_play=True):
         self.calls.append(("transfer_playback", device_id, force_play))
+        if self.transfer_404s:
+            self.transfer_404s -= 1
+            raise SpotifyException(404, -1, "Device not found")
 
 
 class FakeTime:
@@ -81,8 +86,32 @@ def test_the_active_device_is_used_if_this_pc_has_none():
     assert starts == []
 
 
+def test_an_idle_computer_with_another_name_is_used_without_starting_spotify():
+    # The PC's Spotify device name can differ from the hostname (it's set in Spotify).
+    client = FakeSpotify([PHONE_IDLE, OTHER_PC])
+    control, _, starts = make(client)
+    assert control.ensure_device() == "other"
+    assert starts == []
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [
+        {**MINE, "id": None},
+        {**MINE, "id": ""},
+        {**MINE, "is_restricted": True},
+        {**PHONE, "is_restricted": True},
+    ],
+)
+def test_devices_without_an_id_or_restricted_are_ignored(unusable):
+    client = FakeSpotify([unusable], [unusable, {**MINE, "id": "fresh"}])
+    control, _, starts = make(client)
+    assert control.ensure_device() == "fresh"
+    assert starts == [1]
+
+
 def test_spotify_is_started_and_waited_for_when_no_device_is_usable():
-    client = FakeSpotify([OTHER_PC], [OTHER_PC], [OTHER_PC, MINE])
+    client = FakeSpotify([PHONE_IDLE], [PHONE_IDLE], [PHONE_IDLE, MINE])
     control, t, starts = make(client)
     assert control.ensure_device() == "pc"
     assert starts == [1]
@@ -92,9 +121,24 @@ def test_spotify_is_started_and_waited_for_when_no_device_is_usable():
 
 def test_after_starting_a_new_computer_device_is_accepted_even_if_named_differently():
     renamed = {"id": "new", "name": "Marc's PC", "type": "Computer", "is_active": False}
-    client = FakeSpotify([OTHER_PC], [OTHER_PC, renamed])
+    client = FakeSpotify([], [renamed])
     control, _, _ = make(client)
     assert control.ensure_device() == "new"
+
+
+def test_a_device_that_isnt_ready_yet_is_retried_twice():
+    client = FakeSpotify([], [MINE], transfer_404s=2)
+    control, _, _ = make(client)
+    assert control.ensure_device() == "pc"
+    assert [c[0] for c in client.calls].count("transfer_playback") == 3
+
+
+def test_a_device_that_never_gets_ready_says_so():
+    client = FakeSpotify([], [MINE], transfer_404s=3)
+    control, _, _ = make(client)
+    with pytest.raises(MusicError) as info:
+        control.ensure_device()
+    assert str(info.value) == spotify.NOT_READY
 
 
 def test_spotify_that_never_appears_is_a_clear_error_after_8_seconds():
@@ -130,8 +174,10 @@ def test_music_errors_are_tool_errors():
         (SpotifyOauthError("invalid_grant"), spotify.NOT_LOGGED_IN),
         (SpotifyException(404, -1, "x", reason="NO_ACTIVE_DEVICE"), spotify.NO_DEVICE),
         (SpotifyException(404, -1, "Not found"), spotify.NOT_FOUND),
-        (SpotifyException(429, -1, "Max Retries"), spotify.NETWORK),
+        (SpotifyException(429, -1, "Max Retries"), spotify.BUSY),
         (SpotifyException(502, -1, "Bad gateway"), spotify.NETWORK),
+        (SpotifyException(403, -1, "Restriction violated", reason="UNKNOWN"), spotify.REFUSED),
+        (SpotifyException(400, -1, "Bad request"), spotify.REFUSED),
         (requests.exceptions.ConnectionError("offline"), spotify.NETWORK),
         (requests.exceptions.ReadTimeout("slow"), spotify.NETWORK),
     ],
@@ -147,6 +193,36 @@ def test_an_unexpected_error_is_not_hidden():
     control, _, _ = make(FakeSpotify(error=KeyError("devices")))
     with pytest.raises(KeyError):
         control.ensure_device()
+
+
+def test_a_call_that_hangs_gives_up_at_the_deadline(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(spotify, "CALL_DEADLINE_S", 0.1)
+    release = threading.Event()
+
+    class Hanging(FakeSpotify):
+        def devices(self):
+            release.wait(5)
+            return {"devices": []}
+
+    control, _, _ = make(Hanging())
+    try:
+        with pytest.raises(MusicError) as info:
+            control.call("devices")
+        assert str(info.value) == spotify.NETWORK
+    finally:
+        release.set()
+
+
+def test_the_api_client_never_sleeps_on_retry_after(tmp_path):
+    # status_retries=0: a 429 comes back at once instead of urllib3 sleeping for an
+    # unbounded Retry-After.
+    cache = tmp_path / "spotify_token.json"
+    cache.write_text('{"access_token": "a", "refresh_token": "r"}')
+    client = spotify.create_control("client-id", cache_path=cache).client
+    assert client.status_retries == 0
+    assert client.requests_timeout <= spotify.CALL_DEADLINE_S
 
 
 # --- the server's login: never interactive ---

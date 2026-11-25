@@ -1,20 +1,32 @@
 """Mark text that tools bring in from outside (notes, Spotify names) as untrusted data.
 
 The system prompt tells Claude that anything inside <untrusted source="..."> is data to
-read or sum up, never instructions. Text inside can't close the block early: any
-<untrusted or </untrusted in it (any case, any spacing) has its "<" escaped.
+read or sum up, never instructions. Text inside can't close the block early or fake any
+other tag: every "&", "<" and ">" in it is escaped.
 """
 
 from __future__ import annotations
 
+import html
 import re
 
-_TAG = re.compile(r"<(?=\s*/?\s*untrusted)", re.IGNORECASE)
 _SOURCE = re.compile(r"[a-z_]+")
+MORE = "\n(and more)"
 
 
-def wrap(source: str, text: str) -> str:
-    """`text` inside an untrusted block labelled with `source` (a plain lowercase name)."""
+def wrap(source: str, text: str, limit: int | None = None) -> str:
+    """`text`, escaped, inside an untrusted block labelled `source` (a plain lowercase
+    name). With `limit`, the whole result is at most that long: the escaped text is cut
+    (never mid-escape) and ends with "(and more)"."""
     if not _SOURCE.fullmatch(source):
         raise ValueError(f"source must be a plain lowercase name, got {source!r}")
-    return f'<untrusted source="{source}">\n{_TAG.sub("&lt;", text)}\n</untrusted>'
+    head, tail = f'<untrusted source="{source}">\n', "\n</untrusted>"
+    body = html.escape(text, quote=False)
+    if limit is not None and len(head) + len(body) + len(tail) > limit:
+        room = limit - len(head) - len(tail) - len(MORE)
+        body = body[: max(room, 0)]
+        amp = body.rfind("&", max(len(body) - 5, 0))  # "&amp;" is the longest escape
+        if amp != -1 and ";" not in body[amp:]:
+            body = body[:amp]  # don't leave half an escape
+        body = body.rstrip() + MORE
+    return head + body + tail

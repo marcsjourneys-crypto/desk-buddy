@@ -23,15 +23,16 @@ log = logging.getLogger(__name__)
 MAX_PER_QUESTION = 3
 MAX_PER_MINUTE = 8
 WINDOW_SECONDS = 60.0
-LOG_PREVIEW = 120
+LOG_PREVIEW = 120  # characters of a result in the log
+ARGS_PREVIEW = 200  # characters of the arguments in the log
 
 OFF_MESSAGE = "Computer control is off. It can be turned on in the settings."
 LIMIT_MESSAGE = "That's enough actions for one go."
 
 
-def _one_line(text: str) -> str:
+def _one_line(text: str, limit: int = LOG_PREVIEW) -> str:
     text = " ".join(str(text).split())
-    return text if len(text) <= LOG_PREVIEW else text[:LOG_PREVIEW] + "..."
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 class ActionGuard:
@@ -59,7 +60,11 @@ class ActionGuard:
 
     def run(self, name: str, args: Mapping[str, Any], fn: Callable[[], str]) -> str:
         """Run one action if allowed; raise ToolError (which CARL reads out) if not."""
-        described = f"{name} {json.dumps(dict(args), ensure_ascii=False, sort_keys=True)}"
+        try:
+            shown = json.dumps(dict(args), ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):  # e.g. keys that can't be sorted
+            shown = repr(dict(args))
+        described = f"{name} {_one_line(shown, ARGS_PREVIEW)}"
         if not self.enabled:
             log.info("Action: %s -> refused: off", described)
             raise ToolError(OFF_MESSAGE)

@@ -167,6 +167,14 @@ def test_read_notes_caps_long_days(vault):
     assert text.endswith("(and more)\n</untrusted>")
 
 
+def test_the_cap_holds_when_escaping_makes_notes_longer(vault):
+    for i in range(200):
+        vault.take_note(f"n{i} " + "<>" * 20, "note", "")
+    text = vault.read_notes("2026-11-23")
+    assert len(text) <= 4000
+    assert text.endswith("(and more)\n</untrusted>")
+
+
 def test_idea_text_starting_with_a_hash_reads_back(vault):
     vault.take_note("# 1 priority is X", "idea", "h")
     assert vault.read_notes("2026-11-23").endswith("- h: # 1 priority is X\n</untrusted>")
