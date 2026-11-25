@@ -571,6 +571,7 @@ def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Pers
         pages=tools is not None and "open_search_result" in tools,
         youtube=tools is not None and "play_youtube" in tools,
         youtube_search=tools is not None and "youtube_search" in tools,
+        media=tools is not None and "media_control" in tools,
         computer_control=settings.computer_control,
         character=personality.character,
         about=personality.about,

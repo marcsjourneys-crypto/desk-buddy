@@ -39,6 +39,7 @@ from desk_buddy.tools.actions import ActionGuard
 from desk_buddy.tools.confirm import Confirmations
 from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
 from desk_buddy.tools.launch import LaunchTools
+from desk_buddy.tools.media import MediaKeys
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tools.youtube import YouTubeClient, YouTubeTools
@@ -404,6 +405,14 @@ class Brain:
         log.info("YouTube: on (play and search)")
         return YouTubeTools(self.guard, YouTubeClient(settings.youtube_api_key))
 
+    def _media_keys(self, settings: Settings) -> MediaKeys | None:
+        """media_control whenever computer control is on."""
+        if not settings.computer_control:
+            log.info("Media keys: off (COMPUTER_CONTROL is off)")
+            return None
+        log.info("Media keys: on")
+        return MediaKeys(self.guard)
+
     def _rebuild(self) -> None:
         settings = self._settings
         tools = build_tools(
@@ -411,6 +420,7 @@ class Brain:
             music=self.music,
             launch=self._launch_tools(settings),
             youtube=self._youtube_tools(settings),
+            media=self._media_keys(settings),
         )
         chat = create_chat(
             settings,

@@ -116,19 +116,49 @@ def system_prompt(
     pages: bool = False,
     youtube: bool = False,
     youtube_search: bool = False,
+    media: bool = False,
 ) -> str:
     """The editable character, what the user said about themselves (if anything), then the
     locked rules. Joined, never formatted: nothing the user wrote is ever read as a
     template. `apps`/`websites`/`pages`: open_app/open_website/open_search_result are
-    offered; `youtube`/`youtube_search`: play_youtube/youtube_search are offered;
-    `computer_control` only changes why they aren't."""
+    offered; `youtube`/`youtube_search`: play_youtube/youtube_search are offered; `media`:
+    media_control is offered; `computer_control` only changes why they aren't."""
     parts = [character.strip()]
     if about is not None and not about.is_blank():
         parts.append(_about_block(about))
     parts.append(_rules(max_sentences, today, notes, music, web))
     parts.append(_opening_text(apps, websites, computer_control, pages))
     parts.append(_youtube_text(youtube, youtube_search, music, computer_control))
+    parts.append(_media_text(media, music, computer_control))
     return "\n\n".join(parts)
+
+
+def _media_text(media: bool, music: bool, computer_control: bool) -> str:
+    """The rules for media_control, or why CARL can't press media keys."""
+    if not media:
+        if not computer_control:
+            return (
+                "You can't pause, resume or skip videos and other players: computer control "
+                "isn't switched on. If asked, say so."
+            )
+        return "You can't press the computer's media keys right now. If asked, say so."
+    text = (
+        "media_control presses the computer's media keys (play_pause, next, previous, "
+        "stop) for whatever is playing: a video in the browser such as YouTube, a podcast, "
+        "any player."
+    )
+    if music:
+        text += (
+            ' For Spotify use music_control, never media_control. For "pause the video", '
+            "YouTube or any other player use media_control. If it's unclear which one the "
+            "user means and Spotify is what you last played, use music_control."
+        )
+    text += (
+        " play_pause is one toggle: press it only when the user asks to pause, play or "
+        "resume, and only once. You can't tell what is playing or paused, so never say "
+        'which state it is in now: confirm in a few words, like "Done."'
+    )
+    return text
 
 
 def _youtube_text(play: bool, search: bool, music: bool, computer_control: bool) -> str:
