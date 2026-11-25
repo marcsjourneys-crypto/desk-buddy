@@ -29,14 +29,16 @@ uint32_t writeErrors();                   // short I2S writes since boot
 // --- Streaming (the robot link). Call these from the main loop. ---
 constexpr size_t kFrameBytes = 640;  // 20 ms of 16 kHz 16-bit mono
 
-bool startStreaming();  // once; true if the ring and both tasks are running
-bool streaming();       // startStreaming() has succeeded
+// Runs once (later calls just report): starts playback if the speaker works and the mic
+// stream if the mic works, independently. True if both are running.
+bool startStreaming();
+bool streaming();  // startStreaming() has run
 
 // Server -> speaker.
-void streamBegin();                           // audio_start: accept frames
+void streamBegin();  // audio_start: accept frames; playback starts once ~60 ms is buffered
 void streamPush(const uint8_t* pcm, size_t);  // a binary frame; drops the oldest when full
-void streamEnd();                             // audio_end: the ring plays out
-void streamStop();                            // audio_stop: silence now, drop until Begin
+void streamEnd();   // audio_end: the ring plays out (even a sentence shorter than 60 ms)
+void streamStop();  // audio_stop: clear, fade out the block in hand, drop until Begin
 
 // Mic -> server.
 void setMicStreaming(bool on);  // on: flush stale audio, reset the DC blocker, start queueing

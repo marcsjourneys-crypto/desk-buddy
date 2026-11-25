@@ -4,18 +4,20 @@
 // Pure: no Arduino.
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 class Int16Ring {
  public:
   Int16Ring(int16_t* storage, size_t capacity) : buf_(storage), cap_(capacity) {}
 
-  // Returns how many samples fit.
+  // Returns how many samples fit. At most two copies: up to the end, then from the start.
   size_t write(const int16_t* src, size_t n) {
     if (n > space()) n = space();
-    for (size_t i = 0; i < n; i++) {
-      buf_[head_] = src[i];
-      head_ = head_ + 1 == cap_ ? 0 : head_ + 1;
-    }
+    if (n == 0) return 0;
+    const size_t first = n < cap_ - head_ ? n : cap_ - head_;
+    memcpy(buf_ + head_, src, first * sizeof(int16_t));
+    memcpy(buf_, src + first, (n - first) * sizeof(int16_t));
+    head_ = (head_ + n) % cap_;
     count_ += n;
     return n;
   }
@@ -23,10 +25,11 @@ class Int16Ring {
   // Returns how many samples were read.
   size_t read(int16_t* dst, size_t n) {
     if (n > count_) n = count_;
-    for (size_t i = 0; i < n; i++) {
-      dst[i] = buf_[tail_];
-      tail_ = tail_ + 1 == cap_ ? 0 : tail_ + 1;
-    }
+    if (n == 0) return 0;
+    const size_t first = n < cap_ - tail_ ? n : cap_ - tail_;
+    memcpy(dst, buf_ + tail_, first * sizeof(int16_t));
+    memcpy(dst + first, buf_, (n - first) * sizeof(int16_t));
+    tail_ = (tail_ + n) % cap_;
     count_ -= n;
     return n;
   }

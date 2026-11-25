@@ -26,7 +26,7 @@ I2SClass mic(I2S_NUM_1);
 bool micOk = false;
 constexpr size_t kMicDmaFrames = 6 * 240;  // ESP_I2S: 6 DMA buffers of 240 frames (90 ms)
 int32_t micRaw[kBlock];
-int vol = 20;
+std::atomic<int> vol{20};  // read by the playback task
 uint32_t errors = 0;
 
 void write(const int16_t* block, size_t n) {
@@ -140,10 +140,20 @@ constexpr UBaseType_t kPlaybackPriority = 5;
 constexpr UBaseType_t kMicPriority = 4;
 constexpr BaseType_t kAudioCore = 1;
 
+// Each sentence waits for this much audio before it starts, so network jitter right at the
+// start doesn't cause a stutter. audio_end plays a shorter sentence anyway.
+constexpr size_t kPrimeSamples = dsp::kRate * 60 / 1000;
+constexpr size_t kStopFadeSamples = dsp::kRate * 5 / 1000;  // fade-out on an interrupt
+
 Int16Ring* ring = nullptr;
 portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<bool> accepting{false};  // between streamBegin() and streamStop()
-bool started = false;
+std::atomic<bool> priming{false};    // a sentence began and hasn't started playing yet
+std::atomic<bool> ended{false};      // audio_end arrived: play whatever is buffered
+std::atomic<uint32_t> stopGen{0};    // bumped by streamStop(): cut the block in hand
+bool tried = false;                  // startStreaming() has run (it runs once)
+bool playbackOn = false;
+bool micOn = false;
 
 static_assert(kBlock * sizeof(int16_t) == audio::kFrameBytes, "a mic frame is one block");
 
@@ -155,15 +165,26 @@ std::atomic<uint32_t> micDrops{0};
 void playbackTask(void*) {
   int16_t block[kBlock];
   for (;;) {
+    const uint32_t gen = stopGen.load();
+    size_t n = 0;
     portENTER_CRITICAL(&ringMux);
-    const size_t n = ring->read(block, kBlock);
+    const bool wait = priming.load() && !ended.load() && ring->available() < kPrimeSamples;
+    if (!wait) n = ring->read(block, kBlock);
     portEXIT_CRITICAL(&ringMux);
     if (n == 0) {
       vTaskDelay(pdMS_TO_TICKS(5));  // starved: auto_clear plays silence meanwhile
       continue;
     }
-    const int v = vol;
+    priming = false;
+    const int v = vol.load();
     for (size_t i = 0; i < n; i++) block[i] = dsp::scale(block[i], v);
+    if (stopGen.load() != gen) {
+      // Interrupted while this block was in hand: fade out its start instead of a click.
+      n = std::min(n, kStopFadeSamples);
+      for (size_t i = 0; i < n; i++) {
+        block[i] = static_cast<int16_t>(block[i] * (1.0f - static_cast<float>(i + 1) / n));
+      }
+    }
     write(block, n);  // blocks while the DMA is full, which paces this loop
   }
 }
@@ -202,30 +223,60 @@ void micTask(void*) {
 
 namespace audio {
 
-bool startStreaming() {
-  if (started) return true;
-  if (!speakerOk || !micOk) return false;
+namespace {
+
+bool startPlayback() {
+  if (!speakerOk) return false;
   auto* store = static_cast<int16_t*>(ps_malloc(kRingSamples * sizeof(int16_t)));
   if (store == nullptr) return false;
   ring = new Int16Ring(store, kRingSamples);
-  micQueue = xQueueCreate(kMicQueueDepth, kFrameBytes);
-  if (micQueue == nullptr) return false;
   if (xTaskCreatePinnedToCore(playbackTask, "playback", 4096, nullptr, kPlaybackPriority,
-                              nullptr, kAudioCore) != pdPASS ||
-      xTaskCreatePinnedToCore(micTask, "micstream", 4096, nullptr, kMicPriority, nullptr,
-                              kAudioCore) != pdPASS) {
-    return false;  // out of memory at boot-ish time: not worth unwinding
+                              nullptr, kAudioCore) != pdPASS) {
+    delete ring;
+    ring = nullptr;
+    free(store);
+    return false;
   }
-  started = true;
   return true;
 }
 
-bool streaming() { return started; }
+bool startMicStream() {
+  if (!micOk) return false;
+  micQueue = xQueueCreate(kMicQueueDepth, kFrameBytes);
+  if (micQueue == nullptr) return false;
+  if (xTaskCreatePinnedToCore(micTask, "micstream", 4096, nullptr, kMicPriority, nullptr,
+                              kAudioCore) != pdPASS) {
+    vQueueDelete(micQueue);
+    micQueue = nullptr;
+    return false;
+  }
+  return true;
+}
 
-void streamBegin() { accepting = true; }
+}  // namespace
+
+// Runs once: each half starts if its hardware started; a failure is reported once and not
+// retried (so nothing is allocated or spawned twice).
+bool startStreaming() {
+  if (tried) return playbackOn && micOn;
+  tried = true;
+  playbackOn = startPlayback();
+  micOn = startMicStream();
+  if (!playbackOn) Serial.println("Audio: streamed playback didn't start (speaker or memory)");
+  if (!micOn) Serial.println("Audio: mic streaming didn't start (mic or memory)");
+  return playbackOn && micOn;
+}
+
+bool streaming() { return tried; }
+
+void streamBegin() {
+  ended = false;
+  priming = true;
+  accepting = true;
+}
 
 void streamPush(const uint8_t* pcm, size_t len) {
-  if (!started || !accepting) return;
+  if (!playbackOn || !accepting) return;
   len &= ~static_cast<size_t>(1);  // an odd trailing byte isn't a sample
   // Copy through an aligned buffer: the payload may not be 2-byte aligned.
   int16_t chunk[kBlock];
@@ -242,18 +293,20 @@ void streamPush(const uint8_t* pcm, size_t len) {
   }
 }
 
-void streamEnd() {}  // nothing to do: what's in the ring plays out
+void streamEnd() { ended = true; }  // what's in the ring plays out, even if under kPrime
 
 void streamStop() {
   accepting = false;
-  if (!started) return;
+  priming = false;
+  if (!playbackOn) return;
+  stopGen++;
   portENTER_CRITICAL(&ringMux);
   ring->clear();
   portEXIT_CRITICAL(&ringMux);
 }
 
 void setMicStreaming(bool on) {
-  if (!started) return;
+  if (!micOn) return;
   if (on && !micWanted.load()) {
     xQueueReset(micQueue);  // no stale frames from last time
     micStarts++;

@@ -95,6 +95,10 @@ uint32_t switchAt = 0;      // when pendingSpecial takes over (the middle of the
 uint32_t specialStart = 0;  // animation clock
 uint32_t lastSpecialFrame = 0;
 constexpr uint32_t kSpecialFrameMs = 33;  // ~30 fps is plenty for these
+// The lids are capped at ~30 fps too, so the main loop (and the robot link) gets time
+// between frames. Only drawing is skipped: tweens and blinks follow the clock regardless.
+constexpr uint32_t kLidFrameMs = 33;
+uint32_t lastLidFrame = 0;
 constexpr uint32_t kGrowMs = 250;
 
 const Step* sequence = nullptr;
@@ -477,6 +481,9 @@ void update(uint32_t now) {
     return;
   }
   if (autoBlink && blinker.finished(now)) blinker.schedule(now, 3000 + esp_random() % 3000);
+  if (!dirty && static_cast<int32_t>(now - lastLidFrame) < static_cast<int32_t>(kLidFrameMs)) {
+    return;
+  }
   const float b = blinker.amount(now);
   for (int i = 0; i < 2; i++) {
     tweens[i].settle(now);
@@ -485,6 +492,7 @@ void update(uint32_t now) {
     if (!dirty && eye::same(p, drawn[i])) continue;
     draw(i, p);
     drawn[i] = p;
+    lastLidFrame = now;
   }
   dirty = false;
 }

@@ -123,7 +123,7 @@ const char* setToken(const char* token) {
   if (token == nullptr || !token[0]) return "Usage: token <value>";
   const size_t n = strlen(token);
   if (n < kMinToken || n > kMaxToken) return "Token must be 16-256 chars";
-  if (strchr(token, ' ') != nullptr) return "Token can't contain spaces";
+  if (strpbrk(token, " \"\\") != nullptr) return "Token can't contain spaces, quotes or \\";
   Preferences p;
   if (!p.begin(kNamespace, false)) return kSaveFailed;
   const bool saved = putStr(p, "token", token);

@@ -239,9 +239,11 @@ void handle(char* cmd) {
   if (handleSettings(name, raw)) return;
   char* rest = trimmed(raw);
   char* arg = rest ? strtok(rest, " ") : nullptr;
-  const bool usesAudio = !strcmp(name, "tone") || !strcmp(name, "mic") ||
-                         !strcmp(name, "rec") || !strcmp(name, "play");
-  if (usesAudio && net::connected()) {  // the streaming tasks own the speaker and mic now
+  // Audio tests would fight the streaming tasks; servo and fps block the loop for seconds.
+  const bool blocksLink = !strcmp(name, "tone") || !strcmp(name, "mic") ||
+                          !strcmp(name, "rec") || !strcmp(name, "play") ||
+                          !strcmp(name, "servo") || !strcmp(name, "fps");
+  if (blocksLink && net::connected()) {
     Serial.println("Not while the robot link is connected");
     return;
   }

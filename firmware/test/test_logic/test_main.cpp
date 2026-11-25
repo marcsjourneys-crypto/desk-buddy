@@ -10,6 +10,7 @@
 #include "ease.h"
 #include "eye_model.h"
 #include "link_msg.h"
+#include "link_policy.h"
 #include "looks.h"
 #include "ring_buffer.h"
 #include "servo_math.h"
@@ -383,6 +384,55 @@ void test_ring_drop_oldest() {
   TEST_ASSERT_EQUAL_UINT32(0, r.drop(3));  // nothing left to drop
 }
 
+// Many uneven writes and reads round an odd-sized ring keep the samples in order.
+void test_ring_memcpy_wrap() {
+  int16_t store[7];
+  Int16Ring r(store, 7);
+  int16_t in[5], out[5];
+  int16_t nextIn = 0, nextOut = 0;
+  for (int step = 0; step < 200; step++) {
+    const size_t w = 1 + step % 5;
+    for (size_t i = 0; i < w; i++) in[i] = static_cast<int16_t>(nextIn + i);
+    nextIn += static_cast<int16_t>(r.write(in, w));
+    const size_t got = r.read(out, 1 + (step * 3) % 5);
+    for (size_t i = 0; i < got; i++) TEST_ASSERT_EQUAL_INT16(nextOut++, out[i]);
+    TEST_ASSERT_EQUAL_UINT32(7, r.available() + r.space());
+  }
+  TEST_ASSERT_GREATER_THAN_INT(100, nextOut);
+}
+
+void test_elapsed_ms() {
+  TEST_ASSERT_TRUE(elapsedMs(6000, 1000, 5000));
+  TEST_ASSERT_FALSE(elapsedMs(5999, 1000, 5000));
+  TEST_ASSERT_TRUE(elapsedMs(0x00000010u, 0xFFFFF000u, 4000));  // across the wrap
+  TEST_ASSERT_FALSE(elapsedMs(1000, 1001, 5000));  // set just after `now` was read
+}
+
+void test_link_policy_refuses_after_early_closes() {
+  LinkPolicy p;
+  TEST_ASSERT_FALSE(p.closedBeforeWelcome(100));
+  TEST_ASSERT_FALSE(p.closedBeforeWelcome(5000));  // a slow close breaks the streak
+  TEST_ASSERT_FALSE(p.closedBeforeWelcome(100));
+  TEST_ASSERT_FALSE(p.closedBeforeWelcome(999));
+  TEST_ASSERT_TRUE(p.closedBeforeWelcome(10));
+  p.retryAfterRefusal();
+  TEST_ASSERT_TRUE(p.closedBeforeWelcome(10));  // still refused: one more is enough
+  p.retryAfterRefusal();
+  TEST_ASSERT_TRUE(p.welcomed());
+  TEST_ASSERT_FALSE(p.closedBeforeWelcome(10));  // welcome cleared the streak
+}
+
+void test_link_policy_quick_drops() {
+  LinkPolicy p;
+  p.linkDropped(500);
+  p.linkDropped(1999);
+  TEST_ASSERT_TRUE(p.welcomed());
+  p.linkDropped(100);
+  TEST_ASSERT_FALSE(p.welcomed());  // 3 quick drops: keep the back-off growing
+  p.linkDropped(60000);
+  TEST_ASSERT_TRUE(p.welcomed());
+}
+
 void test_ring_clear_and_counts() {
   int16_t store[8];
   Int16Ring r(store, 8);
@@ -519,6 +569,10 @@ void setup() {
   RUN_TEST(test_ring_wraps);
   RUN_TEST(test_ring_partial_write_when_full);
   RUN_TEST(test_ring_drop_oldest);
+  RUN_TEST(test_ring_memcpy_wrap);
+  RUN_TEST(test_elapsed_ms);
+  RUN_TEST(test_link_policy_refuses_after_early_closes);
+  RUN_TEST(test_link_policy_quick_drops);
   RUN_TEST(test_ring_clear_and_counts);
   RUN_TEST(test_backoff);
   RUN_TEST(test_parse_messages);
