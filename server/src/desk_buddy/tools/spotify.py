@@ -95,15 +95,21 @@ def server_auth(client_id: str, cache_path: str | Path) -> SpotifyPKCE:
     return make_auth(_ServerPKCE, client_id, cache_path, open_browser=False)
 
 
-def create_control(client_id: str, cache_path: str | Path | None = None) -> SpotifyControl | None:
+def create_control(
+    client_id: str,
+    cache_path: str | Path | None = None,
+    *,
+    timeout: float = REQUEST_TIMEOUT_S,
+    retries: int = API_RETRIES,
+) -> SpotifyControl | None:
     """A SpotifyControl, or None if music isn't set up (no client ID or no saved login)."""
     cache_path = token_cache_path() if cache_path is None else cache_path
     if not client_id or not logged_in(cache_path):
         return None
     client = spotipy.Spotify(
         auth_manager=server_auth(client_id, cache_path),
-        requests_timeout=REQUEST_TIMEOUT_S,
-        retries=API_RETRIES,
+        requests_timeout=timeout,
+        retries=retries,
     )
     return SpotifyControl(client)
 
@@ -246,9 +252,10 @@ class MusicTools:
     the ActionGuard; names that come from Spotify are wrapped as untrusted. Model text is
     only ever a search query; playback uses the URIs Spotify returned."""
 
-    def __init__(self, control: SpotifyControl, guard: Any) -> None:
+    def __init__(self, control: SpotifyControl, guard: Any, ducker: Any = None) -> None:
         self._control = control
         self._guard = guard
+        self._ducker = ducker  # a MusicDucker, so a volume set while ducked sticks
 
     # --- the tool functions (their signatures are the tool inputs) ---
 
@@ -402,8 +409,12 @@ class MusicTools:
         device = (playback or {}).get("device") or {}
         if not device.get("id"):
             raise MusicError(NO_DEVICE)
+        # While CARL talks the music is ducked: work from the level before ducking, and
+        # cancel the restore so the user's new level stays.
+        before_duck = self._ducker.take_saved() if self._ducker else None
         if level is None:
-            level = max(0, min(100, int(device.get("volume_percent") or 0) + int(change or 0)))
+            current = before_duck if before_duck is not None else device.get("volume_percent")
+            level = max(0, min(100, int(current or 0) + int(change or 0)))
         self._control.call("volume", level, device_id=device["id"])
         return f"Spotify volume set to {level} percent."
 

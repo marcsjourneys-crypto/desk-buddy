@@ -380,8 +380,8 @@ def music_run(monkeypatch, calls, caplog, control, **settings):
     monkeypatch.setattr(entry, "load_settings", lambda: Settings(anthropic_api_key="k", **settings))
     made = []
 
-    def fake_create_control(client_id):
-        made.append(client_id)
+    def fake_create_control(client_id, **kwargs):
+        made.append((client_id, kwargs))
         return control
 
     monkeypatch.setattr(entry, "create_control", fake_create_control)
@@ -419,15 +419,53 @@ def test_music_tools_are_on_with_a_login(monkeypatch, fakes, calls, caplog):
 
     control = SpotifyControl(object(), pc_name="pc")
     made, tools = music_run(
-        monkeypatch, calls, caplog, control, computer_control=True, spotify_client_id="cid"
+        monkeypatch,
+        calls,
+        caplog,
+        control,
+        computer_control=True,
+        spotify_client_id="cid",
+        music_duck=False,
     )
-    assert made == ["cid"]
+    assert made == [("cid", {})]
     assert "play_music" in tools
     assert "Music tools: on (Spotify)" in caplog.messages
     # Each turn starts a new question for the action limits.
     on_question = orchestrator_kwargs(calls)["on_question"]
     assert on_question.__self__.__class__.__name__ == "ActionGuard"
     assert on_question.__name__ == "new_question"
+
+
+def test_music_ducking_follows_the_state_with_its_own_quick_client(
+    monkeypatch, fakes, calls, caplog
+):
+    from desk_buddy.loop import State
+    from desk_buddy.tools.ducking import DUCK_TIMEOUT_S
+    from desk_buddy.tools.spotify import SpotifyControl
+
+    ducked = []
+
+    class Ducker:
+        def __init__(self, control):
+            calls.append("ducker created")
+
+        def on_state(self, state):
+            ducked.append(state)
+
+        def close(self):
+            calls.append("ducker closed")
+
+    monkeypatch.setattr(entry, "MusicDucker", Ducker)
+    control = SpotifyControl(object(), pc_name="pc")
+    made, _ = music_run(
+        monkeypatch, calls, caplog, control, computer_control=True, spotify_client_id="cid"
+    )
+    assert made == [("cid", {}), ("cid", {"timeout": DUCK_TIMEOUT_S, "retries": 0})]
+    assert "Music tools: on (Spotify, ducking)" in caplog.messages
+    orchestrator_kwargs(calls)["on_state"](State.LISTENING)
+    assert ducked == [State.LISTENING]
+    shutdown = steps(calls)
+    assert shutdown.index("farewell") < shutdown.index("ducker closed")
 
 
 def test_busy_port_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):

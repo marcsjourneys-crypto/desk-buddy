@@ -14,12 +14,13 @@ from desk_buddy.brain.memory import Conversation
 from desk_buddy.config import ConfigError, Settings, load_settings
 from desk_buddy.link.switch import DeviceSwitch, Robot
 from desk_buddy.llm import create_chat
-from desk_buddy.loop import Orchestrator
+from desk_buddy.loop import Orchestrator, State
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
+from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
 
@@ -82,7 +83,9 @@ async def _run(settings: Settings) -> None:
         speaker = Speaker()
         stack.callback(speaker.close)
         guard = ActionGuard(settings.computer_control)
-        music = _music_tools(settings, guard)
+        music, ducker = _music_tools(settings, guard)
+        if ducker is not None:
+            stack.callback(ducker.close)  # runs after the farewell, which restores the music
         tools = build_tools(settings, music=music)
         log.info(
             "Note tools: %s",
@@ -100,7 +103,7 @@ async def _run(settings: Settings) -> None:
             synthesizer=synthesizer,
             speaker=switch.player,
             conversation=Conversation(settings.history_turns),
-            on_state=switch.send_state,
+            on_state=_with_ducking(switch.send_state, ducker),
             on_emotion=switch.send_emotion,
             on_question=guard.new_question,
         )
@@ -151,9 +154,11 @@ async def _run(settings: Settings) -> None:
         await orchestrator.run(events)
 
 
-def _music_tools(settings: Settings, guard: ActionGuard) -> MusicTools | None:
-    """The music tools, only when computer control is on and Spotify is set up and logged
-    in. Otherwise CARL's prompt says music isn't set up."""
+def _music_tools(
+    settings: Settings, guard: ActionGuard
+) -> tuple[MusicTools | None, MusicDucker | None]:
+    """The music tools (and the ducker, with MUSIC_DUCK), only when computer control is on
+    and Spotify is set up and logged in. Otherwise CARL's prompt says music isn't set up."""
     if not settings.computer_control:
         reason = "COMPUTER_CONTROL is off"
     elif not settings.spotify_client_id:
@@ -161,10 +166,31 @@ def _music_tools(settings: Settings, guard: ActionGuard) -> MusicTools | None:
     elif (control := create_control(settings.spotify_client_id)) is None:
         reason = "not logged in: run uv run python -m desk_buddy.spotify_login"
     else:
-        log.info("Music tools: on (Spotify)")
-        return MusicTools(control, guard)
+        ducker = None
+        if settings.music_duck:
+            # Its own client with a short timeout and no retries: a duck is only worth
+            # doing at once.
+            duck_control = create_control(
+                settings.spotify_client_id, timeout=DUCK_TIMEOUT_S, retries=0
+            )
+            ducker = MusicDucker(duck_control) if duck_control is not None else None
+        log.info("Music tools: on (Spotify%s)", ", ducking" if ducker else "")
+        return MusicTools(control, guard, ducker=ducker), ducker
     log.info("Music tools: off (%s)", reason)
-    return None
+    return None, None
+
+
+def _with_ducking(
+    send_state: Callable[[State], None], ducker: MusicDucker | None
+) -> Callable[[State], None]:
+    if ducker is None:
+        return send_state
+
+    def on_state(state: State) -> None:
+        send_state(state)
+        ducker.on_state(state)  # never blocks or raises
+
+    return on_state
 
 
 async def _make_synthesizer(settings: Settings) -> SapiSynthesizer | PiperSynthesizer:
