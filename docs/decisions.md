@@ -185,3 +185,24 @@ Plan: `docs/plans/2026-11-25-m8-dashboard.md`.
     - the body is capped as it streams (a chunked body can't get past 64 KB);
     - the event socket's pending `queue.get()` is always cancelled;
     - the Brain builds its tools and chat into locals and swaps them in together.
+
+## 2026-11-25 — Web search and About you
+
+Plan: `docs/plans/2026-11-25-web-search-about-you.md`.
+
+- **About you lives with the personality,** in `personality.json` under `about`, edited on the Personality tab with a reset per field. Every field is optional; with all of them blank the prompt is unchanged. The block goes after the character paragraph and before the locked rules, joined, never formatted.
+  - **Country:** an ISO 3166-1 alpha-2 code checked against the 249 official codes (a constant, no dependency); `UK` is accepted and stored as `GB`, the code web search expects.
+  - **One-line fields** also refuse U+0085, U+2028, U+2029 and the bidi controls (U+202A–U+202E, U+2066–U+2069), so they can't break the prompt's layout or flip the page's text direction.
+  - **No time-zone field:** the PC clock already gives the date, and checking zone names on Windows would need `tzdata`.
+  - **The card keeps unsaved edits:** saving or clearing one field re-renders the tab but carries over the other fields' unsaved values.
+- **Web search is Anthropic's server tool** (`web_search_20250305`, which works on Haiku 5.5), on by default (`WEB_SEARCH`), at most `WEB_SEARCH_MAX` (1–5, default 2) searches per request. It only reads and runs on Anthropic's side, so it is outside `ToolRegistry` and `ActionGuard` and not tied to `COMPUTER_CONTROL`. Web fetch and the `_20260209` versions are left out.
+  - **Location:** `user_location` (`approximate`) gets whichever of city, region and country are filled in, read for every request; with none, the key is left out.
+- **The chat loop:**
+  - **Sentence breaks:** a `"\n"` goes before text that follows a new round or a non-text block (search, result, tool call, thinking). Text blocks that follow each other get none: a cited answer arrives as several text blocks split mid-sentence, and a break would cut its sentences into fragments (found in review). Citations are ignored.
+  - **`pause_turn`:** the assistant content goes back as is, with no extra user message; it uses up one of the 3 rounds, so it can't loop. Back-to-back assistant messages (a pause, then a tool round) are merged into one.
+  - **When a search is reported:** as soon as its `web_search_tool_result` block starts streaming (it arrives whole; the query comes from the `server_tool_use` block's stop event, which carries the parsed input), de-duplicated by id and checked again in the final message. So a reply interrupted after a search still shows it, logs it and remembers it (found in review).
+- **What the user sees:** each search is an `action` event on the Live tab (`tool: "web_search"`, the query as JSON args, ok or failed, and up to 3 source titles with their sites as plain text, never links; line breaks and bidi controls become spaces), plus an `Action: web_search {"query": …} -> ok (N results)` or `-> failed: <code>` log line. The event goes through the same `publish_action` helper as the guard's, and a failing bus never reaches the turn.
+- **`TASK_DONE` ignores searches:** they will be common, and the line should stay a treat tied to our own tools.
+- **Memory:** search blocks and results are never stored. A turn that searched gets `(System note: to answer this, you ran web searches for: "q1"; "q2")` after its stored user message. It goes on the user side because Claude copies markers from its own stored replies, and it is labelled a system note because the queries are model-written (and web text may have steered them), not the user's words. Queries are capped at 100 characters, double quotes become single and parentheses become spaces, so a query can't close its quote or the note. A turn with no reply isn't stored, and its searches are dropped (they only read).
+- **Search turned off for the account:** a 400 that names web search and says it is not enabled, not available or disabled logs a hint once, retries that round without search and keeps search off until the restart. The flag is module-level in `llm.py` (`web_search_blocked()`), so it survives the chat being rebuilt between turns, and `prompt_for` reads it, so the prompt (and the dashboard preview) says search is off from the retry on. Any other 400 naming web search (a validation error, say) logs the API's own message on one line, retries that round once without search, and leaves search on: a narrow match keeps one odd error from turning search off for the whole session (found in review).
+- **Not verified live yet:** the API's exact wording when search is off for an organisation, and whether a resumed last round (sent with `tool_choice: none`) is accepted. The integration test (`tests/integration/test_web_search_live.py`) runs one real search.
