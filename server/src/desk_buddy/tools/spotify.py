@@ -8,14 +8,16 @@ worker thread.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import json
 import logging
 import os
 import platform
 import re
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
@@ -46,8 +48,11 @@ API_TIMEOUT_S = 5  # each Web API request
 API_RETRIES = 1  # connection retries
 API_STATUS_RETRIES = 0  # never retry on 429/5xx: urllib3 would sleep for any Retry-After
 CALL_DEADLINE_S = 12.0  # the most one spotipy call may take, retries and token refresh included
-START_WAIT_SECONDS = 8.0
+PLAY_DEADLINE_S = 15.0  # all of play_music / resume, starting Spotify included
+START_WAIT_SECONDS = 12.0  # the app registers its device only once its UI has loaded
+START_APP_WAIT_S = 1.0  # wait this long for the launch to fail at once; never longer
 POLL_SECONDS = 0.5
+POLL_CALL_TIMEOUT_S = 3.0  # one devices() call while waiting for Spotify to appear
 TRANSFER_TRIES = 3  # a just-started Spotify can 404 on transfer for a moment
 TRANSFER_RETRY_S = 0.5
 
@@ -63,12 +68,20 @@ BUSY = "Spotify is busy, try again in a moment."
 REFUSED = "Spotify said no to that."
 
 # spotipy calls run here so each can be given up on at CALL_DEADLINE_S. A call given up on
-# finishes in the background and its result is dropped.
-_CALLS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="spotify")
+# finishes in the background and its result is dropped (enough workers that a few
+# abandoned calls don't starve the next ones).
+_CALLS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="spotify")
 
 
 class MusicError(ToolError):
     """A Spotify problem, as a short sentence CARL can say."""
+
+
+class _OutOfTime(MusicError):
+    """The overall time limit (time_limit) ran out."""
+
+    def __init__(self) -> None:
+        super().__init__(NETWORK)
 
 
 def token_cache_path() -> Path:
@@ -152,15 +165,39 @@ class SpotifyControl:
         self._clock = clock
         self._sleep = sleep
         self._start_app = start_app
+        self._local = threading.local()  # the current time limit, per calling thread
 
-    def call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    @contextlib.contextmanager
+    def time_limit(self, seconds: float) -> Iterator[None]:
+        """Every call inside gets at most what's left of `seconds` (one overall deadline)."""
+        self._local.deadline = self._clock() + seconds
+        try:
+            yield
+        finally:
+            self._local.deadline = None
+
+    def _remaining(self) -> float | None:
+        deadline = getattr(self._local, "deadline", None)
+        return None if deadline is None else deadline - self._clock()
+
+    def call(self, method: str, *args: Any, _timeout: float | None = None, **kwargs: Any) -> Any:
         """Call a spotipy method, turning Spotify errors into a MusicError CARL can say.
-        Gives up after CALL_DEADLINE_S whatever spotipy is doing."""
+        Gives up after CALL_DEADLINE_S (or `_timeout`, or what's left of the time limit)
+        whatever spotipy is doing."""
+        limit = CALL_DEADLINE_S if _timeout is None else _timeout
+        remaining = self._remaining()
+        out_of_time = remaining is not None and remaining <= limit
+        if remaining is not None:
+            if remaining <= 0:
+                raise _OutOfTime()
+            limit = remaining if out_of_time else limit
         future = _CALLS.submit(getattr(self.client, method), *args, **kwargs)
         try:
-            return future.result(timeout=CALL_DEADLINE_S)
+            return future.result(timeout=limit)
         except FutureTimeout as exc:
-            log.warning("Spotify %s took over %.0f s: gave up", method, CALL_DEADLINE_S)
+            log.warning("Spotify %s took over %.1f s: gave up", method, limit)
+            if out_of_time:
+                raise _OutOfTime() from exc
             raise MusicError(NETWORK) from exc
         except MusicError:
             raise
@@ -194,8 +231,8 @@ class SpotifyControl:
 
     # --- internals ---
 
-    def _devices(self) -> list[dict[str, Any]]:
-        devices = (self.call("devices") or {}).get("devices") or []
+    def _devices(self, timeout: float | None = None) -> list[dict[str, Any]]:
+        devices = (self.call("devices", _timeout=timeout) or {}).get("devices") or []
         return [d for d in devices if d and d.get("id") and not d.get("is_restricted")]
 
     def _this_pc(self, devices: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -216,6 +253,8 @@ class SpotifyControl:
             try:
                 self.call("transfer_playback", device_id, force_play=False)
                 return
+            except _OutOfTime as exc:
+                raise MusicError(NOT_READY) from exc
             except MusicError as exc:
                 cause = exc.__cause__
                 if not (isinstance(cause, SpotifyException) and cause.http_status == 404):
@@ -225,20 +264,51 @@ class SpotifyControl:
                 self._sleep(TRANSFER_RETRY_S)
 
     def _start_and_wait(self) -> dict[str, Any]:
-        log.info("Starting Spotify")
-        try:
-            self._start_app()
-        except OSError as exc:
-            log.warning("Couldn't start Spotify: %s", exc)
-            raise MusicError(NO_START) from exc
-        deadline = self._clock() + START_WAIT_SECONDS
+        """Start Spotify and wait for its device: at most START_WAIT_SECONDS, and never past
+        the time limit. Each poll is a short call; a slow one is skipped, not waited out."""
+        self._launch()
+        wait = START_WAIT_SECONDS
+        remaining = self._remaining()
+        if remaining is not None:
+            wait = min(wait, remaining)
+        deadline = self._clock() + wait
         while self._clock() < deadline:
             self._sleep(POLL_SECONDS)
-            devices = self._devices()
+            left = deadline - self._clock()
+            if left <= 0:
+                break
+            try:
+                devices = self._devices(timeout=min(POLL_CALL_TIMEOUT_S, left))
+            except _OutOfTime:
+                break
+            except MusicError as exc:
+                if isinstance(exc.__cause__, FutureTimeout):
+                    continue  # one slow poll: try again while there's time
+                raise
             device = self._this_pc(devices) or self._a_computer(devices)
             if device is not None:
                 return device
+        log.warning("Spotify didn't show up within %.0f s", wait)
         raise MusicError(NO_START)
+
+    def _launch(self) -> None:
+        """Open the app on its own thread: os.startfile can block while Windows launches
+        it. Wait at most START_APP_WAIT_S, only to report a launch that fails at once."""
+        log.info("Starting Spotify")
+        failed: list[OSError] = []
+
+        def launch() -> None:
+            try:
+                self._start_app()
+            except OSError as exc:
+                failed.append(exc)
+
+        thread = threading.Thread(target=launch, name="spotify-start", daemon=True)
+        thread.start()
+        thread.join(START_APP_WAIT_S)
+        if failed:
+            log.warning("Couldn't start Spotify: %s", failed[0])
+            raise MusicError(NO_START) from failed[0]
 
 
 def _message(exc: SpotifyException) -> str:
@@ -312,12 +382,14 @@ class MusicTools:
         if kind not in KINDS:
             raise ToolError(f"kind must be one of {', '.join(KINDS)}.")
         args = {"query": query, "kind": kind}
-        return self._guard.run("play_music", args, lambda: self._play(query, kind))
+        return self._guard.run("play_music", args, lambda: self._bounded(self._play, query, kind))
 
     def music_control(self, action: str) -> str:
         if action not in ACTIONS:
             raise ToolError(f"action must be one of {', '.join(ACTIONS)}.")
-        return self._guard.run("music_control", {"action": action}, lambda: self._do(action))
+        return self._guard.run(
+            "music_control", {"action": action}, lambda: self._bounded(self._do, action)
+        )
 
     def music_volume(self, level: int | None, change: int | None) -> str:
         if (level is None) == (change is None):
@@ -397,6 +469,13 @@ class MusicTools:
         ]
 
     # --- the actions (run inside the guard, in a worker thread) ---
+
+    def _bounded(self, action: Callable[..., str], *args: Any) -> str:
+        """One overall deadline for an action, starting Spotify included, so a turn never
+        waits on Spotify for long (an interrupt doesn't wait for it at all: the tool runs
+        in a worker thread the turn stops awaiting)."""
+        with self._control.time_limit(PLAY_DEADLINE_S):
+            return action(*args)
 
     def _play(self, query: str, kind: str) -> str:
         item = self._own_playlist(query) if kind == "playlist" else None

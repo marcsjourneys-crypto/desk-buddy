@@ -280,3 +280,116 @@ def test_create_control_is_none_without_a_client_id_or_a_login(tmp_path, caplog)
 def test_spotipy_debug_logs_are_silenced():
     # spotipy logs request headers (the bearer token) and refresh bodies at DEBUG.
     assert logging.getLogger("spotipy").getEffectiveLevel() >= logging.WARNING
+
+
+# --- Bounded start-up (the voice check hung 37 s after "Starting Spotify") ---
+
+
+class SlowSpotify(FakeSpotify):
+    """Each devices() call costs `cost` seconds of (fake) time; the PC's Spotify shows up
+    once `appears_at` (fake) seconds have passed."""
+
+    def __init__(self, t, *, cost=2.0, appears_at=None, transfer_404s=0, transfer_cost=0.0):
+        super().__init__([], transfer_404s=transfer_404s)
+        self.t, self.cost, self.appears_at = t, cost, appears_at
+        self.transfer_cost = transfer_cost
+
+    def transfer_playback(self, device_id, force_play=True):
+        self.t.now += self.transfer_cost
+        super().transfer_playback(device_id, force_play)
+
+    def devices(self):
+        self.calls.append(("devices",))
+        self.t.now += self.cost
+        shown = self.appears_at is not None and self.t.now >= self.appears_at
+        return {"devices": [MINE] if shown else []}
+
+
+def slow_control(**kwargs):
+    t = FakeTime()
+    client = SlowSpotify(t, **kwargs)
+    starts = []
+    control = SpotifyControl(
+        client, pc_name=PC, clock=t.clock, sleep=t.sleep, start_app=lambda: starts.append(1)
+    )
+    return control, client, t, starts
+
+
+def test_a_spotify_that_never_appears_gives_up_within_the_overall_deadline():
+    control, client, t, starts = slow_control(cost=2.0)
+    with control.time_limit(spotify.PLAY_DEADLINE_S), pytest.raises(MusicError) as info:
+        control.ensure_device()
+    assert str(info.value) == spotify.NO_START
+    assert starts == [1]
+    assert t.now <= spotify.PLAY_DEADLINE_S + 2.0  # at most one poll past the deadline
+
+
+def test_a_spotify_that_appears_after_ten_seconds_is_still_used():
+    # The desktop app registers its device only once its UI has loaded (~5-10 s here).
+    control, _, t, _ = slow_control(cost=0.2, appears_at=10.0)
+    with control.time_limit(spotify.PLAY_DEADLINE_S):
+        assert control.ensure_device() == "pc"
+    assert 10.0 <= t.now <= 12.0
+
+
+def test_running_out_of_time_while_activating_says_not_ready():
+    # Spotify shows up late, then each transfer is slow and 404s: the deadline cuts the
+    # retries short instead of letting them run on.
+    control, client, t, _ = slow_control(
+        cost=0.5, appears_at=12.0, transfer_404s=5, transfer_cost=2.0
+    )
+    with control.time_limit(spotify.PLAY_DEADLINE_S), pytest.raises(MusicError) as info:
+        control.ensure_device()
+    assert str(info.value) == spotify.NOT_READY
+    assert [c[0] for c in client.calls].count("transfer_playback") < spotify.TRANSFER_TRIES
+    assert t.now <= spotify.PLAY_DEADLINE_S + 2.0
+
+
+def test_a_launch_that_blocks_never_holds_up_the_wait():
+    # os.startfile can block while Windows launches the app: it runs on its own thread.
+    import threading
+    import time
+
+    stuck = threading.Event()
+    t = FakeTime()
+    client = SlowSpotify(t, cost=0.5, appears_at=1.0)
+    control = SpotifyControl(
+        client, pc_name=PC, clock=t.clock, sleep=t.sleep, start_app=lambda: stuck.wait(10)
+    )
+    started = time.monotonic()
+    try:
+        with control.time_limit(spotify.PLAY_DEADLINE_S):
+            assert control.ensure_device() == "pc"
+        assert time.monotonic() - started < spotify.START_APP_WAIT_S + 1
+    finally:
+        stuck.set()
+
+
+def test_a_slow_call_is_cut_at_the_overall_deadline_in_real_time():
+    import threading
+    import time
+
+    release = threading.Event()
+
+    class Hanging(FakeSpotify):
+        def devices(self):
+            release.wait(5)
+            return {"devices": []}
+
+    control = SpotifyControl(Hanging(), pc_name=PC)  # the real clock
+    started = time.monotonic()
+    try:
+        with control.time_limit(0.3), pytest.raises(MusicError):
+            control.call("devices")
+        assert time.monotonic() - started < 1.5
+    finally:
+        release.set()
+
+
+def test_out_of_time_before_a_call_refuses_it_at_once():
+    control, client, t, _ = slow_control()
+    with control.time_limit(1.0):
+        t.now += 2
+        with pytest.raises(MusicError):
+            control.call("devices")
+    assert client.calls == []

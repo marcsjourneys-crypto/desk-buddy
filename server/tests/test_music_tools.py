@@ -186,6 +186,36 @@ def test_a_playlist_not_among_mine_is_searched_publicly_and_null_items_are_skipp
     assert names(client, "start_playback")[0]["context_uri"] == "spotify:playlist:Jazz Vibes"
 
 
+def test_play_music_is_bounded_when_spotify_wont_start():
+    """The voice-check hang: Spotify closed, it never shows up. play_music gives up within
+    the overall deadline and nothing plays."""
+
+    class FakeTime:
+        now = 0.0
+
+    t = FakeTime()
+
+    class ClosedSpotify(FakeSpotify):
+        def devices(self):
+            self._record("devices")
+            t.now += 1.5  # each poll is slow
+            return {"devices": []}
+
+    client = ClosedSpotify(search={"track": [track("x")]})
+    control = SpotifyControl(
+        client,
+        pc_name="marc-laptop",
+        clock=lambda: t.now,
+        sleep=lambda s: setattr(t, "now", t.now + s),
+        start_app=lambda: None,
+    )
+    tools = ToolRegistry(MusicTools(control, ActionGuard(True)).tools())
+    out = tools.run("play_music", {"query": "x", "kind": "track"})
+    assert out.is_error and out.text == "Spotify didn't open."
+    assert t.now <= 15 + 1.5
+    assert names(client, "start_playback") == []
+
+
 def test_nothing_found_is_said_plainly_and_nothing_plays():
     client = FakeSpotify()
     tools, _ = make(client)
