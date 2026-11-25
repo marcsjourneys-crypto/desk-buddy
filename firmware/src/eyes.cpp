@@ -73,17 +73,40 @@ bool ready = false;
 bool dirty = true;  // force the next update() to redraw
 bool autoBlink = true;
 bool testMode = false;
+bool drifting = false;  // the thinking look's slow left-right gaze
+uint32_t driftStart = 0;
 
-// One lid: a half-ellipse from the left corner to the right, as thick anti-aliased segments.
+// The thinking drift's offset: starts at 0, so the look eases in without a jump.
+float driftAt(uint32_t now) {
+  if (!drifting) return 0;
+  const float phase = static_cast<float>((now - driftStart) % eye::kThinkingPeriodMs) /
+                      eye::kThinkingPeriodMs;
+  return eye::kThinkingDrift * sinf(2 * PI * phase);
+}
+
+// The look as it should appear now, before any blink.
+eye::Params current(int side, uint32_t now) {
+  eye::Params p = tweens[side].at(now);
+  p.gaze_x += driftAt(now);
+  return p;
+}
+
+// One lid: a half-ellipse from the left corner to the right, as thick anti-aliased segments,
+// turned by p.tilt about the eye's centre (anticlockwise on screen for a positive tilt, so
+// the left corner goes down).
 void drawLid(LGFX_Sprite& s, const eye::Params& p, float bulge) {
   const float cx = kSpriteCenter + p.gaze_x;
   const float cy = kSpriteCenter + p.gaze_y;
   const float w = p.thickness / 2;
+  const float c = cosf(p.tilt);
+  const float sn = sinf(p.tilt);
   float px = 0, py = 0;
   for (int i = 0; i <= kSegments; i++) {
     const float th = PI * (1 - static_cast<float>(i) / kSegments);  // left corner -> right
-    const float x = cx + p.radius * cosf(th);
-    const float y = cy + bulge * p.radius * sinf(th);
+    const float dx = p.radius * cosf(th);
+    const float dy = bulge * p.radius * sinf(th);  // screen y grows downwards
+    const float x = cx + dx * c + dy * sn;
+    const float y = cy - dx * sn + dy * c;
     if (i > 0) s.drawWedgeLine(px, py, x, y, w, w, kCyan);
     px = x;
     py = y;
@@ -91,12 +114,15 @@ void drawLid(LGFX_Sprite& s, const eye::Params& p, float bulge) {
 }
 
 // Moves the gaze back so the whole shape (stroke included) stays inside the sprite.
+// A tilt adds up to radius * |sin(tilt)| above and below; it can't widen a lid past its
+// radius, so the x limit needs nothing extra.
 eye::Params fitInSprite(eye::Params p) {
   const float w = p.thickness / 2 + 1;
+  const float t = p.radius * fabsf(sinf(p.tilt));
   const float maxX = fmaxf(0, kSpriteCenter - p.radius - w);
   p.gaze_x = fminf(fmaxf(p.gaze_x, -maxX), maxX);
-  const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w;    // extent above cy
-  const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w;  // extent below cy
+  const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w + t;    // above cy
+  const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w + t;  // below cy
   p.gaze_y = fminf(fmaxf(p.gaze_y, up - kSpriteCenter), kSpriteCenter - down);
   return p;
 }
@@ -107,7 +133,12 @@ eye::Params inSprite;
 bool spriteValid = false;
 
 void draw(int side, const eye::Params& params) {
-  const eye::Params p = fitInSprite(params);
+  eye::Params mirrored = params;
+  // Panel 0 is the eye on your left as you face the robot, so a positive tilt droops its
+  // left (outer) corner; the other eye turns the other way to droop its right corner.
+  // If the head is ever built with the panels swapped, flip this.
+  if (side == 1) mirrored.tilt = -mirrored.tilt;
+  const eye::Params p = fitInSprite(mirrored);
   if (!spriteValid || !eye::same(p, inSprite)) {
     sprite.fillScreen(kBlack);
     drawLid(sprite, p, p.upper);
@@ -211,11 +242,25 @@ bool show(const char* name) {
   } else if (!strcmp(name, "skeptical")) {
     left = right = ps::skeptical();
     ms = 400;
+  } else if (!strcmp(name, "sad")) {
+    left = right = ps::sad();
+    ms = 500;
+  } else if (!strcmp(name, "listening")) {
+    left = right = ps::listening();
+    ms = 150;
+  } else if (!strcmp(name, "thinking")) {
+    left = right = ps::thinking();
+    ms = 400;
   } else {
     return false;
   }
   if (testMode) clearPanels();  // the test ring is outside the sprite
   testMode = false;
+  if (drifting) {  // carry on from where the drift is, so leaving it doesn't jump
+    for (int i = 0; i < 2; i++) tweens[i].set(current(i, now));
+  }
+  drifting = !strcmp(name, "thinking");
+  driftStart = now;
   autoBlink = blinks;
   // A fresh schedule: after a long sleep, the old one could be stale enough to wrap.
   if (blinks) blinker.schedule(now, 3000 + esp_random() % 3000);
@@ -231,7 +276,7 @@ void update(uint32_t now) {
   const float b = blinker.amount(now);
   for (int i = 0; i < 2; i++) {
     tweens[i].settle(now);
-    eye::Params p = tweens[i].at(now);
+    eye::Params p = current(i, now);
     if (b > 0) p = eye::lerp(p, eye::closedLike(p), b);
     if (!dirty && eye::same(p, drawn[i])) continue;
     draw(i, p);

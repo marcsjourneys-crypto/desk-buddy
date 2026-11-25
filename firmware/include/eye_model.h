@@ -19,6 +19,9 @@ struct Params {
   float thickness = 14;  // stroke width, px
   float gaze_x = 0;      // px offset from the centre
   float gaze_y = 0;
+  // Rotates both lids about the eye's centre, in radians; positive droops the outer
+  // corner. The drawing mirrors it for the second eye.
+  float tilt = 0;
 };
 
 inline Params lerp(const Params& a, const Params& b, float t) {
@@ -29,6 +32,7 @@ inline Params lerp(const Params& a, const Params& b, float t) {
   p.thickness = ease::lerp(a.thickness, b.thickness, t);
   p.gaze_x = ease::lerp(a.gaze_x, b.gaze_x, t);
   p.gaze_y = ease::lerp(a.gaze_y, b.gaze_y, t);
+  p.tilt = ease::lerp(a.tilt, b.tilt, t);
   return p;
 }
 
@@ -37,8 +41,12 @@ inline bool same(const Params& a, const Params& b) {
   auto near = [](float x, float y) { return fabsf(x - y) < 0.01f; };
   return near(a.upper, b.upper) && near(a.lower, b.lower) && near(a.radius, b.radius) &&
          near(a.thickness, b.thickness) && near(a.gaze_x, b.gaze_x) &&
-         near(a.gaze_y, b.gaze_y);
+         near(a.gaze_y, b.gaze_y) && near(a.tilt, b.tilt);
 }
+
+// The thinking look drifts its gaze left and right by this much (px), once per period.
+constexpr float kThinkingDrift = 14;
+constexpr uint32_t kThinkingPeriodMs = 3000;
 
 // The same eye with both lids shut into a gentle downward curve (the bottom of a blink).
 inline Params closedLike(Params p) {
@@ -89,6 +97,17 @@ inline Params skeptical() {  // flattened top lid
   p.gaze_y = -10;
   return p;
 }
+inline Params sad() {  // a narrowed eye with drooping outer corners
+  Params p;
+  p.upper = -0.55f;
+  p.lower = 0.55f;
+  p.tilt = 0.35f;
+  p.gaze_y = 12;
+  return p;
+}
+inline Params listening() { return surprised(); }  // wide and attentive
+// Looking up; src/eyes.cpp adds the slow left-right drift (kThinkingDrift).
+inline Params thinking() { return look(0, -24); }
 }  // namespace presets
 
 // Blends from whatever is showing to a target over `duration` ms, eased.

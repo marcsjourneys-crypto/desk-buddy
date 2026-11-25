@@ -43,6 +43,15 @@ void test_params_lerp() {
   TEST_ASSERT_EQUAL_FLOAT(0.2f, p.lower);
 }
 
+void test_params_lerp_tilt() {
+  const eye::Params p = eye::lerp(eye::presets::idle(), eye::presets::sad(), 0.5f);
+  TEST_ASSERT_EQUAL_FLOAT(0.175f, p.tilt);
+  eye::Params a = eye::presets::idle();
+  eye::Params b = a;
+  b.tilt = 0.1f;
+  TEST_ASSERT_FALSE(eye::same(a, b));
+}
+
 void test_closed_like_keeps_size_and_gaze() {
   eye::Params p = eye::presets::idle();
   p.gaze_x = 7;
@@ -253,17 +262,25 @@ void test_servo_motion_across_millis_wrap() {
 }
 
 // Every preset (with the largest look offset) stays inside the 200 px sprite, stroke
-// included, so fitInSprite() never has to move it.
+// included, so fitInSprite() never has to move it. Tilt adds radius * |sin(tilt)| above
+// and below (rotating can't widen a lid past its radius, so x needs nothing extra).
 void test_presets_fit_sprite() {
   namespace ps = eye::presets;
-  const eye::Params looks[] = {ps::idle(), ps::happy(), ps::sleep(), ps::surprised(),
-                               ps::look(-28, 0), ps::look(28, 0), ps::look(0, -28),
-                               ps::look(0, 28), ps::closedLine(), ps::skeptical()};
+  eye::Params thinkingL = ps::thinking();
+  eye::Params thinkingR = ps::thinking();
+  thinkingL.gaze_x = -eye::kThinkingDrift;  // the drift's extremes
+  thinkingR.gaze_x = eye::kThinkingDrift;
+  const eye::Params looks[] = {ps::idle(),        ps::happy(),       ps::sleep(),
+                               ps::surprised(),   ps::look(-28, 0),  ps::look(28, 0),
+                               ps::look(0, -28),  ps::look(0, 28),   ps::closedLine(),
+                               ps::skeptical(),   ps::sad(),         ps::listening(),
+                               thinkingL,         thinkingR};
   for (const auto& p : looks) {
     const float w = p.thickness / 2 + 1;
+    const float t = p.radius * fabsf(sinf(p.tilt));
     TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, fabsf(p.gaze_x) + p.radius + w);
-    const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w - p.gaze_y;
-    const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w + p.gaze_y;
+    const float up = -fminf(0, fminf(p.upper, p.lower)) * p.radius + w + t - p.gaze_y;
+    const float down = fmaxf(0, fmaxf(p.upper, p.lower)) * p.radius + w + t + p.gaze_y;
     TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, up);
     TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, down);
   }
@@ -422,6 +439,7 @@ void setup() {
   RUN_TEST(test_in_out_cubic);
   RUN_TEST(test_progress_survives_millis_wrap);
   RUN_TEST(test_params_lerp);
+  RUN_TEST(test_params_lerp_tilt);
   RUN_TEST(test_closed_like_keeps_size_and_gaze);
   RUN_TEST(test_same);
   RUN_TEST(test_tween);
