@@ -2,7 +2,7 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
-## 2026-11-25 — M7 apps and websites built (check pending)
+## 2026-11-25 — M7 apps and websites done
 
 - **Built:**
   - **The Apps tab:** Find apps (Windows' own Start-app list), a filter, ticking apps with 1–3 spoken names each, and bookmarks. Saved in `apps.json` and `bookmarks.json` (`apps_store.py`).
@@ -13,14 +13,14 @@ Where the project stands, so work can resume after a break. Update this when a m
   - **Second user check (failed, fixed):** after calling the tool, CARL still asked and repeated itself in another API round. The user cut that off to answer, so the robot never asked, and "Yes." found nothing waiting while CARL claimed it was opening the page. Now the turn ends at the tool call and the robot asks straight away. The question arms the action as soon as it starts, so cutting it off to answer works, and it's remembered as heard. Whenever nothing opened, Claude gets a note saying so.
 - **Plan:** `docs/plans/2026-11-25-m7-apps-websites.md`.
 - **Tests:** 1176 server tests pass (17 integration tests deselected).
-- **Check by the user (pending):**
+- **Check by the user (passed 2026-11-25, after two fixes):**
   1. On the Apps tab, find apps, tick Notepad and your browser, and give the browser the name "browser". "Open notepad" opens it.
   2. Add a bookmark ("weather" → a forecast page). "Open the weather" opens it.
   3. Ask a question that needs a search, then "open that page". After CARL's reply, the robot asks "Shall I open the page on <site>?". Say "yes" and it opens.
   4. Repeat, but say "no, never mind": nothing opens, and the Live tab shows "cancelled".
   5. Repeat, wait more than a minute, then say "yes": nothing opens (expired).
   6. With `COMPUTER_CONTROL` off, "open notepad" gets "that isn't switched on".
-- **Next:** the user check, then media keys and PC volume (the rest of M7), the servo check, or in-page controls.
+- **Next:** media keys and PC volume (the rest of M7), the servo check, or in-page controls.
 
 ## 2026-11-25 — Web search and About you done
 
