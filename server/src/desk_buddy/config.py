@@ -43,9 +43,10 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 STT_DEVICES = ("cpu", "cuda")
 TTS_ENGINES = ("sapi", "piper")
 MIN_TTS_SPEED, MAX_TTS_SPEED = 0.5, 2.0
-# A Piper voice name: <language>_<REGION>-<name>-<quality>, as piper.download_voices
-# expects it (e.g. en_GB-northern_english_male-medium).
-_PIPER_VOICE_NAME = re.compile(r"^[^-_\s]+_[^-\s]+-[^-\s]+-[^-\s]+$")
+# A Piper voice name: <language>_<REGION>-<name>-<quality>, e.g.
+# en_GB-northern_english_male-medium. ASCII letters, digits and "_" only, so a name can
+# never be a path ("/", "\", ".."). Use with fullmatch.
+PIPER_VOICE_NAME = re.compile(r"[A-Za-z]+_[A-Za-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+", re.ASCII)
 MIN_TOKEN_CHARS = 16
 
 
@@ -158,8 +159,9 @@ def load_settings(
         stt_device=device,
         stt_compute_type=get("STT_COMPUTE_TYPE", Settings.stt_compute_type),
         tts_engine=engine,
-        tts_voice=_tts_voice(get),
-        tts_speed=_tts_speed(get),
+        # Checked only for Piper, so TTS_ENGINE=sapi always works as the fallback.
+        tts_voice=_tts_voice(get) if engine == "piper" else Settings.tts_voice,
+        tts_speed=_tts_speed(get) if engine == "piper" else Settings.tts_speed,
         voices_dir=get("VOICES_DIR", default_voices_dir()),
         max_sentences=max_sentences,
         history_turns=history_turns,
@@ -183,7 +185,7 @@ def _tts_voice(get: Callable[[str, str], str]) -> str:
         if not Path(raw).is_file():
             raise ConfigError(f"TTS_VOICE is not an existing .onnx file: {raw!r}")
         return raw
-    if not _PIPER_VOICE_NAME.match(raw):
+    if not PIPER_VOICE_NAME.fullmatch(raw):
         raise ConfigError(
             "TTS_VOICE must be a Piper voice name like en_GB-northern_english_male-medium, "
             f"or a path to an .onnx file; got {raw!r}"

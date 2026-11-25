@@ -79,13 +79,12 @@ def fakes(monkeypatch, calls):
     monkeypatch.setattr(entry, "check_audio_devices", lambda: None)
     monkeypatch.setattr(entry, "WhisperTranscriber", FakeTranscriber)
     monkeypatch.setattr(entry, "SapiSynthesizer", FakeSynthesizer)
-    monkeypatch.setattr(entry, "PiperSynthesizer", FakeSynthesizer)
 
-    def fake_find_voice(voice, voices_dir):
-        calls.append(("find_voice", voice, voices_dir))
-        return f"{voices_dir}/{voice}.onnx"
+    def fake_load_piper(voice, voices_dir, *, speed):
+        calls.append(("load_piper", voice, voices_dir, speed))
+        return FakeSynthesizer()
 
-    monkeypatch.setattr(entry, "find_voice", fake_find_voice)
+    monkeypatch.setattr(entry, "load_piper", fake_load_piper)
     monkeypatch.setattr(entry, "Microphone", FakeMicrophone)
     monkeypatch.setattr(entry, "Speaker", FakeSpeaker)
     monkeypatch.setattr(entry, "create_chat", lambda settings, tools=None: object())
@@ -159,12 +158,7 @@ def test_piper_engine_finds_and_loads_the_voice(monkeypatch, fakes, calls, caplo
 
     assert entry.main() == 0
 
-    assert ("find_voice", "en_GB-northern_english_male-medium", "V") in calls
-    assert (
-        "synthesizer args",
-        ("V/en_GB-northern_english_male-medium.onnx",),
-        {"speed": 1.25},
-    ) in calls
+    assert ("load_piper", "en_GB-northern_english_male-medium", "V", 1.25) in calls
     assert "Voice: piper en_GB-northern_english_male-medium" in caplog.messages
     assert "synthesizer closed" in steps(calls)
 
@@ -176,37 +170,26 @@ def test_sapi_engine_logs_its_voice(monkeypatch, fakes, calls, caplog):
     )
     assert entry.main() == 0
     assert "Voice: sapi" in caplog.messages
-    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "find_voice"]
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "load_piper"]
 
 
-def test_a_voice_that_cannot_be_downloaded_is_a_clear_startup_error(
-    monkeypatch, capsys, fakes, calls
-):
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Couldn't get voice 'x': HTTP Error 404",
+        "Can't load Piper voice 'en_GB-northern_english_male-medium': bad model",
+    ],
+)
+def test_a_piper_voice_failure_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls, message):
     monkeypatch.setattr(entry, "load_settings", lambda: PIPER)
-    monkeypatch.setattr(
-        entry, "find_voice", _raise(VoiceError("Couldn't get voice 'x': HTTP Error 404"))
-    )
+    monkeypatch.setattr(entry, "load_piper", _raise(VoiceError(message)))
 
     assert entry.main() == 2
 
     err = capsys.readouterr().err
-    assert "Can't start: Couldn't get voice 'x': HTTP Error 404" in err
-    assert "set TTS_ENGINE=sapi to use the Windows voice" in err
+    assert f"Can't start: {message}; or set TTS_ENGINE=sapi to use the Windows voice" in err
     assert "Traceback" not in err
     assert calls == ["transcriber created"]
-
-
-def test_a_piper_voice_that_fails_to_load_is_a_clear_startup_error(
-    monkeypatch, capsys, fakes, calls
-):
-    monkeypatch.setattr(entry, "load_settings", lambda: PIPER)
-    monkeypatch.setattr(entry, "PiperSynthesizer", _raise(RuntimeError("bad model")))
-
-    assert entry.main() == 2
-
-    err = capsys.readouterr().err
-    assert "Can't load Piper voice 'en_GB-northern_english_male-medium': bad model" in err
-    assert "set TTS_ENGINE=sapi" in err
 
 
 def test_sapi_failure_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):

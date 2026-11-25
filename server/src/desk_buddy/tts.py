@@ -6,15 +6,23 @@ import functools
 import gc
 import logging
 import math
+import os
+import shutil
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.request import urlopen
 
 import numpy as np
 
+from desk_buddy.config import MAX_TTS_SPEED, MIN_TTS_SPEED, PIPER_VOICE_NAME, Settings
+
 log = logging.getLogger(__name__)
+
+DEFAULT_VOICE = Settings.tts_voice
+DOWNLOAD_TIMEOUT_S = 30  # per request, so a stalled download fails instead of hanging
 
 SAFT_16KHZ_16BIT_MONO = 18  # SpeechAudioFormatType
 SVSF_IS_NOT_XML = 16  # SpeechVoiceSpeakFlags: never parse model text as SAPI XML
@@ -100,6 +108,8 @@ class PiperSynthesizer:
         speed: float = 1.0,
         loader: Callable[[Any], Any] | None = None,
     ) -> None:
+        if not MIN_TTS_SPEED <= speed <= MAX_TTS_SPEED:  # also rejects nan
+            raise ValueError(f"speed must be {MIN_TTS_SPEED}-{MAX_TTS_SPEED}, got {speed!r}")
         if loader is None:
             from piper import PiperVoice
 
@@ -118,49 +128,99 @@ class PiperSynthesizer:
             chunks = list(self._voice.synthesize(text, syn_config=config))
         if not chunks:
             return b""
+        rates = {chunk.sample_rate for chunk in chunks}
+        if len(rates) != 1:
+            raise ValueError(f"Piper returned chunks with mixed sample rates: {sorted(rates)}")
         audio = np.concatenate([chunk.audio_float_array for chunk in chunks])
-        return to_pcm16(resample(audio, chunks[0].sample_rate, OUTPUT_RATE))
+        return to_pcm16(resample(audio, rates.pop(), OUTPUT_RATE))
 
     def close(self) -> None:
         """Nothing to release (the model is freed with the object); safe to call twice."""
 
 
-def _download_voice(name: str, folder: Path) -> None:
-    from piper.download_voices import download_voice
-
-    download_voice(name, folder)
+Opener = Callable[..., Any]  # urllib.request.urlopen(url, timeout=...)
 
 
-def find_voice(
+def find_voice(voice: str, voices_dir: str | Path, opener: Opener = urlopen) -> Path:
+    """The .onnx model for TTS_VOICE (blocking). A path is used as is. A name is looked
+    up in voices_dir and downloaded there with its .onnx.json if either is missing."""
+    return _find_voice(voice, voices_dir, opener)[0]
+
+
+def load_piper(
     voice: str,
     voices_dir: str | Path,
-    download: Callable[[str, Path], None] | None = None,
-) -> Path:
-    """The .onnx model for TTS_VOICE: a path is used as is; a name is looked up in
-    voices_dir and downloaded there (with its .onnx.json) if it's missing. Blocking."""
+    *,
+    speed: float = 1.0,
+    opener: Opener = urlopen,
+    loader: Callable[[Any], Any] | None = None,
+) -> PiperSynthesizer:
+    """Find (or download) the voice and load it. Raises VoiceError. A voice downloaded
+    just now that fails to load is deleted, so the next run downloads it again."""
+    model, downloaded = _find_voice(voice, voices_dir, opener)
+    try:
+        return PiperSynthesizer(model, speed=speed, loader=loader)
+    except Exception as exc:
+        if downloaded:
+            for path in _voice_files(model):
+                path.unlink(missing_ok=True)
+        raise VoiceError(f"Can't load Piper voice {voice!r}: {exc}") from exc
+
+
+def _voice_files(model: Path) -> tuple[Path, Path]:
+    return model, model.with_name(model.name + ".json")
+
+
+def _find_voice(voice: str, voices_dir: str | Path, opener: Opener) -> tuple[Path, bool]:
+    """(model path, whether it was downloaded just now)."""
     if voice.lower().endswith(".onnx"):
-        model = Path(voice)
-        config = model.with_name(model.name + ".json")
+        model, config = _voice_files(Path(voice))
         if not (model.is_file() and config.is_file()):
             raise VoiceError(f"Voice files missing: {model} needs {config.name} next to it")
-        return model
+        return model, False
+    if not PIPER_VOICE_NAME.fullmatch(voice):
+        raise VoiceError(f"{voice!r} is not a Piper voice name (like {DEFAULT_VOICE})")
     folder = Path(voices_dir)
-    model = folder / f"{voice}.onnx"
-    config = folder / f"{voice}.onnx.json"
+    model, config = _voice_files(folder / f"{voice}.onnx")
     if model.is_file() and config.is_file():
-        return model
-    log.info("Downloading voice %s (about 60 MB)…", voice)
-    new_files = [p for p in (model, config) if not p.exists()]
+        return model, False
+    size = " (about 60 MB)" if voice.endswith("-medium") else ""
+    log.info("Downloading voice %s%s…", voice, size)
     try:
-        folder.mkdir(parents=True, exist_ok=True)
-        (download or _download_voice)(voice, folder)
-        if not (model.is_file() and config.is_file()):
-            raise VoiceError(f"the download left no {model.name} in {folder}")
+        _download_voice(voice, folder, opener)
     except Exception as exc:
-        for path in new_files:  # never leave a half-downloaded model behind
-            path.unlink(missing_ok=True)
         raise VoiceError(f"Couldn't get voice {voice!r}: {exc}") from exc
-    return model
+    return model, True
+
+
+def _download_voice(voice: str, folder: Path, opener: Opener) -> None:
+    """Download both files into a temporary subfolder, then move them into place only
+    once both arrived. A half-present voice (one of the two files) is replaced."""
+    from piper.download_voices import URL_FORMAT, VOICE_PATTERN
+
+    parts = VOICE_PATTERN.match(voice)
+    if parts is None:
+        raise VoiceError(f"{voice!r} is not a Piper voice name")
+    lang_family = parts.group("lang_family")
+    url_args = {
+        "lang_family": lang_family,
+        "lang_code": f"{lang_family}_{parts.group('lang_region')}",
+        "voice_name": parts.group("voice_name"),
+        "voice_quality": parts.group("voice_quality"),
+    }
+    temp = folder / f".download-{voice}"
+    shutil.rmtree(temp, ignore_errors=True)  # leftovers from an interrupted run
+    temp.mkdir(parents=True)
+    try:
+        for extension in (".onnx", ".onnx.json"):
+            url = URL_FORMAT.format(extension=extension, **url_args)
+            with opener(url, timeout=DOWNLOAD_TIMEOUT_S) as response:
+                with open(temp / f"{voice}{extension}", "wb") as out:
+                    shutil.copyfileobj(response, out)
+        for extension in (".onnx.json", ".onnx"):
+            os.replace(temp / f"{voice}{extension}", folder / f"{voice}{extension}")
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
 
 
 class SapiSynthesizer:

@@ -78,6 +78,11 @@ def test_missing_api_key_is_a_clear_error():
         ("TTS_SPEED", "nan"),
         ("TTS_VOICE", "northern"),
         ("TTS_VOICE", "en_GB-northern_english_male"),
+        ("TTS_VOICE", "../../x-y-medium"),
+        ("TTS_VOICE", "en_GB-a/b-medium"),
+        ("TTS_VOICE", "en_GB-a\\b-medium"),
+        ("TTS_VOICE", "en_GB-..-medium"),
+        ("TTS_VOICE", "en_GB-é-medium"),
     ],
 )
 def test_invalid_values_are_rejected(key, value):
@@ -111,6 +116,20 @@ def test_voice_settings_are_read(tmp_path):
     )
     assert (s.tts_engine, s.tts_voice, s.tts_speed) == ("piper", "en_US-lessac-medium", 1.25)
     assert s.voices_dir == str(tmp_path)
+
+
+def test_sapi_ignores_the_piper_settings_so_it_always_works_as_the_fallback():
+    s = load_settings(
+        env_path=None,
+        environ={
+            "ANTHROPIC_API_KEY": "k",
+            "TTS_ENGINE": "sapi",
+            "TTS_VOICE": "../not a voice",
+            "TTS_SPEED": "warp 9",
+        },
+    )
+    assert s.tts_engine == "sapi"
+    assert (s.tts_voice, s.tts_speed) == (Settings.tts_voice, Settings.tts_speed)
 
 
 def test_tts_voice_may_be_a_path_to_an_onnx_file(tmp_path):
