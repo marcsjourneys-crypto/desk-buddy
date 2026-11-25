@@ -2,6 +2,24 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — M7 YouTube, media keys and ducking built (check pending)
+
+- **Built:**
+  - **YouTube** (`tools/youtube.py`): `play_youtube` (a video, or a channel's newest upload, through the YouTube Data API v3; needs `YOUTUBE_API_KEY`) and `youtube_search` (opens the results page, no key). The key never reaches a log, an error, the dashboard or a tool result (tested with a planted key).
+  - **Media keys** (`tools/media.py`): `media_control` presses play/pause, next, previous or stop with `SendInput`. The prompt sends Spotify to `music_control` and videos and other players to `media_control`.
+  - **Ducking other apps** (`SessionDucker`, `tools/winaudio.py`): with `MUSIC_DUCK` on, every other app playing sound is lowered to a fifth in the volume mixer while CARL listens and talks, and put back exactly at idle unless the user changed it. A crash is undone at the next start.
+  - **Dropped by the user:** the PC volume tool (`pc_volume`).
+  - Review fixes: sessions known by their stable identifier, active sessions only, Spotify's session skipped only while its API duck runs, failed restores retried, new sessions ducked after a tool opens something, no exception context on YouTube errors.
+- **Plan:** `docs/plans/2026-11-25-m7-youtube-media-volume.md`.
+- **Tests:** 1299 server tests pass (19 integration tests deselected; the new read-only mixer test passes on this PC).
+- **Check by the user (pending):**
+  1. Add `YOUTUBE_API_KEY` to `server/.env` and restart. "Play lo-fi beats on YouTube": a video opens and plays.
+  2. "Play the latest video from <a channel you like>."
+  3. "Search YouTube for bread recipes": the results page opens.
+  4. "Pause the video", then "resume it". Then "pause the music" while Spotify plays: Spotify pauses, and the video doesn't toggle.
+  5. Ask a question while a YouTube video plays: the video dips while CARL listens and talks, then comes back.
+- **Next:** the user check above, then the servo check or in-page controls.
+
 ## 2026-11-25 — M7 apps and websites done
 
 - **Built:**
@@ -20,7 +38,7 @@ Where the project stands, so work can resume after a break. Update this when a m
   4. Repeat, but say "no, never mind": nothing opens, and the Live tab shows "cancelled".
   5. Repeat, wait more than a minute, then say "yes": nothing opens (expired).
   6. With `COMPUTER_CONTROL` off, "open notepad" gets "that isn't switched on".
-- **Next:** media keys and PC volume (the rest of M7), the servo check, or in-page controls.
+- **Next:** YouTube and media keys (the rest of M7; PC volume was later dropped), the servo check, or in-page controls.
 
 ## 2026-11-25 — Web search and About you done
 
@@ -63,7 +81,7 @@ Where the project stands, so work can resume after a break. Update this when a m
 - **Plan:** `docs/plans/2026-11-25-m7-spotify.md`.
 - **Tests:** 620 server tests pass (16 integration tests deselected; the live Spotify search passes with the user's login).
 - **Voice check by the user (pending):** "Play some Queen"; pause, resume, skip and back; "What's playing?"; "Turn the music down"; ask a question while music plays (it ducks and comes back); with Spotify closed, ask for music (CARL starts it); ask for 4 things in one go (CARL stops at 3).
-- **Next:** the voice check, the servo check, then the rest of M7 (media keys, apps, websites, PC volume) or M8 (the dashboard).
+- **Next:** the voice check, the servo check, then the rest of M7 (media keys, apps, websites; PC volume was later dropped) or M8 (the dashboard).
 
 ## 2026-11-25 — CARL's voice (Piper) done (voice check pending)
 
