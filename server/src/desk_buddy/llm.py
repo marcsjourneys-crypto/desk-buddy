@@ -106,7 +106,8 @@ class LLMRefusal(LLMError):
 
 
 class Chat(Protocol):
-    """What the voice loop needs from any LLM provider."""
+    """What the voice loop needs from any LLM provider. A provider that runs tools may
+    also keep a `tools_succeeded` count (see ClaudeChat); the loop reads it if present."""
 
     def stream_reply(
         self, history: Sequence[Mapping[str, str]], user_text: str
@@ -144,6 +145,9 @@ class ClaudeChat:
         self._effort = effort
         self._system = system if callable(system) else (lambda: system)
         self._tools = tools or ToolRegistry()
+        # Tool calls that succeeded, ever. Only grows; the loop compares it before and
+        # after a reply to tell whether that reply's turn ran a tool successfully.
+        self.tools_succeeded = 0
 
     async def stream_reply(
         self, history: Sequence[Mapping[str, str]], user_text: str
@@ -211,6 +215,8 @@ class ClaudeChat:
         }
         if outcome.is_error:
             result["is_error"] = True
+        else:
+            self.tools_succeeded += 1
         return result
 
 

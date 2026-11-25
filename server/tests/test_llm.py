@@ -239,6 +239,19 @@ def test_parallel_tool_calls_return_in_one_message():
     results = client.calls[1]["messages"][-1]["content"]
     assert [r["tool_use_id"] for r in results] == ["a", "b"]
     assert calls == ["x", "y"]
+    assert chat.tools_succeeded == 2
+
+
+def test_tools_succeeded_starts_at_zero_and_skips_failed_tools():
+    def broken(text):
+        raise ToolError("disk full")
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, broken)])
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use()])
+    chat, _ = make_chat(first, FakeStream(["Sorry."]), tools=registry)
+    assert chat.tools_succeeded == 0
+    collect(chat, "note it")
+    assert chat.tools_succeeded == 0
 
 
 def test_tool_error_is_sent_back_flagged():

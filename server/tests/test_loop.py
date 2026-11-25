@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+import desk_buddy.loop as loop_module
 from desk_buddy.audio import BYTES_PER_SECOND
 from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation
 from desk_buddy.brain.personality import (
@@ -12,7 +13,9 @@ from desk_buddy.brain.personality import (
     FAREWELL,
     FORGET_LINE,
     GREETING,
+    PONDERING,
     REFUSAL_LINE,
+    TASK_DONE,
 )
 from desk_buddy.llm import LLMError, LLMRefusal
 from desk_buddy.loop import Orchestrator, State
@@ -609,3 +612,104 @@ def test_farewell_never_raises_if_speaking_fails():
     orch, _, _ = make(synthesizer=BrokenSynth())
     asyncio.run(orch.farewell(timeout=1))
     assert orch.state is State.IDLE
+
+
+# --- Signature lines: pondering and task done ---
+
+
+class DelayedChat:
+    """Waits `delay` seconds, then replies. `tools` successful tool calls are counted
+    the way ClaudeChat counts them."""
+
+    def __init__(self, delay=0.0, deltas=("[happy] Done. ",), tools=0, error=None):
+        self.delay, self.deltas, self.tools, self.error = delay, deltas, tools, error
+        self.tools_succeeded = 0
+
+    async def stream_reply(self, history, text):
+        await asyncio.sleep(self.delay)
+        self.tools_succeeded += self.tools
+        for d in self.deltas:
+            yield d
+        if self.error:
+            raise self.error
+
+
+@pytest.fixture
+def quick_ponder(monkeypatch):
+    """Ponder after 0.2 s instead of 4 s, so the tests stay fast."""
+    monkeypatch.setattr(loop_module, "PONDER_AFTER", 0.2)
+
+
+def remembered(orch):
+    return " ".join(m["content"] for m in orch.conversation.messages())
+
+
+def test_pondering_fires_for_a_slow_reply_and_not_twice_within_five_minutes(quick_ponder, caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.loop")
+    clock = FakeClock(1000.0)
+    orch, parts, _ = make(chat=DelayedChat(delay=0.6), clock=clock)
+
+    async def scenario():
+        await talk(orch)
+        assert parts["speaker"].played == [PONDERING.text, "Done."]
+        clock.now += loop_module.PONDER_EVERY - 1
+        await talk(orch)  # slow again, but pondered too recently
+        assert parts["speaker"].played[2:] == ["Done."]
+        clock.now += 2
+        await talk(orch)
+        assert parts["speaker"].played[3:] == [PONDERING.text, "Done."]
+
+    asyncio.run(scenario())
+    assert parts["emotions"][:2] == ["thinking", "happy"]
+    assert f"CARL [thinking]: {PONDERING.text}" in caplog.messages
+    assert PONDERING.text not in remembered(orch)
+
+
+def test_pondering_does_not_fire_if_audio_starts_in_time(monkeypatch):
+    monkeypatch.setattr(loop_module, "PONDER_AFTER", 0.5)
+    orch, parts, _ = make(chat=DelayedChat(delay=0.1))
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Done."]
+
+
+def test_an_interrupt_during_pondering_cancels_the_reply(quick_ponder):
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(chat=DelayedChat(delay=0.4), speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        assert speaker.played == [PONDERING.text]
+        await orch.handle("down")  # interrupt: the turn is cancelled and awaited
+
+    asyncio.run(scenario())
+    assert speaker.played == [PONDERING.text]
+    assert orch.state is State.LISTENING
+    assert len(orch.conversation) == 0
+
+
+@pytest.mark.parametrize(
+    ("tools", "roll", "said"),
+    [(1, 0.2, True), (2, 0.0, True), (1, 0.25, False), (0, 0.0, False)],
+)
+def test_task_done_after_a_successful_tool_when_the_dice_say_so(tools, roll, said):
+    orch, parts, _ = make(chat=DelayedChat(tools=tools), random=lambda: roll)
+    asyncio.run(talk(orch))
+    expected = ["Done.", TASK_DONE.text] if said else ["Done."]
+    assert parts["speaker"].played == expected
+    assert TASK_DONE.text not in remembered(orch)
+    assert remembered(orch).endswith("[happy] Done.")
+
+
+def test_no_task_done_after_a_failed_reply():
+    chat = DelayedChat(tools=1, error=LLMError("boom"))
+    orch, parts, _ = make(chat=chat, random=lambda: 0.0)
+    asyncio.run(talk(orch))
+    assert TASK_DONE.text not in parts["speaker"].played
+
+
+def test_a_chat_without_a_tool_count_never_says_task_done():
+    orch, parts, _ = make(random=lambda: 0.0)  # FakeChat has no tools_succeeded
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Hello there.", "How are you?"]

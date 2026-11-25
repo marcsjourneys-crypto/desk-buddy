@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import random as random_module
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -19,7 +20,9 @@ from desk_buddy.brain.personality import (
     FAREWELL,
     FORGET_LINE,
     GREETING,
+    PONDERING,
     REFUSAL_LINE,
+    TASK_DONE,
     Line,
 )
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
@@ -30,6 +33,9 @@ log = logging.getLogger(__name__)
 
 MIN_CLIP_SECONDS = 0.3
 GREET_GAP = 60.0  # seconds: a "greet" this soon after the last greeting is skipped
+PONDER_AFTER = 4.0  # seconds after key release with no reply audio: say PONDERING...
+PONDER_EVERY = 300.0  # ...but at most this often
+TASK_DONE_CHANCE = 0.25  # after a reply whose turn ran a tool successfully
 
 
 class State(StrEnum):
@@ -76,6 +82,7 @@ class Orchestrator:
         on_state: Callable[[State], None] = lambda state: None,
         on_emotion: Callable[[str], None] = lambda emotion: None,
         clock: Callable[[], float] = time.monotonic,
+        random: Callable[[], float] = random_module.random,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -89,7 +96,9 @@ class Orchestrator:
         self._turn: asyncio.Task[None] | None = None
         self._t0 = 0.0
         self._clock = clock
+        self._random = random
         self._greeted_at: float | None = None
+        self._pondered_at: float | None = None
 
     # --- events ---
 
@@ -220,11 +229,18 @@ class Orchestrator:
                 await self._say(FORGET_LINE, token)
                 return
             turn = _Turn(user=text)
+            tools_before = _tools_succeeded(self.chat)
             queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._produce(turn, queue))
-                tg.create_task(self._consume(queue, token, turn.spoken))
+                tg.create_task(self._consume_reply(turn, queue, token))
             turn.complete = True
+            if (
+                not turn.failed
+                and _tools_succeeded(self.chat) > tools_before
+                and self._random() < TASK_DONE_CHANCE
+            ):
+                await self._say(TASK_DONE, token)
         except Exception:
             # A TaskGroup failure arrives as an ExceptionGroup, which is an Exception.
             log.exception("Turn failed")
@@ -304,13 +320,45 @@ class Orchestrator:
         pcm = await asyncio.to_thread(self.synthesizer.synthesize, sentence)
         await queue.put((sentence, pcm))
 
+    async def _consume_reply(
+        self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None], token: int
+    ) -> None:
+        """Play the reply. If no sentence is ready PONDER_AFTER seconds after key release,
+        say PONDERING first (at most once every PONDER_EVERY seconds)."""
+        wait = PONDER_AFTER - (time.perf_counter() - self._t0)
+        try:
+            first = await asyncio.wait_for(queue.get(), max(wait, 0))
+        except TimeoutError:
+            await self._ponder(turn, token)
+            first = await queue.get()
+        if first is not None:
+            await self._play(first, token, turn.spoken)
+            await self._consume(queue, token, turn.spoken)
+
+    async def _ponder(self, turn: _Turn, token: int) -> None:
+        now = self._clock()
+        if self._pondered_at is not None and now - self._pondered_at < PONDER_EVERY:
+            return
+        self._pondered_at = now
+        await self._say(PONDERING, token)
+        if turn.emotion:  # the reply's mood had already arrived: show it again
+            self._emit_emotion(turn.emotion)
+
     async def _consume(
         self, queue: asyncio.Queue[tuple[str, bytes] | None], token: int, spoken: list[str]
     ) -> None:
         while (item := await queue.get()) is not None:
-            sentence, pcm = item
-            if self.state is not State.SPEAKING:
-                log.info("First audio %.0f ms", self._ms())
-                self._set_state(State.SPEAKING)
-            spoken.append(sentence)  # before play: an interrupt mid-sentence still counts it
-            await asyncio.to_thread(self.speaker.play, pcm, token)
+            await self._play(item, token, spoken)
+
+    async def _play(self, item: tuple[str, bytes], token: int, spoken: list[str]) -> None:
+        sentence, pcm = item
+        if self.state is not State.SPEAKING:
+            log.info("First audio %.0f ms", self._ms())
+            self._set_state(State.SPEAKING)
+        spoken.append(sentence)  # before play: an interrupt mid-sentence still counts it
+        await asyncio.to_thread(self.speaker.play, pcm, token)
+
+
+def _tools_succeeded(chat: Chat) -> int:
+    """The chat's running count of successful tool calls (0 if it doesn't keep one)."""
+    return getattr(chat, "tools_succeeded", 0)
