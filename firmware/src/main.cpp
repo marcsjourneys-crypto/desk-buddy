@@ -1,4 +1,4 @@
-// Desk Buddy firmware, M5 bring-up: a serial test menu for every part of the robot.
+// Desk Buddy firmware: the robot link (M6) plus the serial test menu from the M5 bring-up.
 #include <Arduino.h>
 
 #include <algorithm>
@@ -7,6 +7,7 @@
 #include "audio.h"
 #include "dsp.h"
 #include "eyes.h"
+#include "net.h"
 #include "pins.h"
 #include "servos.h"
 #include "settings.h"
@@ -14,7 +15,6 @@
 namespace {
 
 constexpr char kFwVersion[] = "0.2.0-m6";
-bool linkActive = false;  // stub until the link exists (net::connected())
 
 char line[301];  // room for "token " plus a 256-char token
 size_t lineLen = 0;
@@ -30,7 +30,7 @@ void blinkLed() {
 }
 
 void printInfo() {
-  Serial.printf("Desk Buddy firmware %s (M5 bring-up)\n", kFwVersion);
+  Serial.printf("Desk Buddy firmware %s\n", kFwVersion);
   Serial.printf("Chip: %s rev %d, %d cores @ %lu MHz\n", ESP.getChipModel(),
                 ESP.getChipRevision(), ESP.getChipCores(),
                 static_cast<unsigned long>(ESP.getCpuFreqMHz()));
@@ -67,6 +67,7 @@ void printHelp() {
   Serial.println("  token <value>             ROBOT_TOKEN from server/.env (16-256 chars)");
   Serial.println("  config                    show the settings (secrets masked)");
   Serial.println("  forget                    wipe the Wi-Fi, server and token");
+  Serial.println("  net                       Wi-Fi, link state, reconnects, mic frames, heap");
 }
 
 // The rest of the line after the command name, trimmed; nullptr if there's nothing.
@@ -78,11 +79,15 @@ char* trimmed(char* s) {
   return n ? s : nullptr;
 }
 
-void printSaved(const char* error) {
+// After a settings command: report, and reconnect with the new values if it was saved.
+void printSaved(const char* error, bool wifi) {
   if (error != nullptr) {
     Serial.println(error);
-  } else if (settings::complete()) {
-    Serial.println("Saved.");
+    return;
+  }
+  net::restart(wifi);
+  if (settings::complete()) {
+    Serial.println("Saved. (reconnecting)");
   } else {
     Serial.println("Saved. Set wifi/server/token, then the robot connects.");
   }
@@ -124,16 +129,19 @@ const char* wifiCommand(char* raw) {
 // Settings commands get the raw rest of the line. Returns false if `name` isn't one.
 bool handleSettings(const char* name, char* raw) {
   if (!strcmp(name, "wifi")) {
-    printSaved(wifiCommand(raw));
+    printSaved(wifiCommand(raw), true);
   } else if (!strcmp(name, "server")) {
-    printSaved(settings::setServer(trimmed(raw)));
+    printSaved(settings::setServer(trimmed(raw)), false);
   } else if (!strcmp(name, "token")) {
-    printSaved(settings::setToken(trimmed(raw)));
+    printSaved(settings::setToken(trimmed(raw)), false);
   } else if (!strcmp(name, "config")) {
     printConfig();
   } else if (!strcmp(name, "forget")) {
     const char* error = settings::forget();
+    if (error == nullptr) net::stop();
     Serial.println(error ? error : "Forgot the Wi-Fi, server and token.");
+  } else if (!strcmp(name, "net")) {
+    net::printStatus();
   } else {
     return false;
   }
@@ -233,7 +241,7 @@ void handle(char* cmd) {
   char* arg = rest ? strtok(rest, " ") : nullptr;
   const bool usesAudio = !strcmp(name, "tone") || !strcmp(name, "mic") ||
                          !strcmp(name, "rec") || !strcmp(name, "play");
-  if (usesAudio && linkActive) {  // the streaming tasks own the speaker and mic now
+  if (usesAudio && net::connected()) {  // the streaming tasks own the speaker and mic now
     Serial.println("Not while the robot link is connected");
     return;
   }
@@ -331,13 +339,17 @@ void setup() {
   printInfo();
   settings::load();
   if (!eyes::begin()) Serial.println("Eyes: not started");
+  eyes::show("sleep");  // until the link is up
   if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
   if (!audio::beginMic()) Serial.println("Mic: not started");
   if (!servos::begin()) Serial.println("Servos: not started");
+  net::begin(kFwVersion);
+  if (!settings::complete()) Serial.println("Robot link: not set up (see 'help')");
   Serial.println("Type 'help' for commands.");
 }
 
 void loop() {
+  net::loop();
   eyes::update(millis());
   pollSerial();
   delay(1);
