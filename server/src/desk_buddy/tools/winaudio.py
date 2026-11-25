@@ -4,7 +4,7 @@ Only what ducking other apps needs:
 
 - IMMDeviceEnumerator -> the default render endpoint (IMMDevice);
 - IMMDevice.Activate -> IAudioSessionManager2 -> IAudioSessionEnumerator;
-- each session's IAudioSessionControl2 (state, instance ID, process ID) and its
+- each session's IAudioSessionControl2 (state, session identifier, process ID) and its
   ISimpleAudioVolume (the app's level in the mixer).
 
 The vtables follow the Windows SDK headers (mmdeviceapi.h, audiopolicy.h, audioclient.h;
@@ -32,7 +32,9 @@ log = logging.getLogger(__name__)
 
 E_RENDER = 0  # EDataFlow eRender
 E_MULTIMEDIA = 1  # ERole eMultimedia
-SESSION_EXPIRED = 2  # AudioSessionState AudioSessionStateExpired
+SESSION_INACTIVE = 0  # AudioSessionState: AudioSessionStateInactive
+SESSION_ACTIVE = 1  # AudioSessionStateActive: playing right now
+SESSION_EXPIRED = 2  # AudioSessionStateExpired
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
@@ -41,8 +43,9 @@ class Session:
     """One app's audio session. get() and set() read and set its mixer level (0.0-1.0);
     they must run on the COM thread that listed it."""
 
-    id: str  # the session instance identifier: unique while the session lives
+    id: str  # the session identifier: stable across the app's sessions (and restarts)
     pid: int
+    state: int  # SESSION_INACTIVE or SESSION_ACTIVE
     get: Callable[[], float]
     set: Callable[[float], None]
 
@@ -84,15 +87,16 @@ class SessionBackend:
         for i in range(found.GetCount()):
             try:
                 control = found.GetSession(i).QueryInterface(api.IAudioSessionControl2)
-                if control.GetState() == SESSION_EXPIRED:
+                state = int(control.GetState())
+                if state == SESSION_EXPIRED:
                     continue
-                session_id = _take_string(control.GetSessionInstanceIdentifier())
+                session_id = _take_string(control.GetSessionIdentifier())
                 pid = int(control.GetProcessId())
                 volume = control.QueryInterface(api.ISimpleAudioVolume)
             except Exception as exc:  # e.g. a session that ended while listing
                 log.debug("Skipped an audio session: %s", exc)
                 continue
-            sessions.append(Session(session_id, pid, *_level_functions(volume)))
+            sessions.append(Session(session_id, pid, state, *_level_functions(volume)))
         return sessions
 
 
@@ -188,9 +192,9 @@ def _api() -> Any:
     class IAudioSessionControl2(IAudioSessionControl):
         _iid_ = GUID("{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}")
         _methods_ = [
-            unused("GetSessionIdentifier", c_void_p),
             # LPWSTR* read as an address, so the string can be freed (_take_string).
-            method("GetSessionInstanceIdentifier", (["out"], POINTER(c_void_p), "pRetVal")),
+            method("GetSessionIdentifier", (["out"], POINTER(c_void_p), "pRetVal")),
+            unused("GetSessionInstanceIdentifier", c_void_p),
             method("GetProcessId", (["out"], POINTER(wintypes.DWORD), "pRetVal")),
             unused("IsSystemSoundsSession"),
             unused("SetDuckingPreference", wintypes.BOOL),

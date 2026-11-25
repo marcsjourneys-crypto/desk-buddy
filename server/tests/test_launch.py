@@ -245,6 +245,22 @@ def test_the_registry_runs_them_by_name():
     assert outcome.is_error and launcher.calls == [NOTEPAD.app_id]
 
 
+def test_the_apps_ducker_is_told_after_an_app_or_page_opened():
+    class Spy:
+        calls = 0
+
+        def started(self):
+            Spy.calls += 1
+
+    tools, guard, launcher, opener = make(ducker=Spy())
+    tools.open_app("notepad")
+    tools.open_website("weather")
+    assert Spy.calls == 2
+    with pytest.raises(ToolError):
+        tools.open_app("nope")
+    assert Spy.calls == 2
+
+
 def test_nothing_here_ever_uses_a_shell():
     source = open(launch.__file__, encoding="utf-8").read()
     assert "shell=True" not in source

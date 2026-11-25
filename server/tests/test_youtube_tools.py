@@ -350,3 +350,30 @@ def test_the_brain_registers_youtube_by_the_settings(monkeypatch, caplog, settin
     assert {n for n in ("play_youtube", "youtube_search") if n in brain.tools} == names
     assert line in caplog.messages
     assert all(KEY not in m for m in caplog.messages)
+
+
+class StartedSpy:
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def started(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("ducker trouble")
+
+
+def test_the_apps_ducker_is_told_after_something_opened():
+    spy = StartedSpy()
+    tools, opener, *_ = make(FakeClient(), ducker=spy)
+    tools.play_youtube("x", "video")
+    tools.youtube_search("y")
+    assert spy.calls == 2
+    with pytest.raises(ToolError):
+        tools.youtube_search("")  # refused: nothing opened, nothing told
+    failing, *_ = make(FakeClient(None), ducker=spy)
+    with pytest.raises(ToolError):
+        failing.play_youtube("x", "video")
+    assert spy.calls == 2
+    broken, *_ = make(FakeClient(), ducker=StartedSpy(fail=True))
+    assert broken.play_youtube("x", "video").startswith("Playing")  # never costs the result

@@ -15,15 +15,14 @@ import html
 import json
 import logging
 import re
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from typing import Any, NamedTuple
 from urllib.parse import quote_plus, urlencode
 
-from desk_buddy.tools.launch import OPEN_WAIT_S, open_page, open_url
+from desk_buddy.tools.launch import OPEN_WAIT_S, open_page, open_url, started
 from desk_buddy.tools.registry import Tool, ToolError
 from desk_buddy.tools.untrusted import wrap
 from desk_buddy.tools.urls import MAX_URL
@@ -161,20 +160,28 @@ class YouTubeClient:
     def _get(self, endpoint: str, **params: Any) -> dict[str, Any]:
         url = API_BASE + endpoint + "?" + urlencode({**params, "key": self.__key})
         log.debug("YouTube GET %s", redact(url))
+        # The error is worked out inside each except block and raised after it, so the
+        # YouTubeError has no __context__: urllib's exception holds the URL, and so the
+        # key. Never log or chain it.
+        message = None
+        body = b""
         try:
             body = self._http(url, self._timeout)
         except urllib.error.HTTPError as exc:
-            # Never chain or log exc itself: it holds the URL, and so the key.
             message = _http_message(endpoint, exc.code, _error_body(exc))
-            raise YouTubeError(message) from None
         except (urllib.error.URLError, OSError) as exc:  # URLError first: it's an OSError
             log.warning("YouTube %s unreachable: %s", endpoint, type(exc).__name__)
-            raise YouTubeError(NETWORK) from None
+            message = NETWORK
+        except Exception as exc:  # anything else the HTTP function raises
+            log.warning("YouTube %s failed: %s", endpoint, type(exc).__name__)
+            message = NETWORK
+        if message is not None:
+            raise YouTubeError(message)
+        data = None
         try:
             data = json.loads(body)
         except (TypeError, ValueError):
             log.warning("YouTube %s sent something that isn't JSON", endpoint)
-            raise YouTubeError(NETWORK) from None
         if not isinstance(data, dict):
             raise YouTubeError(NETWORK)
         return data
@@ -190,10 +197,16 @@ def _is_api_id(value: Any) -> bool:
 
 
 def _error_body(exc: urllib.error.HTTPError) -> Any:
+    """The JSON error body, or None; the response is closed either way."""
     try:
         return json.loads(exc.read(MAX_BODY))
     except Exception:
         return None
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
 
 
 def _reasons(body: Any) -> set[str]:
@@ -240,11 +253,6 @@ BAD_KIND = "kind must be video or latest_from_channel."
 TOO_LONG = "That search is too long for YouTube."
 NO_KEY = "Playing YouTube videos isn't set up."
 
-# API calls run here so a whole play_youtube can be given up on at DEADLINE_S. A call
-# given up on finishes in the background (each request has its own timeout) and its
-# result is dropped.
-_CALLS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="youtube")
-
 
 def _query(value: Any) -> str:
     return " ".join(str(value).split())
@@ -270,8 +278,12 @@ class YouTubeTools:
         opener: Callable[[str], None] = open_url,
         open_wait: float = OPEN_WAIT_S,
         deadline: float = DEADLINE_S,
+        ducker: Any = None,
     ) -> None:
+        """ducker (a ducking.SessionDucker): told after a page opened, so the video is
+        ducked under CARL's reply."""
         self._guard = guard
+        self._ducker = ducker
         self._client = client
         self._opener = opener
         self._open_wait = open_wait
@@ -361,17 +373,33 @@ class YouTubeTools:
         except ValueError:
             raise YouTubeError(NOT_FOUND) from None
         open_page(url, LABEL, opener=self._opener, wait=self._open_wait)
+        started(self._ducker)
         return "Playing on YouTube: " + wrap(SOURCE, _describe(video), limit=MAX_NAMES)
 
     def _open_search(self, url: str) -> str:
         open_page(url, LABEL, opener=self._opener, wait=self._open_wait)
+        started(self._ducker)
         return "Opened the YouTube search results."
 
     def _bounded(self, find: Callable[[str], Video | None], query: str) -> Video | None:
-        """One overall deadline for the API calls, so a turn never waits long on YouTube."""
-        future = _CALLS.submit(find, query)
-        try:
-            return future.result(timeout=self._deadline)
-        except FutureTimeout:
+        """One overall deadline for the API calls, so a turn never waits long on YouTube.
+        They run on a daemon thread: one given up on finishes in the background (each
+        request has its own timeout), its result is dropped, and it never holds up exit."""
+        results: list[Video | None] = []
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                results.append(find(query))
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, name="youtube", daemon=True)
+        thread.start()
+        thread.join(self._deadline)
+        if thread.is_alive():
             log.warning("YouTube took over %.0f s: gave up", self._deadline)
-            raise YouTubeError(NETWORK) from None
+            raise YouTubeError(NETWORK)
+        if errors:
+            raise errors[0]
+        return results[0]

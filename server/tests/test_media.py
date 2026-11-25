@@ -135,6 +135,10 @@ def test_build_tools_and_the_prompt():
     with_music = system_prompt(2, media=True, music=True, computer_control=True)
     assert "For Spotify use music_control, never media_control." in with_music
     assert "If it's unclear which one" in with_music
+    assert "if YouTube or another player is what you last started, use media_control" in (
+        with_music
+    )
+    assert "whichever app last played" in with_music
     assert "play_pause is one toggle" in with_music
     without_music = system_prompt(2, media=True, computer_control=True)
     assert "media_control presses" in without_music

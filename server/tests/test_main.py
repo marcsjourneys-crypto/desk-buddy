@@ -133,6 +133,12 @@ def fakes(monkeypatch, calls, tmp_path):
         def set_enabled(self, enabled, state="idle"):
             calls.append(("apps ducker enabled", enabled))
 
+        def set_skip_spotify(self, skip):
+            calls.append(("apps ducker skips spotify", skip))
+
+        def started(self):
+            pass
+
         def close(self):
             calls.append(("apps ducker", "closed"))
 

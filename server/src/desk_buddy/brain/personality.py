@@ -151,8 +151,13 @@ def _media_text(media: bool, music: bool, computer_control: bool) -> str:
         text += (
             ' For Spotify use music_control, never media_control. For "pause the video", '
             "YouTube or any other player use media_control. If it's unclear which one the "
-            "user means and Spotify is what you last played, use music_control."
+            "user means and Spotify is what you last played, use music_control; if YouTube "
+            "or another player is what you last started, use media_control."
         )
+    text += (
+        " The key goes to whichever app last played or was last used for media, which "
+        "may not be the one the user means."
+    )
     text += (
         " play_pause is one toggle: press it only when the user asks to pause, play or "
         "resume, and only once. You can't tell what is playing or paused, so never say "

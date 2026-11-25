@@ -259,7 +259,34 @@ def test_the_key_never_appears_in_errors_or_logs(answer, caplog):
         yt.search_video("x")
     said = everything_said(caught, caplog)
     assert KEY not in said
-    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+def test_any_other_failure_of_the_http_function_is_a_network_problem(caplog):
+    caplog.set_level(logging.DEBUG)
+
+    def odd(url):
+        return RuntimeError(f"something odd with {url}")
+
+    yt, _ = client(search=odd)
+    with pytest.raises(YouTubeError) as caught:
+        yt.search_video("x")
+    assert str(caught.value) == NETWORK and caught.value.__context__ is None
+    assert KEY not in everything_said(caught, caplog)
+
+
+def test_the_error_response_is_closed_after_reading():
+    responses = []
+
+    def forbidden(url):
+        error = http_error(url, 403, ["quotaExceeded"])
+        responses.append(error)
+        return error
+
+    yt, _ = client(search=forbidden)
+    with pytest.raises(YouTubeError):
+        yt.search_video("x")
+    assert responses[0].fp is None or responses[0].fp.closed
 
 
 def test_the_key_never_appears_in_logs_on_success(caplog):

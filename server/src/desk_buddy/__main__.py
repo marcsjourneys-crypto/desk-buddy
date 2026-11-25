@@ -308,6 +308,8 @@ class Brain:
             )
             if self.ducker is not None:
                 self.ducker.set_enabled(False, self._state)
+            if self.apps_ducker is not None:
+                self.apps_ducker.set_skip_spotify(False)  # Spotify's API duck is off now
         if self.apps_ducker is not None and not new.music_duck:
             self.apps_ducker.set_enabled(False, self._state)  # off: restore at once
 
@@ -350,6 +352,9 @@ class Brain:
             self.ducker.set_enabled(s.computer_control and s.music_duck, self._state)
         if self.apps_ducker is not None:
             self.apps_ducker.set_enabled(s.music_duck, self._state)
+            # Spotify's session is left alone only while its API duck really runs.
+            music_ducking = self.ducker is not None and s.computer_control and s.music_duck
+            self.apps_ducker.set_skip_spotify(music_ducking)
 
     def _make_music(self, settings: Settings) -> None:
         try:
@@ -397,13 +402,14 @@ class Brain:
         if not (apps or sites or pages):
             return None
         if not pages:
-            return LaunchTools(self.guard, apps, sites)
+            return LaunchTools(self.guard, apps, sites, ducker=self.apps_ducker)
         return LaunchTools(
             self.guard,
             apps,
             sites,
             results=self.search_results,
             confirmations=self.confirmations,
+            ducker=self.apps_ducker,
         )
 
     def _youtube_tools(self, settings: Settings) -> YouTubeTools | None:
@@ -414,9 +420,11 @@ class Brain:
             return None
         if not settings.youtube_api_key:
             log.info("YouTube: search only (no YOUTUBE_API_KEY)")
-            return YouTubeTools(self.guard)
+            return YouTubeTools(self.guard, ducker=self.apps_ducker)
         log.info("YouTube: on (play and search)")
-        return YouTubeTools(self.guard, YouTubeClient(settings.youtube_api_key))
+        return YouTubeTools(
+            self.guard, YouTubeClient(settings.youtube_api_key), ducker=self.apps_ducker
+        )
 
     def _media_keys(self, settings: Settings) -> MediaKeys | None:
         """media_control whenever computer control is on."""

@@ -13,12 +13,15 @@ and never touches the turn. A failed restore is kept and tried again after the n
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -155,22 +158,67 @@ class MusicDucker:
 
 
 LEVEL_MATCH = 0.005  # mixer levels this close count as unchanged (they're float32)
-SKIPPED_PROGRAMS = frozenset({"spotify.exe"})  # Spotify has MusicDucker (never twice)
+SPOTIFY = "spotify.exe"
+MAX_RESTORE_TRIES = 3  # idles a failed (or app-gone) restore is tried at, then dropped
+STARTED_CHECKS_S = (0.0, 1.5, 4.0)  # after a tool started something: look for new sessions
+SESSION_ACTIVE = 1  # winaudio.SESSION_ACTIVE (not imported: no COM module needed here)
+
+
+def ducked_apps_path() -> Path:
+    """%LOCALAPPDATA%\\desk-buddy\\ducked_apps.json: what's ducked right now, if anything."""
+    from desk_buddy.config import app_data_dir
+
+    return app_data_dir() / "ducked_apps.json"
+
+
+@dataclass
+class _Ducked:
+    """One app we ducked, by its session identifier and program (stable while it plays,
+    and across a session restart): the (before, ducked) levels of each of its sessions."""
+
+    session: str
+    program: str
+    levels: list[list[float]] = field(default_factory=list)
+    tries: int = 0  # restores that failed so far
+
+    def matches(self, level: float) -> float | None:
+        """The level from before ducking, if `level` is one we set; else None."""
+        return next((b for b, d in self.levels if abs(level - d) <= LEVEL_MATCH), None)
+
+
+def _parse_ducked(raw: str) -> list[_Ducked]:
+    """The saved file's entries; raises ValueError (or TypeError/KeyError) if it's bad."""
+    entries = []
+    for item in json.loads(raw)["apps"]:
+        session, program = item["session"], item["program"]
+        if not isinstance(session, str) or not isinstance(program, str):
+            raise ValueError("bad entry")
+        levels = [[float(b), float(d)] for b, d in item["levels"]]
+        if not levels or not all(0.0 <= v <= 1.0 for pair in levels for v in pair):
+            raise ValueError("bad levels")
+        entries.append(_Ducked(session, program.lower(), levels))
+    return entries
 
 
 class SessionDucker:
     """Duck other apps (YouTube in the browser, a podcast) while CARL isn't idle: each
-    audio session in the Windows volume mixer, except CARL's own process and Spotify, goes
-    to DUCK_FACTOR of its level; at idle each is put back to its exact earlier level,
-    unless the user changed it in the meantime (then it's left alone).
+    active audio session in the Windows volume mixer, except CARL's own process (and
+    Spotify while MusicDucker ducks it through its API), goes to DUCK_FACTOR of its level;
+    at idle each is put back to its exact earlier level, unless the user changed it in
+    the meantime (then it's left alone).
 
-    MUSIC_DUCK switches it (computer control isn't needed: ducking isn't an action); off
-    restores at once. Sessions that start mid-turn aren't ducked. A session whose program
-    can't be identified isn't ducked either.
+    - Apps are known by their session identifier and program, so a session that
+      restarts mid-turn (a reloaded tab) is still put back.
+    - What's ducked is kept in ducked_apps.json while it is, and put back at the next
+      start after a crash.
+    - started(): a tool just started something; new sessions are ducked too.
+    - MUSIC_DUCK switches it (computer control isn't needed: ducking isn't an action);
+      off restores at once. A session whose program can't be identified is left alone.
 
     Best effort, like MusicDucker: all Core Audio calls run on one COM worker thread,
     never on the event loop; on_state never blocks or raises; each kind of failure is
-    logged once as a warning. A failed restore is kept and tried again after the next turn.
+    logged once as a warning. A failed restore is tried again at the next idle (up to
+    MAX_RESTORE_TRIES times).
     """
 
     def __init__(
@@ -181,21 +229,34 @@ class SessionDucker:
         own_pid: int | None = None,
         process_name: Callable[[int], str | None] | None = None,
         executor: Any = None,
+        state_file: Path | None = None,
+        started_checks: tuple[float, ...] = STARTED_CHECKS_S,
     ) -> None:
         """backend: a winaudio.SessionBackend (the default), or a fake with sessions().
-        executor: where the calls run (default: a winaudio COM worker)."""
+        executor: where the calls run (default: a winaudio COM worker). state_file:
+        default ducked_apps_path(). Puts back what a crash left ducked, first thing."""
         from desk_buddy.tools import winaudio
 
         self._backend = backend if backend is not None else winaudio.SessionBackend()
         self._process_name = process_name or winaudio.process_name
         self._executor = executor or winaudio.com_worker("duck-apps")
+        self._state_file = state_file if state_file is not None else ducked_apps_path()
+        self._started_checks = started_checks
         self._own_pid = os.getpid() if own_pid is None else own_pid
         self._enabled = enabled
-        self._lock = threading.Lock()  # guards _want, _saved, _enabled, _closed, _warned
+        # Guards _want, _saved (and its entries), _enabled, _skip_spotify, _closed,
+        # _timers and _warned.
+        self._lock = threading.Lock()
         self._want = False
-        self._saved: dict[str, tuple[float, float]] = {}  # session id: (before, ducked)
+        self._skip_spotify = False
+        self._saved: dict[tuple[str, str], _Ducked] = {}
+        self._timers: list[threading.Timer] = []
         self._warned: set[tuple[str, str]] = set()
         self._closed = False
+        try:
+            self._executor.submit(self._recover)
+        except Exception:
+            log.warning("Ducking other apps couldn't check for a crash", exc_info=True)
 
     def on_state(self, state: Any) -> None:
         """Called with every state change, on the event loop. Never blocks or raises."""
@@ -225,8 +286,11 @@ class SessionDucker:
         with self._lock:
             closed, self._closed = self._closed, True
             self._want = False
+            timers, self._timers = self._timers, []
         if closed:
             return
+        for timer in timers:
+            timer.cancel()
         try:
             self._executor.submit(self._apply)
         except RuntimeError:
@@ -245,59 +309,182 @@ class SessionDucker:
         except Exception:
             log.warning("Ducking other apps failed to queue", exc_info=True)
 
+    def set_skip_spotify(self, skip: bool) -> None:
+        """Leave Spotify's session alone: only while MusicDucker really ducks it through
+        Spotify's API (so it's never lowered twice). Applies from the next duck."""
+        with self._lock:
+            self._skip_spotify = skip
+
+    def started(self) -> None:
+        """A tool just started something that may play (a video, a website, an app): if
+        CARL is still busy, duck any new active session now and twice more shortly after
+        (a browser takes a moment to start playing). Never blocks or raises."""
+        try:
+            with self._lock:
+                if not self._want or self._closed:
+                    return
+                for delay in self._started_checks:
+                    if delay > 0:
+                        timer = threading.Timer(delay, self._recheck)
+                        timer.daemon = True
+                        self._timers = [t for t in self._timers if t.is_alive()] + [timer]
+                        timer.start()
+            if any(delay <= 0 for delay in self._started_checks):
+                self._executor.submit(self._apply)
+        except Exception:
+            log.warning("Ducking other apps failed to queue", exc_info=True)
+
+    def _recheck(self) -> None:
+        try:
+            with self._lock:
+                if not self._want or self._closed:
+                    return
+            self._executor.submit(self._apply)
+        except Exception:
+            log.debug("Ducking other apps: a recheck failed to queue", exc_info=True)
+
     # --- on the COM worker thread ---
 
     def _apply(self) -> None:
         with self._lock:
-            want, saved = self._want, dict(self._saved)
+            want, saved = self._want, bool(self._saved)
         try:
-            if want and not saved:
+            if want:
                 self._duck()
-            elif not want and saved:
-                self._restore(saved)
+            elif saved:
+                self._restore()
         except Exception as exc:
             self._warn("list", exc)
 
     def _duck(self) -> None:
+        """Duck every active session that isn't already at a level we set. Several
+        sessions of one app share a key: each one's levels are kept."""
+        changed = False
         for session in self._backend.sessions():
-            if session.pid == self._own_pid or not self._may_duck(session.pid):
+            if session.state != SESSION_ACTIVE or session.pid == self._own_pid:
                 continue
+            program = self._program(session.pid)
+            if program is None:
+                continue
+            key = (session.id, program)
             try:
                 before = session.get()
+                with self._lock:
+                    if program == SPOTIFY and self._skip_spotify:
+                        continue
+                    entry = self._saved.get(key)
+                    if entry is not None and entry.matches(before) is not None:
+                        continue  # already ducked
                 if before <= 0:
                     continue
-                session.set(before * DUCK_FACTOR)
-                ducked = session.get()  # as the mixer stored it
+                pair = [before, before * DUCK_FACTOR]
+                with self._lock:  # recorded (and saved to disk) before anything changes
+                    entry = self._saved.setdefault(key, _Ducked(session.id, program))
+                    entry.levels.append(pair)
+                changed = True
+                self._save()
+                session.set(pair[1])
+                pair[1] = session.get()  # as the mixer stored it
             except Exception as exc:
                 self._warn("duck", exc)
-                continue
-            with self._lock:
-                self._saved[session.id] = (before, ducked)
+        if changed:
+            self._save()
 
-    def _may_duck(self, pid: int) -> bool:
+    def _program(self, pid: int) -> str | None:
+        """The program's file name in lowercase; None (don't touch it) if unknown."""
         try:
             name = self._process_name(pid)
         except Exception as exc:
             self._warn("name", exc)
-            return False
-        return name is not None and name.lower() not in SKIPPED_PROGRAMS
+            return None
+        return name.lower() if name else None
 
-    def _restore(self, saved: dict[str, tuple[float, float]]) -> None:
-        sessions = self._backend.sessions()  # if this fails, everything is kept for later
-        for session in sessions:
-            if session.id not in saved:
+    def _restore(self) -> None:
+        """Put each ducked app back, in every live session with its key, if its level is
+        still one we set. An entry is done once its sessions were seen; one that failed,
+        or whose app isn't playing now, is tried again at the next idle, up to
+        MAX_RESTORE_TRIES times."""
+        live: dict[tuple[str, str], list[Any]] = {}
+        for session in self._backend.sessions():  # if this fails, all is kept for later
+            if session.pid == self._own_pid:
                 continue
-            before, ducked = saved[session.id]
-            try:
-                if abs(session.get() - ducked) <= LEVEL_MATCH:
-                    session.set(before)
-                else:
-                    log.info("An app's volume was changed while ducked: left as it is")
-            except Exception as exc:
-                self._warn("restore", exc)
+            program = self._program(session.pid)
+            if program is not None:
+                live.setdefault((session.id, program), []).append(session)
         with self._lock:
-            for key in saved:  # done, or dropped: the session ended or failed to restore
-                self._saved.pop(key, None)
+            saved = dict(self._saved)
+        done = []
+        for key, entry in saved.items():
+            failed = False
+            for session in live.get(key, []):
+                try:
+                    before = entry.matches(session.get())
+                    if before is not None:
+                        session.set(before)
+                    else:
+                        log.info("%s's volume was changed while ducked: left as it is", key[1])
+                except Exception as exc:
+                    self._warn("restore", exc)
+                    failed = True
+            if key in live and not failed:
+                done.append(key)
+                continue
+            entry.tries += 1
+            if entry.tries >= MAX_RESTORE_TRIES:
+                log.warning("Couldn't put %s's volume back: giving up", key[1])
+                done.append(key)
+        with self._lock:
+            for key in done:
+                if self._saved.get(key) is saved[key]:
+                    del self._saved[key]
+        self._save()
+
+    def _save(self) -> None:
+        """What's ducked, on disk (atomically), so a crash can be undone at the next
+        start; the file is deleted once nothing is. Never fatal."""
+        with self._lock:
+            entries = [
+                {"session": e.session, "program": e.program, "levels": e.levels}
+                for e in self._saved.values()
+            ]
+        try:
+            if not entries:
+                self._state_file.unlink(missing_ok=True)
+                return
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"apps": entries}), encoding="utf-8")
+            os.replace(tmp, self._state_file)
+        except Exception as exc:
+            self._warn("save", exc)
+
+    def _recover(self) -> None:
+        """At startup: apps a crash left ducked are put back (if unchanged), then the file
+        goes. Never fatal."""
+        try:
+            raw = self._state_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            self._warn("recover", exc)
+            return
+        try:
+            loaded = _parse_ducked(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            self._warn("recover", exc)
+            loaded = []
+        with self._lock:
+            for entry in loaded:
+                self._saved.setdefault((entry.session, entry.program), entry)
+        if loaded:
+            log.info("Putting back the volume of %d app(s) left ducked last time", len(loaded))
+        try:
+            if loaded:
+                self._restore()
+            else:
+                self._save()  # nothing usable in it: delete it
+        except Exception as exc:
+            self._warn("recover", exc)
 
     def _warn(self, what: str, exc: Exception) -> None:
         kind = (what, type(exc).__name__)

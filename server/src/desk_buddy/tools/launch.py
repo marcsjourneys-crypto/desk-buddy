@@ -87,10 +87,13 @@ class LaunchTools:
         open_wait: float = OPEN_WAIT_S,
         results: SearchResults | None = None,
         confirmations: Any = None,
+        ducker: Any = None,
     ) -> None:
         """results and confirmations (tools.confirm.Confirmations): both given means
-        open_search_result is offered."""
+        open_search_result is offered. ducker (a ducking.SessionDucker): told after an
+        app or page opened, so what it plays is ducked under CARL's reply."""
         self._guard = guard
+        self._ducker = ducker
         self._results = results
         self._confirmations = confirmations
         self._launcher = launcher
@@ -231,6 +234,7 @@ class LaunchTools:
         except Exception as exc:  # any failure to start it, not only OSError
             log.warning("Couldn't open %s: %s", app.title, exc)
             raise ToolError(APP_FAILED.format(title=app.title)) from exc
+        started(self._ducker)
         return f"Opened {app.title}."
 
     def _open(self, site: Bookmark) -> str:
@@ -240,7 +244,19 @@ class LaunchTools:
         """Open a page in the default browser (open_page). `label` names it in the
         result ("Opened <label>.") and the failure."""
         open_page(url, label, opener=self._opener, wait=self._open_wait)
+        started(self._ducker)
         return f"Opened {label}."
+
+
+def started(ducker: Any) -> None:
+    """Tell the apps ducker (if any) that something may have started playing. Never
+    raises: ducking is best effort."""
+    if ducker is None:
+        return
+    try:
+        ducker.started()
+    except Exception:
+        log.debug("Ducker couldn't be told", exc_info=True)
 
 
 def open_page(
