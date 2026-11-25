@@ -90,6 +90,38 @@ def test_invalid_values_are_rejected(key, value):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
 
 
+def test_computer_control_defaults():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.computer_control is False
+    assert s.spotify_client_id == ""
+    assert s.music_duck is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("on", True), ("ON", True), ("true", True), ("off", False), ("False", False)],
+)
+def test_on_off_switches_are_read(raw, expected):
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k", "COMPUTER_CONTROL": raw, "MUSIC_DUCK": raw},
+    )
+    assert (s.computer_control, s.music_duck) == (expected, expected)
+
+
+@pytest.mark.parametrize("key", ["COMPUTER_CONTROL", "MUSIC_DUCK"])
+def test_a_bad_switch_value_is_a_clear_error(key):
+    with pytest.raises(ConfigError, match=f"{key} must be on or off"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: "maybe"})
+
+
+def test_spotify_client_id_is_read():
+    s = load_settings(
+        env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SPOTIFY_CLIENT_ID": "abc123"}
+    )
+    assert s.spotify_client_id == "abc123"
+
+
 def test_voice_defaults():
     s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
     assert s.tts_voice == "en_GB-northern_english_male-medium"

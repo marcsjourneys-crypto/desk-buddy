@@ -34,6 +34,9 @@ ENV_KEYS = (
     "ROBOT_TOKEN",
     "SERVER_HOST",
     "SERVER_PORT",
+    "COMPUTER_CONTROL",
+    "SPOTIFY_CLIENT_ID",
+    "MUSIC_DUCK",
 )
 
 # The provider seam: each value maps to one Chat class in llm.create_chat().
@@ -85,6 +88,9 @@ class Settings:
     robot_token: str = field(default="", repr=False)  # blank = robot link off
     server_host: str = "127.0.0.1"
     server_port: int = 8765
+    computer_control: bool = False  # off by default: COMPUTER_CONTROL=on enables it
+    spotify_client_id: str = ""  # blank = music tools off
+    music_duck: bool = True  # lower Spotify while CARL listens and talks
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -176,7 +182,24 @@ def load_settings(
         robot_token=_robot_token(get),
         server_host=get("SERVER_HOST", Settings.server_host),
         server_port=_port(get, "SERVER_PORT", Settings.server_port),
+        computer_control=_switch(get, "COMPUTER_CONTROL", Settings.computer_control),
+        spotify_client_id=get("SPOTIFY_CLIENT_ID", ""),
+        music_duck=_switch(get, "MUSIC_DUCK", Settings.music_duck),
     )
+
+
+_ON = ("on", "true", "yes", "1")
+_OFF = ("off", "false", "no", "0")
+
+
+def _switch(get: Callable[[str, str], str], key: str, default: bool) -> bool:
+    raw = get(key, "on" if default else "off")
+    value = raw.lower()
+    if value in _ON:
+        return True
+    if value in _OFF:
+        return False
+    raise ConfigError(f"{key} must be on or off, got {raw!r}")
 
 
 def _tts_voice(get: Callable[[str, str], str]) -> str:
