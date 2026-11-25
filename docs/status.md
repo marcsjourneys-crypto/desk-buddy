@@ -2,7 +2,7 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
-## 2026-11-25 — M7 YouTube, media keys and ducking built (check pending)
+## 2026-11-25 — M7 done (YouTube, media keys and ducking)
 
 - **Built:**
   - **YouTube** (`tools/youtube.py`): `play_youtube` (a video, or a channel's newest upload, through the YouTube Data API v3; needs `YOUTUBE_API_KEY`) and `youtube_search` (opens the results page, no key). The key never reaches a log, an error, the dashboard or a tool result (tested with a planted key).
@@ -12,13 +12,13 @@ Where the project stands, so work can resume after a break. Update this when a m
   - Review fixes: sessions known by their stable identifier, active sessions only, Spotify's session skipped only while its API duck runs, failed restores retried, new sessions ducked after a tool opens something, no exception context on YouTube errors.
 - **Plan:** `docs/plans/2026-11-25-m7-youtube-media-volume.md`.
 - **Tests:** 1299 server tests pass (19 integration tests deselected; the new read-only mixer test passes on this PC).
-- **Check by the user (pending):**
+- **Check by the user (passed 2026-11-25):**
   1. Add `YOUTUBE_API_KEY` to `server/.env` and restart. "Play lo-fi beats on YouTube": a video opens and plays.
   2. "Play the latest video from <a channel you like>."
   3. "Search YouTube for bread recipes": the results page opens.
   4. "Pause the video", then "resume it". Then "pause the music" while Spotify plays: Spotify pauses, and the video doesn't toggle.
   5. Ask a question while a YouTube video plays: the video dips while CARL listens and talks, then comes back.
-- **Next:** the user check above, then the servo check or in-page controls.
+- **Next:** local skills (allowlisted scripts by name, spoken yes for powerful ones), a write-only Keys section and first-run setup, the servo check, in-page controls, or M9 expressions.
 
 ## 2026-11-25 — M7 apps and websites done
 
