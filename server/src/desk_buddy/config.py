@@ -53,10 +53,16 @@ PIPER_VOICE_NAME = re.compile(r"[A-Za-z]+_[A-Za-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+"
 MIN_TOKEN_CHARS = 16
 
 
-def default_voices_dir() -> str:
-    """%LOCALAPPDATA%\\desk-buddy\\voices (falls back to the usual place under home)."""
+def app_data_dir() -> Path:
+    """%LOCALAPPDATA%\\desk-buddy (falls back to the usual place under home): downloads and
+    logins that don't belong in the repo."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return str(Path(base) / "desk-buddy" / "voices")
+    return Path(base) / "desk-buddy"
+
+
+def default_voices_dir() -> str:
+    """%LOCALAPPDATA%\\desk-buddy\\voices."""
+    return str(app_data_dir() / "voices")
 
 
 _INLINE_COMMENT = re.compile(r"\s#")
