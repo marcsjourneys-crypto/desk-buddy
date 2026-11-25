@@ -2,6 +2,26 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-24 — M6 robot joins the link done
+
+- **Built (server):**
+  - The PC key (Right Ctrl, in the Buddy window) drives a connected robot's mic, with a 250 ms release delay.
+  - Hardening for the LAN: a per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit and a 128-item send queue that closes with `1011` on overflow.
+  - The LAN IP and the exact robot `server …` command are logged at startup when `SERVER_HOST=0.0.0.0`.
+  - The fake robot streams while Buddy is listening, like the real one.
+  - Speech goes to the robot in 100 ms frames (the ESP32's TCP stack couldn't keep up with 20 ms ones).
+- **Built (firmware, `0.2.0-m6`):**
+  - Settings in NVS over serial (`wifi`, `server`, `token`, `config`, `forget`) and a `net` status command.
+  - A Wi-Fi and WebSocket client (`src/net.cpp`) with its own back-off and a timing-based refusal rule (the library hides close codes).
+  - A mic task that streams DC-blocked 20 ms frames while the state is `listening`, and a playback task fed from a 1 s PSRAM ring.
+  - The eyes follow state and emotion, with new looks (`sad` with tilt; the lead's crescents, `lookaround`, and the animated thinking swirl, surprised burst and `excited` sparkle).
+- **Plan:** `docs/plans/2026-11-24-m6-robot-joins.md` (design: `…-m6-robot-joins-design.md`). Protocol: `docs/protocol.md`.
+- **Tests:** 51 Unity tests pass on the board; 400 server tests pass (13 integration tests deselected).
+- **Voice check by the user, passed:** the robot linked over Wi-Fi; a question through its mic was transcribed correctly; the reply played on its speaker; an interrupt and a reconnect worked. A graceful server stop and a hard kill are both noticed within ~0.5 s (the eyes sleep). Measured from key release: STT 1048 ms for 2.9 s of audio, first token 2577 ms, first audio 2969 ms.
+- **To do by the user:** add the Private-only firewall rule for port 8765 (`docs/protocol.md`). Without it, each connect to a stopped server hangs the robot for about 5 s. A DHCP reservation for the PC is recommended.
+- **Still waiting on hardware:** the servo check (servos on the 5 V supply), servos following `look`, the antenna LED and the touch pad. Their messages stay reserved.
+- **Next:** the servo check, then M7 (PC computer control). Before M7, mark `read_notes` output as untrusted.
+
 ## 2026-11-24 — M5 firmware bring-up (servo check pending)
 
 - **Built** (`firmware/`): one ESP32-S3 app with a serial test menu (`help`, `info`, `eyes idle|happy|sleep|blink|test`, `fps`, `tone`, `vol`, `mic`, `rec`/`play`, `servo`).

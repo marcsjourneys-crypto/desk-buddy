@@ -35,8 +35,10 @@ server/                 Python brain (uv-managed, src layout)
     fake_robot.py       fake robot client (tests + voice tool)
   tests/                pytest
 firmware/               ESP32-S3 firmware (PlatformIO, Arduino framework)
-  include/              pins.h + pure-logic headers (ease, eye_model, dsp, servo_math)
-  src/                  main.cpp (serial test menu), eyes, audio, servos
+  include/              pins.h + pure-logic headers (ease, eye_model, dsp, servo_math,
+                        dc_block, ring_buffer, backoff, link_msg, link_policy, looks)
+  src/                  main.cpp (serial menu), net (Wi-Fi + WebSocket link),
+                        settings (NVS), eyes, audio (incl. streaming tasks), servos
   test/                 Unity tests — they run on the board (`pio test`)
   scripts/serial_cmd.py reset the board, send one command, print the output
 docs/                   protocol.md, wiring.md, decisions.md, plans/
@@ -93,13 +95,14 @@ Anyone (or any TV) near the robot can talk to it.
 
 `docs/protocol.md` is the source of truth; keep it in sync with `link/protocol.py` and `server.py`. In short:
 
-- One WebSocket at `/robot`. Text frames = JSON control messages. Binary frames = audio, 16 kHz 16-bit mono PCM in ~20 ms chunks, both ways.
-- The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token, 4002 no valid hello, 4003 replaced by a newer connection (the newest wins).
-- Robot → server: `hello`, `button {action: down|up}`, `touch`, `stats {data}`; `wake` reserved.
-- Server → robot: `welcome`, `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved for M6.
-- While a robot is connected it owns the mic, speaker and button (`DeviceSwitch`); the PC key is ignored. Speech is paced at real time, ~200 ms ahead.
-- Localhost by default (`SERVER_HOST`, `SERVER_PORT`). In M6 the server moves to the LAN with a Private-only firewall rule (exact command in `docs/protocol.md`).
-- Server stays the source of truth for state. Robot is dumb and reconnects automatically.
+- One WebSocket at `/robot`. Text frames = JSON control messages. Binary frames = audio, 16 kHz 16-bit mono PCM: 20 ms frames up (mic), **100 ms frames down** (speech; the ESP32's lwIP can't keep up with 20 ms segments).
+- The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token (or IP blocked), 4002 no valid hello, 4003 replaced by a newer connection (the newest wins), 1011 send-queue overflow. The firmware can't see close codes (library limit), so it infers a refusal from closes < 1 s after hello.
+- Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`; `wake` reserved.
+- Server → robot: `welcome`, `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
+- While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the Buddy window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
+- Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a 128-item send queue.
+- Localhost by default (`SERVER_HOST`, `SERVER_PORT`). For the robot: `SERVER_HOST=0.0.0.0` plus a Private-only firewall rule (exact command in `docs/protocol.md`).
+- Server stays the source of truth for state. Robot is dumb and reconnects automatically (back-off 1 s doubling to 30 s).
 
 ## Hardware (ordered)
 
@@ -113,7 +116,8 @@ Anyone (or any TV) near the robot can talk to it.
 
 ## Firmware constraints
 
-- Stack (decided in M5): pioarduino platform `55.03.312-1` (Arduino core 3.3.12), board `esp32-s3-devkitc1-n16r8`, LovyanGFX 1.2.36, `ESP_I2S` and LEDC from the core. Versions are pinned in `platformio.ini`.
+- Stack (decided in M5): pioarduino platform `55.03.312-1` (Arduino core 3.3.12), board `esp32-s3-devkitc1-n16r8`, LovyanGFX 1.2.36, `ESP_I2S` and LEDC from the core. Added in M6: `links2004/WebSockets@2.7.3` (WebSocket client) and `bblanchon/ArduinoJson@7.4.3`. Versions are pinned in `platformio.ini`.
+- Robot settings (Wi-Fi, server, token) live in NVS, set over the serial menu (`firmware/README.md`); never put them in code, and never print the token or Wi-Fi password.
 - Run `pio` from PowerShell, never Git Bash (ESP-IDF refuses MSYS). Windows setup notes are in `firmware/README.md`.
 - The board's 5V pin gives no USB power (its IN-OUT jumper is open). The amp runs on 3.3 V until the 5 V supply is wired.
 - Do NOT use GPIO 26–37 (SPI flash and octal PSRAM on N16R8; 35–37 are the octal lines).
@@ -131,7 +135,7 @@ Anyone (or any TV) near the robot can talk to it.
 - **M3 – Obsidian dictation.** `take_note` / `read_notes` tools, tests against a temp vault.
 - **M4 – Robot link.** WebSocket server, token auth, `docs/protocol.md`, and a fake-robot Python client for tests.
 - **M5 – Firmware bring-up** (can run in parallel with M1–M4): blink + PSRAM check, one eye, two eyes, mic levels, speaker tone, record/playback loopback, servo sweep with easing.
-- **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state.
+- **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state. (Done 2026-11-24 except the servos following `look` and the antenna LED, which wait for the hardware to be wired.)
 - **M7 – PC computer control.** Spotify search via Web API (free dev key) and playback via `spotify:` URIs / Web API (remote playback control needs Premium), media keys via Win32 `SendInput` (ctypes), allowlisted apps (launched by full exe path, argument lists) and sites, master volume. All safety rules above.
 - **M8 – Dashboard.** Local web page: live state, transcript, last actions, and settings, including:
   - the computer-control switch;
