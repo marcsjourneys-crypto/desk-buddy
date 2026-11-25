@@ -157,6 +157,6 @@ Anyone (or any TV) near the robot can talk to it.
   - the computer-control switch;
   - the vault path and other non-secret settings, which move from `.env` to a settings file the UI edits (secrets stay in `.env`);
   - personality editing (the prompt and canned lines move to an editable file).
-  (Built 2026-11-25: `docs/plans/2026-11-25-m8-dashboard.md`; the user's browser check is pending. In-page controls such as push-to-talk, stop, forget and music buttons come later.)
+  (Done 2026-11-25: `docs/plans/2026-11-25-m8-dashboard.md`; the user's browser check passed. In-page controls such as push-to-talk, stop, forget and music buttons come later.)
 - **M9 – Expression library** (after M6). Design and preview eye expressions in the browser and map them to emotions.
 - **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.
