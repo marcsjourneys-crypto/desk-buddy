@@ -22,8 +22,11 @@ FORGET_PHRASES = frozenset(
 # Put at the start of the user's next message when they cut CARL's reply off.
 INTERRUPTED_NOTE = "(I interrupted you, so I only heard your reply up to that point.)"
 
-_LEADING_FILLERS = frozenset({"hey", "carl", "buddy", "okay", "ok", "please", "so", "um", "uh"})
-_TRAILING_FILLERS = frozenset({"carl", "buddy", "please"})
+# "karl": Whisper often spells the name that way.
+_LEADING_FILLERS = frozenset(
+    {"hey", "carl", "karl", "buddy", "okay", "ok", "please", "so", "um", "uh"}
+)
+_TRAILING_FILLERS = frozenset({"carl", "karl", "buddy", "please"})
 
 
 class Conversation:

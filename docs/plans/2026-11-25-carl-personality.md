@@ -20,8 +20,8 @@ The character is renamed **Buddy → CARL-42** ("CARL" for short; Cognitive Assi
 | Constant | Emotion | Text | Rule |
 |---|---|---|---|
 | `GREETING` | happy | Don't panic. CARL is online. | Spoken once at startup, through whichever device is active. Also spoken when a robot connects, unless the greeting was spoken in the last 60 s, so a robot linking right after startup doesn't get a double greeting. |
-| `FAREWELL` | happy | So long, and thanks for all the fish. | Spoken on shutdown (Ctrl+C) through the active device, before the server and the devices close. It's bounded to 4 s and replaces the logged "Bye". Skipped if speaking fails. |
-| `PONDERING` | thinking | Contemplating life, the universe, and everything. | Spoken if no reply audio has started 4 s after key release (`PONDER_AFTER = 4.0`), at most once every 5 minutes (`PONDER_EVERY = 300`). The real reply plays after it. |
+| `FAREWELL` | happy | So long, and thanks for all the fish. | Spoken on shutdown (Ctrl+C) through the active device, before the server and the devices close. It's bounded to 5 s (a hard cap of 6 s) and replaces the logged "Bye". Skipped if speaking fails. |
+| `PONDERING` | thinking | Contemplating life, the universe, and everything. | Spoken if no reply audio has started 4 s after CARL starts thinking, i.e. after transcription ends (`PONDER_AFTER = 4.0`), at most once every 5 minutes (`PONDER_EVERY = 300`). The real reply plays after it. |
 | `TASK_DONE` | happy | Another mystery of the universe solved. | After a reply whose turn ran at least one successful tool call, with probability 1/4 (`TASK_DONE_CHANCE`, injectable random for tests). It's spoken after the reply. |
 | 42 | — | (prompt guidance) | When CARL genuinely doesn't know, it says so plainly. At most once per conversation it may add that the answer might be 42. |
 
@@ -66,7 +66,7 @@ The rest of the prompt is unchanged: the spoken style, `MAX_SENTENCES`, emotion 
 - **Files:** `loop.py` (a public `say(line)` that speaks a canned line through the active device with its emotion, interruptible and not remembered; reuse the existing canned-line path), `__main__.py`, `server.py` or `link/switch.py` (the robot-connect hook).
 - **Startup:** greet once after `Ready`.
 - **Robot connect:** greet if more than 60 s have passed since the last greeting, injecting a clock for tests. The connect already queues a `reset`, so the greeting must come after the reset has been handled.
-- **Shutdown:** on Ctrl+C, before closing the server and the devices, say `FAREWELL` with a 4 s cap; on timeout or error, carry on shutting down.
+- **Shutdown:** on Ctrl+C, before closing the server and the devices, say `FAREWELL` with a 5 s cap (6 s hard cap); on timeout or error, carry on shutting down.
 - **Tests:**
   - greeting at start;
   - robot-connect dedupe (connect at 10 s → no greeting; at 70 s → greeting);
@@ -77,7 +77,7 @@ The rest of the prompt is unchanged: the spoken style, `MAX_SENTENCES`, emotion 
 ### Task 3: Pondering and task-done lines
 
 - **Files:** `loop.py`, and `llm.py` if the turn result doesn't yet expose "a tool ran successfully".
-- **Pondering:** in a turn, start a timer at key release. If no reply sentence has started playing by `PONDER_AFTER`, and the last pondering line was more than `PONDER_EVERY` ago, speak `PONDERING` (emotion thinking), then continue with the reply. An interrupt cancels it.
+- **Pondering:** in a turn, start a timer when transcription ends (CARL starts thinking). If no reply sentence has started playing by `PONDER_AFTER`, and the last pondering line was more than `PONDER_EVERY` ago, speak `PONDERING` (emotion thinking), then continue with the reply. An interrupt cancels it.
 - **Task done:** after a reply in which at least one tool call succeeded, with `random() < TASK_DONE_CHANCE`, speak `TASK_DONE` after the reply.
 - Both lines are left out of memory and logged as canned lines.
 - **Tests,** with a fake clock and random:

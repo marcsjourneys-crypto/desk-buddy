@@ -23,7 +23,8 @@ from desk_buddy.tts import SapiSynthesizer
 
 log = logging.getLogger("desk_buddy")
 
-FAREWELL_TIMEOUT = 4.0  # seconds the farewell may delay shutdown
+FAREWELL_TIMEOUT = 5.0  # seconds the farewell may play before it is cut off...
+FAREWELL_HARD_CAP = 6.0  # ...and the most it may ever delay shutdown
 RELEASE_DELAY = 0.25  # seconds the robot's mic stays open after the key is released
 WILDCARD_HOSTS = ("", "0.0.0.0", "::")  # listening on every interface: the robot needs the LAN IP
 
@@ -148,11 +149,9 @@ async def _run(settings: Settings) -> None:
 
 async def _say_farewell(orchestrator: Orchestrator) -> None:
     """Bounded twice: farewell() cuts itself off after FAREWELL_TIMEOUT, and this gives up
-    a second later in any case. Any failure is logged; shutdown carries on."""
+    at FAREWELL_HARD_CAP in any case. Any failure is logged; shutdown carries on."""
     try:
-        await asyncio.wait_for(
-            orchestrator.farewell(timeout=FAREWELL_TIMEOUT), FAREWELL_TIMEOUT + 1
-        )
+        await asyncio.wait_for(orchestrator.farewell(timeout=FAREWELL_TIMEOUT), FAREWELL_HARD_CAP)
     except Exception:
         log.warning("Couldn't say farewell", exc_info=True)
 

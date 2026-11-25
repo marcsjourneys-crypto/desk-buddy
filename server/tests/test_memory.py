@@ -58,6 +58,8 @@ def test_max_turns_must_be_positive():
         "Hey Buddy, start over please.",
         "Carl, new topic.",
         "Hey Carl, forget that please.",
+        "Karl, start over.",
+        "Forget that, Karl.",
     ],
 )
 def test_forget_phrases_match(text):
@@ -74,6 +76,7 @@ def test_forget_phrases_match(text):
         "",
         "Buddy",
         "Carl",
+        "Karl",
     ],
 )
 def test_near_misses_do_not_match(text):

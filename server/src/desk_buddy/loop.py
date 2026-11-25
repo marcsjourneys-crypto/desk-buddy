@@ -65,6 +65,9 @@ class _Turn:
     spoken: list[str] = field(default_factory=list)  # sentences that started playing
     failed: bool = False
     complete: bool = False
+    thinking_since: float = 0.0  # perf_counter when transcription ended
+    shown: str | None = None  # the emotion the reply wants on the eyes now
+    pondering: bool = False  # PONDERING is playing: hold the reply's emotion back
 
 
 class Orchestrator:
@@ -148,15 +151,16 @@ class Orchestrator:
     async def shutdown(self) -> None:
         await self._interrupt()
 
-    def say(self, line: Line) -> bool:
+    def say(self, line: Line, on_done: Callable[[], None] | None = None) -> bool:
         """Start speaking a canned line through the active device, with its emotion. It
         runs as a turn, so a key press interrupts it, and it is never remembered. Only
-        when idle: returns False (and says nothing) otherwise. Doesn't wait for the end."""
+        when idle: returns False (and says nothing) otherwise. Doesn't wait for the end;
+        `on_done` runs only if the line played to the end."""
         if self.state is not State.IDLE or (self._turn and not self._turn.done()):
             log.debug("Skipped %r: busy", line.text)
             return False
         self._t0 = time.perf_counter()
-        self._turn = asyncio.create_task(self._say_turn(line))
+        self._turn = asyncio.create_task(self._say_turn(line, on_done))
         return True
 
     async def farewell(self, timeout: float) -> None:
@@ -175,12 +179,17 @@ class Orchestrator:
         if self._greeted_at is not None and now - self._greeted_at < GREET_GAP:
             log.debug("Skipped greeting: greeted %.0f s ago", now - self._greeted_at)
             return
-        if self.say(GREETING):
-            self._greeted_at = now
+        # Counted only once it has played: an interrupted or failed greeting doesn't count.
+        self.say(GREETING, on_done=self._greeted)
 
-    async def _say_turn(self, line: Line) -> None:
+    def _greeted(self) -> None:
+        self._greeted_at = self._clock()
+
+    async def _say_turn(self, line: Line, on_done: Callable[[], None] | None = None) -> None:
         try:
             await self._say(line, self.speaker.current_token())
+            if on_done is not None:
+                on_done()
         except Exception:
             log.exception("Couldn't say %r", line.text)
         finally:
@@ -228,7 +237,7 @@ class Orchestrator:
                 log.info("Memory cleared")
                 await self._say(FORGET_LINE, token)
                 return
-            turn = _Turn(user=text)
+            turn = _Turn(user=text, thinking_since=time.perf_counter())
             tools_before = _tools_succeeded(self.chat)
             queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
@@ -240,7 +249,7 @@ class Orchestrator:
                 and _tools_succeeded(self.chat) > tools_before
                 and self._random() < TASK_DONE_CHANCE
             ):
-                await self._say(TASK_DONE, token)
+                await self._say_extra(TASK_DONE, token)
         except Exception:
             # A TaskGroup failure arrives as an ExceptionGroup, which is an Exception.
             log.exception("Turn failed")
@@ -289,12 +298,12 @@ class Orchestrator:
         except LLMRefusal:
             log.warning("Claude refused")
             turn.failed = True
-            self._emit_emotion(REFUSAL_LINE.emotion)
+            self._show(turn, REFUSAL_LINE.emotion)
             await speak([REFUSAL_LINE.text])
         except LLMError as exc:
             log.warning("LLM error: %s", exc)
             turn.failed = True
-            self._emit_emotion(ERROR_LINE.emotion)
+            self._show(turn, ERROR_LINE.emotion)
             await speak([ERROR_LINE.text])
         log.info("CARL [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
         await queue.put(None)
@@ -302,6 +311,12 @@ class Orchestrator:
     def _note_emotion(self, turn: _Turn, emotion: str | None) -> None:
         if emotion and turn.emotion is None:
             turn.emotion = emotion
+            self._show(turn, emotion)
+
+    def _show(self, turn: _Turn, emotion: str) -> None:
+        """Send the reply's emotion, unless PONDERING is playing: then it's sent after."""
+        turn.shown = emotion
+        if not turn.pondering:
             self._emit_emotion(emotion)
 
     def _emit_emotion(self, emotion: str) -> None:
@@ -316,6 +331,15 @@ class Orchestrator:
         await queue.put(None)
         await self._consume(queue, token, [])
 
+    async def _say_extra(self, line: Line, token: int) -> None:
+        """A canned line on top of a reply (PONDERING, TASK_DONE). If it fails, it's
+        skipped with a warning: it must never cost the real reply. A cancel (interrupt)
+        still propagates."""
+        try:
+            await self._say(line, token)
+        except Exception as exc:
+            log.warning("Skipped %r: %s", line.text, exc)
+
     async def _enqueue(self, sentence: str, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         pcm = await asyncio.to_thread(self.synthesizer.synthesize, sentence)
         await queue.put((sentence, pcm))
@@ -323,15 +347,17 @@ class Orchestrator:
     async def _consume_reply(
         self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None], token: int
     ) -> None:
-        """Play the reply. If no sentence is ready PONDER_AFTER seconds after key release,
-        say PONDERING first (at most once every PONDER_EVERY seconds)."""
-        wait = PONDER_AFTER - (time.perf_counter() - self._t0)
+        """Play the reply. If no sentence is ready PONDER_AFTER seconds after CARL started
+        thinking (transcription ended), say PONDERING first (at most once every
+        PONDER_EVERY seconds)."""
+        wait = PONDER_AFTER - (time.perf_counter() - turn.thinking_since)
         try:
             first = await asyncio.wait_for(queue.get(), max(wait, 0))
         except TimeoutError:
             await self._ponder(turn, token)
             first = await queue.get()
         if first is not None:
+            log.info("First audio %.0f ms", self._ms())  # the reply's, not a canned line's
             await self._play(first, token, turn.spoken)
             await self._consume(queue, token, turn.spoken)
 
@@ -340,9 +366,13 @@ class Orchestrator:
         if self._pondered_at is not None and now - self._pondered_at < PONDER_EVERY:
             return
         self._pondered_at = now
-        await self._say(PONDERING, token)
-        if turn.emotion:  # the reply's mood had already arrived: show it again
-            self._emit_emotion(turn.emotion)
+        turn.pondering = True
+        try:
+            await self._say_extra(PONDERING, token)
+        finally:
+            turn.pondering = False
+        if turn.shown:  # the reply's emotion, held back (or covered) by the line
+            self._emit_emotion(turn.shown)
 
     async def _consume(
         self, queue: asyncio.Queue[tuple[str, bytes] | None], token: int, spoken: list[str]
@@ -352,9 +382,7 @@ class Orchestrator:
 
     async def _play(self, item: tuple[str, bytes], token: int, spoken: list[str]) -> None:
         sentence, pcm = item
-        if self.state is not State.SPEAKING:
-            log.info("First audio %.0f ms", self._ms())
-            self._set_state(State.SPEAKING)
+        self._set_state(State.SPEAKING)
         spoken.append(sentence)  # before play: an interrupt mid-sentence still counts it
         await asyncio.to_thread(self.speaker.play, pcm, token)
 

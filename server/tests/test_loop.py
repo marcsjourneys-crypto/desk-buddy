@@ -546,6 +546,42 @@ def test_greet_event_greets_at_start_then_dedupes_within_a_minute():
     asyncio.run(scenario())
 
 
+def test_an_interrupted_greeting_does_not_count():
+    clock = FakeClock(0.0)
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(clock=clock, speaker=speaker)
+
+    async def scenario():
+        await orch.handle("greet")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")  # cut off
+        await orch.handle("reset")
+        speaker.block = False
+        clock.now = 5.0
+        await orch.handle("greet")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert speaker.played == [GREETING.text, GREETING.text]
+
+
+def test_a_failed_greeting_does_not_count():
+    clock = FakeClock(0.0)
+    synth = FailingSynth(GREETING.text)
+    orch, parts, _ = make(clock=clock, synthesizer=synth)
+
+    async def scenario():
+        await orch.handle("greet")
+        await orch.wait_idle()
+        synth.text = None  # the voice works again
+        clock.now = 5.0
+        await orch.handle("greet")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["speaker"].played == [GREETING.text]
+
+
 def test_a_skipped_greeting_does_not_count():
     clock = FakeClock(0.0)
     orch, parts, _ = make(clock=clock)
@@ -666,10 +702,117 @@ def test_pondering_fires_for_a_slow_reply_and_not_twice_within_five_minutes(quic
 
 
 def test_pondering_does_not_fire_if_audio_starts_in_time(monkeypatch):
-    monkeypatch.setattr(loop_module, "PONDER_AFTER", 0.5)
-    orch, parts, _ = make(chat=DelayedChat(delay=0.1))
+    monkeypatch.setattr(loop_module, "PONDER_AFTER", 1.0)
+    orch, parts, _ = make(chat=DelayedChat(delay=0.0))
     asyncio.run(talk(orch))
     assert parts["speaker"].played == ["Done."]
+
+
+class SlowTranscriber(FakeTranscriber):
+    def __init__(self, seconds):
+        super().__init__()
+        self.seconds = seconds
+
+    def transcribe(self, pcm):
+        time.sleep(self.seconds)  # runs in a worker thread
+        return super().transcribe(pcm)
+
+
+def test_pondering_counts_from_the_end_of_transcription(monkeypatch):
+    monkeypatch.setattr(loop_module, "PONDER_AFTER", 0.5)
+    # Key release to reply is 0.65 s, but CARL only started thinking 0.05 s before it.
+    orch, parts, _ = make(transcriber=SlowTranscriber(0.6), chat=DelayedChat(delay=0.05))
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Done."]
+
+
+async def until(condition, timeout=2.0):
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.005)
+
+
+def test_the_reply_emotion_waits_until_the_pondering_line_ends(quick_ponder):
+    speaker = FakeSpeaker(block=True)
+    orch, parts, _ = make(chat=DelayedChat(delay=0.3), speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        await until(lambda: speaker.played == [PONDERING.text])
+        await asyncio.sleep(0.3)  # the reply (and its [happy]) arrives meanwhile
+        assert parts["emotions"] == ["thinking"]  # the eyes stay on the line's emotion
+        speaker.block = False
+        speaker._release.set()
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["emotions"] == ["thinking", "happy"]
+    assert speaker.played == [PONDERING.text, "Done."]
+
+
+def test_first_audio_is_logged_for_the_reply_only(quick_ponder, caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.loop")
+    orch, _, _ = make(chat=DelayedChat(delay=0.4))
+
+    async def scenario():
+        orch.say(GREETING)
+        await orch.wait_idle()
+        assert not [m for m in caplog.messages if m.startswith("First audio")]
+        await talk(orch)  # pondering first, then the reply
+
+    asyncio.run(scenario())
+    assert len([m for m in caplog.messages if m.startswith("First audio")]) == 1
+
+
+class FailingSynth(FakeSynth):
+    """Fails only on one text, like a voice that chokes on one canned line."""
+
+    def __init__(self, text):
+        self.text = text
+
+    def synthesize(self, text):
+        if text == self.text:
+            raise OSError("voice failed")
+        return super().synthesize(text)
+
+
+def test_a_failing_pondering_line_never_costs_the_reply(quick_ponder):
+    orch, parts, _ = make(chat=DelayedChat(delay=0.4), synthesizer=FailingSynth(PONDERING.text))
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Done."]
+    assert remembered(orch).endswith("[happy] Done.")
+    assert orch.state is State.IDLE
+
+
+def test_a_failing_task_done_line_never_costs_the_reply():
+    orch, parts, _ = make(
+        chat=DelayedChat(tools=1), synthesizer=FailingSynth(TASK_DONE.text), random=lambda: 0.0
+    )
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Done."]
+    assert remembered(orch).endswith("[happy] Done.")
+    assert orch.conversation.user_message("next") == "next"  # not marked as cut off
+
+
+def test_an_interrupt_during_task_done_keeps_the_reply_complete():
+    class BlockOnTaskDone(FakeSpeaker):
+        def play(self, pcm, token):
+            self.block = pcm.decode() == TASK_DONE.text
+            super().play(pcm, token)
+
+    speaker = BlockOnTaskDone()
+    orch, _, _ = make(chat=DelayedChat(tools=1), speaker=speaker, random=lambda: 0.0)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        await until(lambda: speaker.played == ["Done.", TASK_DONE.text])
+        await orch.handle("down")
+
+    asyncio.run(scenario())
+    assert remembered(orch).endswith("[happy] Done.")
+    assert orch.conversation.user_message("next") == "next"  # heard in full
 
 
 def test_an_interrupt_during_pondering_cancels_the_reply(quick_ponder):

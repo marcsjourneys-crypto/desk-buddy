@@ -169,16 +169,18 @@ def test_ready_queues_the_startup_greeting(fakes, calls):
     assert queued == ["greet"]
 
 
-def test_farewell_is_bounded_to_four_seconds_and_replaces_bye(fakes, calls, caplog):
+def test_farewell_is_bounded_to_five_seconds_and_replaces_bye(fakes, calls, caplog):
     caplog.set_level(logging.INFO)
     entry.main()
-    assert ("farewell timeout", 4.0) in calls
+    assert ("farewell timeout", 5.0) in calls
+    assert entry.FAREWELL_HARD_CAP == 6.0
     assert "Bye" not in caplog.messages
 
 
 @pytest.mark.parametrize("failure", ["hang", "raise"])
 def test_a_failed_farewell_does_not_block_shutdown(monkeypatch, fakes, calls, failure):
     monkeypatch.setattr(entry, "FAREWELL_TIMEOUT", 0.05)
+    monkeypatch.setattr(entry, "FAREWELL_HARD_CAP", 0.1)
     orchestrator_class = entry.Orchestrator
 
     class BadFarewell(orchestrator_class):
