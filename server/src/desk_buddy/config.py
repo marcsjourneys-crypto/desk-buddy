@@ -42,6 +42,8 @@ ENV_KEYS = (
     "SPOTIFY_CLIENT_ID",
     "MUSIC_DUCK",
     "DASHBOARD_PORT",
+    "WEB_SEARCH",
+    "WEB_SEARCH_MAX",
 )
 
 # The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
@@ -62,6 +64,8 @@ DASHBOARD_KEYS = frozenset(
         "STT_DEVICE",
         "STT_COMPUTE_TYPE",
         "PTT_KEY",
+        "WEB_SEARCH",
+        "WEB_SEARCH_MAX",
     }
 )
 
@@ -75,6 +79,7 @@ _STT_MODEL = re.compile(r"[A-Za-z0-9._/-]+")
 _LLM_MODEL = re.compile(r"[\w.:-]+")
 MAX_SENTENCES = 10
 MAX_HISTORY = 50
+MAX_WEB_SEARCHES = 5  # per question
 TTS_ENGINES = ("sapi", "piper")
 MIN_TTS_SPEED, MAX_TTS_SPEED = 0.5, 2.0
 # A Piper voice name: <language>_<REGION>-<name>-<quality>, e.g.
@@ -129,6 +134,8 @@ class Settings:
     spotify_client_id: str = ""  # blank = music tools off
     music_duck: bool = True  # lower Spotify while CARL listens and talks
     dashboard_port: int = 8766  # the dashboard, on 127.0.0.1 only
+    web_search: bool = True  # Anthropic's web search tool (runs on Anthropic's side)
+    web_search_max: int = 2  # searches per question, 1-MAX_WEB_SEARCHES
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -297,6 +304,10 @@ def _load(
         spotify_client_id=get("SPOTIFY_CLIENT_ID", ""),
         music_duck=_switch(get, "MUSIC_DUCK", Settings.music_duck),
         dashboard_port=_port(get, "DASHBOARD_PORT", Settings.dashboard_port),
+        web_search=_switch(get, "WEB_SEARCH", Settings.web_search),
+        web_search_max=_int_between(
+            get, "WEB_SEARCH_MAX", Settings.web_search_max, 1, MAX_WEB_SEARCHES
+        ),
     )
 
 

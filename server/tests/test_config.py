@@ -242,6 +242,47 @@ def test_a_bad_switch_value_is_a_clear_error(key):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: "maybe"})
 
 
+def test_web_search_defaults():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert (s.web_search, s.web_search_max) == (True, 2)
+
+
+def test_web_search_settings_are_read(tmp_path):
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k", "WEB_SEARCH": "off", "WEB_SEARCH_MAX": "5"},
+    )
+    assert (s.web_search, s.web_search_max) == (False, 5)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("WEB_SEARCH", "maybe"),
+        ("WEB_SEARCH_MAX", "0"),
+        ("WEB_SEARCH_MAX", "6"),
+        ("WEB_SEARCH_MAX", "two"),
+        ("WEB_SEARCH_MAX", "1.5"),
+    ],
+)
+def test_bad_web_search_values_are_clear_errors(key, value):
+    with pytest.raises(ConfigError, match=key):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
+
+
+def test_web_search_dashboard_wins_over_env(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_API_KEY=k\nWEB_SEARCH=off\nWEB_SEARCH_MAX=4\n")
+    s = load_settings(env_path=env, environ={})
+    assert (s.web_search, s.web_search_max) == (False, 4)
+    s = load_settings(
+        env_path=env, environ={}, dashboard={"WEB_SEARCH": "on", "WEB_SEARCH_MAX": "1"}
+    )
+    assert (s.web_search, s.web_search_max) == (True, 1)
+    s = load_settings(env_path=env, environ={}, dashboard={"WEB_SEARCH": "", "WEB_SEARCH_MAX": ""})
+    assert (s.web_search, s.web_search_max) == (True, 2)  # blank on the dashboard: the default
+
+
 def test_spotify_client_id_is_read():
     s = load_settings(
         env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SPOTIFY_CLIENT_ID": "abc123"}

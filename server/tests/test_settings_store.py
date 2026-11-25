@@ -50,6 +50,19 @@ def test_the_view_shows_value_source_and_when_it_applies(store):
     assert [e["key"] for e in store.view()] == [e.key for e in EDITABLE]
 
 
+def test_web_search_is_its_own_group_and_applies_at_the_next_question(store):
+    switch, most = entry(store, "WEB_SEARCH"), entry(store, "WEB_SEARCH_MAX")
+    assert (switch["group"], switch["kind"], switch["value"]) == ("Web", "switch", True)
+    assert (most["group"], most["kind"], most["value"]) == ("Web", "int", 2)
+    assert switch["applies"] == most["applies"] == "next question"
+    settings, errors = store.update({"WEB_SEARCH": False, "WEB_SEARCH_MAX": 3})
+    assert errors == {}
+    assert (settings.web_search, settings.web_search_max) == (False, 3)
+    assert entry(store, "WEB_SEARCH")["source"] == "dashboard"
+    settings, errors = store.update({"WEB_SEARCH_MAX": 9})
+    assert settings is None and "WEB_SEARCH_MAX" in errors
+
+
 def test_the_view_never_holds_a_secret(store):
     text = json.dumps(store.view())
     for secret in (SECRET_KEY, SECRET_TOKEN, SECRET_SPOTIFY):

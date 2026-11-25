@@ -223,6 +223,8 @@ _CHAT_SETTINGS = (
     "obsidian_vault_path",
     "obsidian_daily_folder",
     "obsidian_ideas_folder",
+    "web_search",
+    "web_search_max",
 )
 _STT_KEYS = ("STT_MODEL", "STT_DEVICE", "STT_COMPUTE_TYPE")
 

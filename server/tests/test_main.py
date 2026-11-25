@@ -502,6 +502,31 @@ def test_a_settings_change_that_doesnt_touch_the_chat_doesnt_rebuild_it(monkeypa
     assert len(chats) == 1
 
 
+@pytest.mark.parametrize(
+    "change", [{"web_search": False}, {"web_search_max": 5}], ids=["switch", "max"]
+)
+def test_web_search_settings_rebuild_the_chat_at_the_next_question(
+    monkeypatch, fakes, calls, change
+):
+    lives, chats = [], []
+
+    class SpyLive(entry.LiveSettings):
+        def __init__(self, settings):
+            super().__init__(settings)
+            lives.append(self)
+
+    monkeypatch.setattr(entry, "LiveSettings", SpyLive)
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None, **_: chats.append(s) or object()
+    )
+    entry.main()
+    new = Settings(anthropic_api_key="k", **change)
+    lives[0].propose(new)
+    assert len(chats) == 1  # not mid-question
+    orchestrator_kwargs(calls)["on_question"]()
+    assert len(chats) == 2 and chats[-1] is new
+
+
 def orchestrator_kwargs(calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     return kwargs
