@@ -84,6 +84,19 @@ struct Step {
 // docs/look around.png: small rings, crescents left, crescents right, back to normal.
 constexpr Step kLookAround[] = {
     {"small", 700}, {"left", 1100}, {"right", 1100}, {"small", 600}, {"idle", 0}};
+// Animated shapes that aren't lids (docs/thinking.png, surprised.png, excited.png). They
+// redraw every frame, so they live outside the Params model. Switching to or from one hides
+// the jump behind a blink, and the shape grows in from the centre.
+enum class Special : uint8_t { None, Thinking, Surprised, Excited };
+Special special = Special::None;
+Special pendingSpecial = Special::None;
+bool switchPending = false;
+uint32_t switchAt = 0;      // when pendingSpecial takes over (the middle of the blink)
+uint32_t specialStart = 0;  // animation clock
+uint32_t lastSpecialFrame = 0;
+constexpr uint32_t kSpecialFrameMs = 33;  // ~30 fps is plenty for these
+constexpr uint32_t kGrowMs = 250;
+
 const Step* sequence = nullptr;
 size_t sequenceLen = 0;
 size_t sequenceStep = 0;
@@ -192,6 +205,101 @@ void drawTest() {
 
 bool apply(const char* name, uint32_t now);  // shows one look; defined below
 
+// --- Special shapes, drawn in sprite coordinates around the centre, scaled by k ---
+
+constexpr float kC = kSpriteCenter;
+
+void ring(float r, float th) {
+  sprite.fillSmoothCircle(kC, kC, r, kCyan);
+  sprite.fillSmoothCircle(kC, kC, r - th, kBlack);
+}
+
+// A black wedge from the centre, angle a (radians), width w, reaching past radius r.
+void gap(float a, float w, float r) {
+  const float reach = (r + 2) / cosf(w / 2);
+  sprite.fillTriangle(kC, kC, kC + reach * cosf(a - w / 2), kC + reach * sinf(a - w / 2),
+                      kC + reach * cosf(a + w / 2), kC + reach * sinf(a + w / 2), kBlack);
+}
+
+// Two rings with gaps spinning opposite ways: the swirl.
+void drawThinking(uint32_t t, float k) {
+  const float phase = 2 * PI * static_cast<float>(t % 1600) / 1600;
+  const float outer = 70 * k;
+  ring(outer, 12 * k);
+  gap(phase, 0.55f, outer);
+  gap(phase + PI, 0.55f, outer);
+  const float inner = 36 * k;
+  ring(inner, 10 * k);
+  gap(-1.4f * phase + 0.7f, 0.7f, inner);
+}
+
+// A small ring with eight pulsing rays: the burst.
+void drawSurprised(uint32_t t, float k) {
+  ring(30 * k, 9 * k);
+  const float pulse = 3 * sinf(2 * PI * static_cast<float>(t % 900) / 900);
+  for (int i = 0; i < 8; i++) {
+    const float a = i * PI / 4;
+    const float r0 = 46 * k + pulse;
+    const float r1 = 60 * k + pulse;
+    sprite.drawWedgeLine(kC + r0 * cosf(a), kC + r0 * sinf(a), kC + r1 * cosf(a),
+                         kC + r1 * sinf(a), 3 * k, 3 * k, kCyan);
+  }
+}
+
+// A four-point sparkle (a superellipse star with concave sides) that twinkles.
+void drawExcited(uint32_t t, float k) {
+  const float s = k * (1 + 0.07f * sinf(2 * PI * static_cast<float>(t % 700) / 700));
+  const float rot = 0.12f * sinf(2 * PI * static_cast<float>(t % 1900) / 1900);
+  const float r = 66 * s;
+  constexpr int kPoints = 40;
+  constexpr float kPinch = 2.2f;  // >1 bends the sides inwards; higher = thinner points
+  auto point = [&](int i, float* x, float* y) {
+    const float a = 2 * PI * i / kPoints;
+    const float c = cosf(a), sn = sinf(a);
+    const float px = r * copysignf(powf(fabsf(c), kPinch), c);
+    const float py = r * copysignf(powf(fabsf(sn), kPinch), sn);
+    *x = kC + px * cosf(rot) - py * sinf(rot);
+    *y = kC + px * sinf(rot) + py * cosf(rot);
+  };
+  float x0, y0;
+  point(0, &x0, &y0);
+  for (int i = 1; i <= kPoints; i++) {
+    float x1, y1;
+    point(i, &x1, &y1);
+    sprite.fillTriangle(kC, kC, x0, y0, x1, y1, kCyan);
+    x0 = x1;
+    y0 = y1;
+  }
+}
+
+void drawSpecial(uint32_t now) {
+  const uint32_t t = now - specialStart;
+  const float k = 0.2f + 0.8f * ease::inOutCubic(static_cast<float>(t) / kGrowMs);
+  sprite.fillScreen(kBlack);
+  switch (special) {
+    case Special::Thinking: drawThinking(t, k); break;
+    case Special::Surprised: drawSurprised(t, k); break;
+    case Special::Excited: drawExcited(t, k); break;
+    case Special::None: break;
+  }
+  spriteValid = false;  // the sprite no longer holds a lid drawing
+  for (auto* panel : panels) sprite.pushSprite(panel, kSpriteOffset, kSpriteOffset);
+}
+
+// Starts a special shape: blink the lids shut, then swap at the blink's midpoint.
+void startSpecial(Special kind, uint32_t now) {
+  autoBlink = false;
+  drifting = false;
+  if (special == Special::None) {
+    blinker.blinkNow(now);
+    switchAt = now + eye::Blinker::kMs / 2;
+  } else {
+    switchAt = now;  // from one special to another: just regrow
+  }
+  pendingSpecial = kind;
+  switchPending = true;
+}
+
 }  // namespace
 
 namespace eyes {
@@ -250,6 +358,15 @@ bool apply(const char* name, uint32_t now) {
     testMode = true;
     return true;
   }
+  if (!strcmp(name, "thinking") || !strcmp(name, "surprised") || !strcmp(name, "excited")) {
+    if (testMode) clearPanels();
+    testMode = false;
+    startSpecial(!strcmp(name, "thinking")    ? Special::Thinking
+                 : !strcmp(name, "surprised") ? Special::Surprised
+                                              : Special::Excited,
+                 now);
+    return true;
+  }
   namespace ps = eye::presets;
   eye::Params left, right;
   uint32_t ms = 250;
@@ -262,9 +379,6 @@ bool apply(const char* name, uint32_t now) {
     left = right = ps::sleep();
     ms = 600;
     blinks = false;
-  } else if (!strcmp(name, "surprised")) {
-    left = right = ps::surprised();
-    ms = 150;
   } else if (!strcmp(name, "left")) {  // as you look at the robot; crescents
     left = right = ps::lookLeft();
     ms = 300;
@@ -298,7 +412,7 @@ bool apply(const char* name, uint32_t now) {
   } else if (!strcmp(name, "listening")) {
     left = right = ps::listening();
     ms = 150;
-  } else if (!strcmp(name, "thinking")) {
+  } else if (!strcmp(name, "ponder")) {  // looking up with a slow left-right drift
     left = right = ps::thinking();
     ms = 400;
   } else {
@@ -306,14 +420,26 @@ bool apply(const char* name, uint32_t now) {
   }
   if (testMode) clearPanels();  // the test ring is outside the sprite
   testMode = false;
+  bool reopening = false;
+  if (special != Special::None || switchPending) {
+    // Leaving a special shape: lids appear mid-blink (shut) and open into the new look.
+    special = Special::None;
+    switchPending = false;
+    blinker.blinkNow(now - eye::Blinker::kMs / 2);
+    tweens[0].set(left);  // no blend from the old lids
+    tweens[1].set(right);
+    reopening = true;
+  }
   if (drifting) {  // carry on from where the drift is, so leaving it doesn't jump
     for (int i = 0; i < 2; i++) tweens[i].set(current(i, now));
   }
-  drifting = !strcmp(name, "thinking");
+  drifting = !strcmp(name, "ponder");
   driftStart = now;
   autoBlink = blinks;
   // A fresh schedule: after a long sleep, the old one could be stale enough to wrap.
-  if (blinks) blinker.schedule(now, 3000 + esp_random() % 3000);
+  // (Not while reopening from a special shape: that would cancel the opening blink; update()
+  // schedules the next one once it's over.)
+  if (blinks && !reopening) blinker.schedule(now, 3000 + esp_random() % 3000);
   dirty = true;
   tweens[0].to(left, now, ms);
   tweens[1].to(right, now, ms);
@@ -336,6 +462,20 @@ namespace eyes {
 void update(uint32_t now) {
   if (!ready || testMode) return;
   stepSequence(now);
+  if (switchPending && static_cast<int32_t>(now - switchAt) >= 0) {
+    special = pendingSpecial;
+    switchPending = false;
+    specialStart = now;
+    dirty = true;
+  }
+  if (special != Special::None) {
+    if (dirty || now - lastSpecialFrame >= kSpecialFrameMs) {
+      drawSpecial(now);
+      lastSpecialFrame = now;
+      dirty = false;
+    }
+    return;
+  }
   if (autoBlink && blinker.finished(now)) blinker.schedule(now, 3000 + esp_random() % 3000);
   const float b = blinker.amount(now);
   for (int i = 0; i < 2; i++) {
