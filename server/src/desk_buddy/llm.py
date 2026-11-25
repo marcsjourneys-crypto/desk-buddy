@@ -272,4 +272,5 @@ def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Pers
         notes=tools is not None and "take_note" in tools,
         music=tools is not None and "play_music" in tools,
         character=personality.character,
+        about=personality.about,
     )

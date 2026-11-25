@@ -1,7 +1,8 @@
 """CARL-42's character: the system prompt and the canned lines spoken without Claude.
 
-The character paragraph and the signature lines are editable on the dashboard
-(personality_store); the rest of the prompt is locked here and always included: the
+The character paragraph, the signature lines and the About-you profile are editable on
+the dashboard (personality_store); the rest of the prompt is locked here and always
+included: the
 spoken style, emotion tags, the interruption and action notes, the untrusted-data rule,
 and the notes and music instructions.
 """
@@ -62,12 +63,39 @@ DEFAULT_CHARACTER = (
 )
 
 
+ABOUT_FIELDS = ("name", "city", "region", "country", "notes")
+LOCATION_FIELDS = ("city", "region", "country")
+
+
+@dataclass(frozen=True)
+class About:
+    """What the user tells CARL about themselves on the dashboard. Every field is
+    optional: blank means it's left out. `country` is an ISO 3166-1 alpha-2 code."""
+
+    name: str = ""
+    city: str = ""
+    region: str = ""
+    country: str = ""
+    notes: str = ""
+
+    @property
+    def location(self) -> dict[str, str]:
+        """The filled-in parts of the location, {"city", "region", "country"} (an empty
+        dict when none is set): what web search's approximate user_location takes."""
+        return {f: getattr(self, f) for f in LOCATION_FIELDS if getattr(self, f)}
+
+    def is_blank(self) -> bool:
+        return not any(getattr(self, f) for f in ABOUT_FIELDS)
+
+
 @dataclass(frozen=True)
 class Personality:
-    """The editable part of CARL: the character paragraph and the signature lines."""
+    """The editable part of CARL: the character paragraph, the signature lines and what
+    the user said about themselves."""
 
     character: str = DEFAULT_CHARACTER
     lines: Mapping[str, Line] = field(default_factory=lambda: dict(DEFAULT_LINES))
+    about: About = field(default_factory=About)
 
     def line(self, name: str) -> Line:
         return self.lines.get(name) or DEFAULT_LINES[name]
@@ -80,10 +108,31 @@ def system_prompt(
     notes: bool = False,
     music: bool = False,
     character: str = DEFAULT_CHARACTER,
+    about: About | None = None,
 ) -> str:
-    """The editable character, then the locked rules. Joined, never formatted: nothing in
-    the character is ever read as a template."""
-    return character.strip() + "\n\n" + _rules(max_sentences, today, notes, music)
+    """The editable character, what the user said about themselves (if anything), then the
+    locked rules. Joined, never formatted: nothing the user wrote is ever read as a
+    template."""
+    parts = [character.strip()]
+    if about is not None and not about.is_blank():
+        parts.append(_about_block(about))
+    parts.append(_rules(max_sentences, today, notes, music))
+    return "\n\n".join(parts)
+
+
+def _about_block(about: About) -> str:
+    lines = [
+        "About the user: background to use naturally when it helps, not something to "
+        "recite. Don't use their name in every reply."
+    ]
+    if about.name:
+        lines.append("Name: " + about.name)
+    place = ", ".join(v for v in (about.city, about.region, about.country) if v)
+    if place:
+        lines.append("Lives in: " + place)
+    if about.notes:
+        lines.append("In their own words: " + about.notes)
+    return "\n".join(lines)
 
 
 def _rules(max_sentences: int, today: date | None, notes: bool, music: bool) -> str:
