@@ -562,6 +562,44 @@ def test_bookmarks_and_apps_become_tools_when_computer_control_is_on(
     assert "Apps and websites: on (0 apps, 1 websites)" in caplog.messages
 
 
+def test_search_results_can_be_opened_with_computer_control_and_web_search(
+    monkeypatch, fakes, calls, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO)
+    _, registries = apps_run(monkeypatch, tmp_path, computer_control=True)
+    assert "open_search_result" in registries[0]
+    assert "Opening search results: on (after a spoken yes)" in caplog.messages
+    kwargs = orchestrator_kwargs(calls)
+    assert kwargs["confirmations"] is not None and kwargs["search_results"] is not None
+
+
+def test_no_search_results_to_open_without_web_search(monkeypatch, fakes, calls, tmp_path):
+    _, registries = apps_run(monkeypatch, tmp_path, computer_control=True, web_search=False)
+    assert "open_search_result" not in registries[0]
+    assert "open_website" in registries[0]
+
+
+def test_the_pending_yes_survives_rebuilds_and_expires_when_computer_control_goes_off(monkeypatch):
+    from desk_buddy.tools.confirm import PendingAction
+
+    seen = []
+    monkeypatch.setattr(
+        entry, "create_chat", lambda *a, search_results=None, **k: seen.append(search_results)
+    )
+    on = Settings(anthropic_api_key="k", computer_control=True)
+    off = Settings(anthropic_api_key="k", computer_control=False)
+    brain = entry.Brain(on, bus=entry.EventBus())
+    confirmations, results = brain.confirmations, brain.search_results
+    brain.on_settings(on, Settings(anthropic_api_key="k", computer_control=True, max_sentences=5))
+    assert brain.confirmations is confirmations and brain.search_results is results
+    assert seen == [results, results]  # every chat feeds the same results
+    ran = []
+    confirmations.propose(PendingAction("t", "{}", "{}", "x", lambda: ran.append(1) or "ok"))
+    brain.on_settings_now(on, off)
+    assert confirmations.pending is None
+    assert confirmations.answer("yes") is None and ran == []
+
+
 def test_apps_and_websites_are_off_without_computer_control(
     monkeypatch, fakes, calls, tmp_path, caplog
 ):

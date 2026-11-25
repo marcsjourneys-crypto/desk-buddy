@@ -744,6 +744,25 @@ def test_create_chat_shows_searches_on_the_bus(search_allowed):
     assert bus.events[0]["result"] == "1 result: T (s.example)"
 
 
+def test_every_result_address_is_kept_on_the_server_side_only(search_allowed):
+    from desk_buddy.tools.urls import SearchResults
+
+    bus, results = RecordingBus(), SearchResults()
+    many = [(f"T{i}", f"https://site{i}.example/page?id={i}") for i in range(5)]
+    content = [search_use(), search_result(results=many), text_block("ok")]
+    chat = create_chat(Settings(anthropic_api_key="k"), bus=bus, search_results=results)
+    chat._client = FakeClient(FakeStream(["ok"], content=content))
+    collect(chat, "news?")
+    (search,) = chat.searches
+    assert search.urls == tuple(u for _, u in many)  # all of them, not only the 3 shown
+    assert all(u in results for _, u in many)
+    assert "https://" not in str(bus.events) and "page?id" not in str(bus.events)
+    assert "urls" not in repr(search)
+    # Without a bus or results, nothing breaks.
+    quiet = create_chat(Settings(anthropic_api_key="k"))
+    quiet._report(search)
+
+
 def test_a_broken_search_report_never_breaks_the_reply(search_allowed):
     def broken(search):
         raise RuntimeError("dashboard down")

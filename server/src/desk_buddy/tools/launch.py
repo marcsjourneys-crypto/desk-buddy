@@ -11,6 +11,10 @@ and builds the launch itself:
 
 Every call goes through the ActionGuard (computer control, the limits, the log line, the
 dashboard event). Neither needs a spoken "yes".
+
+open_search_result opens a page from CARL's own web search results (this question's or
+the last one's, an exact match, checked with check_url). It needs a spoken "yes": the
+guard counts it, then it waits in Confirmations until the user's next words.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from typing import Any
 
 from desk_buddy.apps_store import AppEntry, Bookmark, check_app_id
 from desk_buddy.tools.registry import Tool, ToolError
-from desk_buddy.tools.urls import check_url
+from desk_buddy.tools.urls import MAX_URL, SearchResults, check_url, site_name
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +39,10 @@ UNKNOWN_SITE = "That isn't one of the websites I may open."
 APP_FAILED = "I couldn't open {title}."
 SITE_FAILED = "I couldn't open {name}."
 BAD_SITE = "That website's address isn't allowed."
+NOT_A_RESULT = (
+    "I can only open a page from this question's or the last question's web search "
+    "results, with its exact address."
+)
 
 
 def launch_app(app_id: str) -> None:
@@ -64,8 +72,14 @@ class LaunchTools:
         launcher: Callable[[str], None] = launch_app,
         opener: Callable[[str], None] = open_url,
         open_wait: float = OPEN_WAIT_S,
+        results: SearchResults | None = None,
+        confirmations: Any = None,
     ) -> None:
+        """results and confirmations (tools.confirm.Confirmations): both given means
+        open_search_result is offered."""
         self._guard = guard
+        self._results = results
+        self._confirmations = confirmations
         self._launcher = launcher
         self._opener = opener
         self._open_wait = open_wait
@@ -99,6 +113,27 @@ class LaunchTools:
             raise ToolError(UNKNOWN_SITE)
         return self._guard.run("open_website", {"name": site.name}, lambda: self._open(site))
 
+    def open_search_result(self, url: str) -> str:
+        if self._results is None or self._confirmations is None or url not in self._results:
+            raise ToolError(NOT_A_RESULT)
+        try:
+            check_url(url)
+        except ValueError as exc:
+            raise ToolError(BAD_SITE) from exc
+        label = f"the page on {site_name(url)}"
+        return self._guard.run_after_yes(
+            "open_search_result",
+            {"url": url},
+            lambda: self._open_url(url, label),
+            confirmations=self._confirmations,
+            description=label,
+            public_args={"site": site_name(url)},  # never the full address on the page
+        )
+
+    @property
+    def search_results(self) -> bool:
+        return self._results is not None and self._confirmations is not None
+
     def tools(self) -> list[Tool]:
         tools: list[Tool] = []
         if self._apps:
@@ -125,6 +160,31 @@ class LaunchTools:
                     func=self.open_website,
                 )
             )
+        if self.search_results:
+            tools.append(
+                Tool(
+                    name="open_search_result",
+                    description=(
+                        "Open a page from your own web search results (this question's or "
+                        "the last one's) in the user's browser. url must be a result's "
+                        "exact address. It doesn't open at once: it waits for the user to "
+                        "say yes at their next question."
+                    ),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "maxLength": MAX_URL,
+                                "description": "The exact address of a search result.",
+                            }
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False,
+                    },
+                    func=self.open_search_result,
+                )
+            )
         return tools
 
     # --- the actions (run inside the guard, in a worker thread) ---
@@ -138,8 +198,13 @@ class LaunchTools:
         return f"Opened {app.title}."
 
     def _open(self, site: Bookmark) -> str:
+        return self._open_url(site.url, site.name)
+
+    def _open_url(self, url: str, label: str) -> str:
+        """Open a page in the default browser, after check_url passes again. `label`
+        names it in the result ("Opened <label>.") and the failure."""
         try:
-            url = check_url(site.url)  # again, right before it's opened
+            url = check_url(url)  # again, right before it's opened
         except ValueError as exc:
             raise ToolError(BAD_SITE) from exc
         failed: list[Exception] = []
@@ -156,9 +221,9 @@ class LaunchTools:
         thread.start()
         thread.join(self._open_wait)
         if failed:
-            log.warning("Couldn't open %s: %s", site.name, failed[0])
-            raise ToolError(SITE_FAILED.format(name=site.name)) from failed[0]
-        return f"Opened {site.name}."
+            log.warning("Couldn't open %s: %s", label, failed[0])
+            raise ToolError(SITE_FAILED.format(name=label)) from failed[0]
+        return f"Opened {label}."
 
 
 def _name_schema(names: list[str], description: str) -> dict[str, Any]:

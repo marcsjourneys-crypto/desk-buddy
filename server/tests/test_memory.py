@@ -35,6 +35,16 @@ def test_search_note_queries_are_capped_and_kept_on_one_line():
     assert note.count("(") == 1 and note.count(")") == 1
 
 
+def test_system_notes_go_after_the_user_words_before_the_search_note():
+    c = Conversation()
+    yes = "(System note: you asked and the user said yes; the page on bbc.co.uk was opened.)"
+    c.add("Yes.", "[happy] Done.", notes=[yes], searches=["more news"])
+    assert c.messages()[0]["content"] == f'Yes. {yes} {SEARCH_NOTE_START} "more news")'
+    assert c.messages()[1]["content"] == "[happy] Done."  # never in CARL's reply
+    c.add("No.", None, notes=["(System note: cancelled.)"])  # no reply: not kept
+    assert len(c) == 1
+
+
 def test_a_search_note_follows_the_turn_rules():
     c = Conversation(max_turns=1)
     c.add("weather?", None, searches=["weather"])  # no reply: nothing stored

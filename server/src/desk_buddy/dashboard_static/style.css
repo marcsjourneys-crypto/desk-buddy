@@ -147,6 +147,8 @@ code, pre, textarea, input, select { font-family: "Cascadia Mono", Consolas, ui-
 .action.ok .outcome { color: var(--green); }
 .action.failed .outcome { color: var(--red); }
 .action.refused .outcome { color: var(--brass); }
+.action.waiting .outcome { color: var(--teal); }
+.action.cancelled .outcome, .action.expired .outcome { color: var(--muted); }
 .action .args { display: block; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .action .result { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
 

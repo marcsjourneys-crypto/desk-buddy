@@ -65,7 +65,7 @@ class _Turn:
     interrupted: bool
     rounds: tuple[tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]], ...]
     note: str | None = None  # a cut-off note that went in front of this user message
-    searched: str | None = None  # the search note that goes after this user message
+    searched: str | None = None  # system notes (yes, search) that go after this user message
 
 
 class Conversation:
@@ -85,10 +85,13 @@ class Conversation:
         interrupted: bool = False,
         tool_rounds: Iterable[ToolRound] = (),
         searches: Iterable[str] = (),
+        notes: Iterable[str] = (),
     ) -> None:
         """Keep one exchange. Tool results are capped at MAX_STORED_RESULT characters
         (an untrusted block stays well formed). `searches` are the web search queries
-        the turn ran: they become a note after the user message.
+        the turn ran: they become a note after the user message. `notes` are system notes
+        the user message was sent with (what happened to an action waiting for a yes):
+        kept after it the same way, before the search note.
 
         A turn with no reply is never stored as such (a history must not end a turn on
         tool results, and made-up assistant text would be copied). Its tool calls, which
@@ -106,7 +109,8 @@ class Conversation:
             ]
             return
         note, self._pending = self._cut_off_note(), []
-        self._turns.append(_Turn(user, reply, interrupted, rounds, note, _search_note(searches)))
+        after = [n for n in (*notes, _search_note(searches)) if n]
+        self._turns.append(_Turn(user, reply, interrupted, rounds, note, " ".join(after) or None))
 
     def forget(self) -> None:
         self._turns.clear()

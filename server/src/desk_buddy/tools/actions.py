@@ -42,6 +42,15 @@ def _one_line(text: str, limit: int = LOG_PREVIEW) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _shown(args: Mapping[str, Any]) -> str:
+    """The arguments as one bounded line of JSON (for the log and the dashboard)."""
+    try:
+        shown = json.dumps(dict(args), ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):  # e.g. keys that can't be sorted
+        shown = repr(dict(args))
+    return _one_line(shown, ARGS_PREVIEW)
+
+
 class ActionGuard:
     """Thread-safe: tools run in worker threads. The loop calls new_question() per turn."""
 
@@ -69,12 +78,60 @@ class ActionGuard:
 
     def run(self, name: str, args: Mapping[str, Any], fn: Callable[[], str]) -> str:
         """Run one action if allowed; raise ToolError (which CARL reads out) if not."""
-        try:
-            shown = json.dumps(dict(args), ensure_ascii=False, sort_keys=True, default=str)
-        except (TypeError, ValueError):  # e.g. keys that can't be sorted
-            shown = repr(dict(args))
-        shown = _one_line(shown, ARGS_PREVIEW)
+        shown = _shown(args)
         described = f"{name} {shown}"
+        self._admit(name, described, shown)
+        try:
+            result = fn()
+        except ToolError as exc:
+            log.info("Action: %s -> failed: %s", described, _one_line(str(exc)))
+            self._publish(name, shown, str(exc), "failed")
+            raise
+        except Exception as exc:
+            log.warning("Action: %s -> crashed: %s", described, _one_line(repr(exc)))
+            self._publish(name, shown, "The tool failed unexpectedly.", "failed")
+            raise
+        log.info("Action: %s -> %s", described, _one_line(result))
+        self._publish(name, shown, result, "ok")
+        return result
+
+    def run_after_yes(
+        self,
+        name: str,
+        args: Mapping[str, Any],
+        fn: Callable[[], str],
+        *,
+        confirmations: Any,
+        description: str,
+        public_args: Mapping[str, Any] | None = None,
+    ) -> str:
+        """A powerful action: checked and counted now like run(), but not run. It waits
+        in `confirmations` (tools.confirm.Confirmations) for the user's spoken yes at the
+        next question, and runs then without being counted again (and only if computer
+        control is still on). Returns what Claude is told; raises ToolError if refused.
+        `public_args` replace `args` on the dashboard (the log shows `args`)."""
+        from desk_buddy.tools.confirm import PendingAction  # it imports this module
+
+        shown = _shown(args)
+        public = _shown(public_args) if public_args is not None else shown
+        self._admit(name, f"{name} {shown}", public)
+
+        def confirmed() -> str:
+            if not self.enabled:
+                raise ToolError(OFF_MESSAGE)
+            return fn()
+
+        # First, so a request this one replaces is shown as cancelled before it waits.
+        confirmations.propose(PendingAction(name, shown, public, description, confirmed))
+        log.info("Action: %s %s -> waiting for a yes", name, shown)
+        self._publish(name, public, f"Waiting for the user to say yes to {description}.", "waiting")
+        return (
+            f"Not done yet: ask the user to confirm opening {description}; it runs only if "
+            "they say yes."
+        )
+
+    def _admit(self, name: str, described: str, shown: str) -> None:
+        """Refuse (log, show and raise) if off or over a limit; otherwise count it."""
         if not self.enabled:
             log.info("Action: %s -> refused: off", described)
             self._publish(name, shown, OFF_MESSAGE, "refused")
@@ -93,19 +150,6 @@ class ActionGuard:
         if refused:
             self._publish(name, shown, LIMIT_MESSAGE, "refused")
             raise ToolError(LIMIT_MESSAGE)
-        try:
-            result = fn()
-        except ToolError as exc:
-            log.info("Action: %s -> failed: %s", described, _one_line(str(exc)))
-            self._publish(name, shown, str(exc), "failed")
-            raise
-        except Exception as exc:
-            log.warning("Action: %s -> crashed: %s", described, _one_line(repr(exc)))
-            self._publish(name, shown, "The tool failed unexpectedly.", "failed")
-            raise
-        log.info("Action: %s -> %s", described, _one_line(result))
-        self._publish(name, shown, result, "ok")
-        return result
 
     def _publish(self, tool: str, args: str, result: str, outcome: str) -> None:
         publish_action(self._bus, tool, args, result, outcome)

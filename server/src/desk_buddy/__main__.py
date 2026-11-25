@@ -27,7 +27,7 @@ from desk_buddy.config import (
 from desk_buddy.dashboard import build_status, create_dashboard, start_dashboard
 from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
-from desk_buddy.llm import create_chat, prompt_for
+from desk_buddy.llm import create_chat, prompt_for, web_search_blocked
 from desk_buddy.loop import Orchestrator, State
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
@@ -36,9 +36,11 @@ from desk_buddy.settings_store import LiveSettings, SettingsStore
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
+from desk_buddy.tools.confirm import Confirmations
 from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
 from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.spotify import MusicTools, create_control
+from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
 
 log = logging.getLogger("desk_buddy")
@@ -148,6 +150,8 @@ async def _run(settings: Settings) -> None:
             on_question=on_question,
             bus=bus,
             personality=personality.current,
+            confirmations=brain.confirmations,
+            search_results=brain.search_results,
         )
         stack.push_async_callback(orchestrator.shutdown)
         live.on_question(brain.on_settings)
@@ -267,6 +271,10 @@ class Brain:
         apps: AppsStore | None = None,
     ) -> None:
         self.guard = guard or ActionGuard(settings.computer_control, bus=bus)
+        # Kept across rebuilds: the action waiting for a spoken yes, and the search
+        # result addresses open_search_result may open (the loop moves them along).
+        self.confirmations = Confirmations(bus=bus)
+        self.search_results = SearchResults()
         self._app_store = apps
         self._apps_version: int | None = None  # the lists' version the tools were built from
         self._bus = bus  # each web search is shown on the dashboard
@@ -287,6 +295,7 @@ class Brain:
         """At once, from the dashboard: turning computer control off can't wait."""
         if not new.computer_control:
             self.guard.enabled = False
+            self.confirmations.expire("Computer control was turned off.")
             if self.ducker is not None:
                 self.ducker.set_enabled(False, self._state)
 
@@ -352,25 +361,43 @@ class Brain:
 
     def _launch_tools(self, settings: Settings) -> LaunchTools | None:
         """open_app and open_website from the lists as they are now, only when computer
-        control is on and a list isn't empty. Otherwise CARL's prompt says why not."""
+        control is on and a list isn't empty; open_search_result when computer control
+        and web search are on. Otherwise CARL's prompt says why not."""
         if self._app_store is None:
             return None
         version, apps, sites = self._app_store.snapshot()
         self._apps_version = version
+        pages = settings.web_search and not web_search_blocked()
         if not settings.computer_control:
-            reason = "COMPUTER_CONTROL is off"
-        elif not (apps or sites):
-            reason = "none chosen on the dashboard's Apps tab"
-        else:
+            log.info("Apps and websites: off (COMPUTER_CONTROL is off)")
+            return None
+        if apps or sites:
             log.info("Apps and websites: on (%d apps, %d websites)", len(apps), len(sites))
+        else:
+            log.info("Apps and websites: off (none chosen on the dashboard's Apps tab)")
+        log.info("Opening search results: %s", "on (after a spoken yes)" if pages else "off")
+        if not (apps or sites or pages):
+            return None
+        if not pages:
             return LaunchTools(self.guard, apps, sites)
-        log.info("Apps and websites: off (%s)", reason)
-        return None
+        return LaunchTools(
+            self.guard,
+            apps,
+            sites,
+            results=self.search_results,
+            confirmations=self.confirmations,
+        )
 
     def _rebuild(self) -> None:
         settings = self._settings
         tools = build_tools(settings, music=self.music, launch=self._launch_tools(settings))
-        chat = create_chat(settings, tools, personality=self._personality, bus=self._bus)
+        chat = create_chat(
+            settings,
+            tools,
+            personality=self._personality,
+            bus=self._bus,
+            search_results=self.search_results,
+        )
         log.info(
             "Note tools: %s",
             f"on ({settings.obsidian_vault_path})"

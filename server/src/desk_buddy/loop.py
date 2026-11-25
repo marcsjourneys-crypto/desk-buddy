@@ -19,6 +19,8 @@ from desk_buddy.brain.personality import Line, Personality
 from desk_buddy.events import NULL_BUS
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
+from desk_buddy.tools.confirm import Confirmations
+from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tts import Synthesizer
 
 log = logging.getLogger(__name__)
@@ -62,6 +64,7 @@ class _Turn:
     pondering: bool = False  # PONDERING is playing: hold the reply's emotion back
     first_token_ms: int | None = None  # from key release, for the dashboard
     first_audio_ms: int | None = None
+    note: str | None = None  # a system note sent after the user's words (a pending yes)
 
 
 class Orchestrator:
@@ -83,6 +86,8 @@ class Orchestrator:
         on_question: Callable[[], None] = lambda: None,
         bus: Any = NULL_BUS,
         personality: Callable[[], Personality] = Personality,
+        confirmations: Confirmations | None = None,
+        search_results: SearchResults | None = None,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -102,6 +107,12 @@ class Orchestrator:
         self._pondered_at: float | None = None
         self._bus = bus  # live events for the dashboard (events.EventBus)
         self._personality = personality  # the current one: lines are read when spoken
+        # An action waiting for the user's spoken yes: answered by the next question's
+        # words, before Claude sees them.
+        self._confirmations = confirmations
+        # Web search result addresses of this question and the one before (the pages
+        # open_search_result may open): a new question moves them along.
+        self._search_results = search_results
 
     # --- events ---
 
@@ -133,6 +144,8 @@ class Orchestrator:
             self._set_state(State.THINKING)
             self._t0 = time.perf_counter()
             self._on_question()
+            if self._search_results is not None:
+                self._search_results.new_question()
             self._turn = asyncio.create_task(self._run_turn(pcm))
         elif event == "reset":
             # A robot attached or detached: drop whatever was happening and wait.
@@ -252,11 +265,14 @@ class Orchestrator:
             log.info("You: %s", text)
             self._publish("heard", text=text, stt_ms=round(self._ms()))
             if is_forget_command(text):
+                if self._confirmations is not None:
+                    self._confirmations.expire("Forgotten (a fresh start).")
                 self.conversation.forget()
                 log.info("Memory cleared")
                 await self._say(self._line("forget"), token)
                 return
-            turn = _Turn(user=text, thinking_since=time.perf_counter())
+            note = await self._answer_pending(text)
+            turn = _Turn(user=text, thinking_since=time.perf_counter(), note=note)
             tools_before = _tools_succeeded(self.chat)
             if hasattr(self.chat, "last_tool_rounds"):
                 self.chat.last_tool_rounds = []  # never remember an earlier turn's tools
@@ -311,7 +327,21 @@ class Orchestrator:
             interrupted=not turn.complete and not turn.failed,
             tool_rounds=rounds,
             searches=searches,
+            notes=[turn.note] if turn.note else [],
         )
+
+    async def _answer_pending(self, text: str) -> str | None:
+        """Run, cancel or expire an action waiting for a yes, on the user's words only
+        (the transcript: nothing Claude, a tool or a web page says). Returns the system
+        note that goes after the user's words, or None. Never raises into the turn."""
+        if self._confirmations is None:
+            return None
+        try:
+            # Off the loop: a confirmed action may take a moment (opening a page).
+            return await asyncio.to_thread(self._confirmations.answer, text)
+        except Exception:
+            log.exception("Couldn't answer the pending action")
+            return None
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         """Claude deltas -> emotion + sentences -> PCM, into the queue. None marks the end."""
@@ -328,6 +358,8 @@ class Orchestrator:
         try:
             history = self.conversation.messages()
             prompt = self.conversation.user_message(turn.user)
+            if turn.note:
+                prompt = f"{prompt} {turn.note}"
             async with contextlib.aclosing(self.chat.stream_reply(history, prompt)) as deltas:
                 async for delta in deltas:
                     if first_token:

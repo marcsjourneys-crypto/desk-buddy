@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -18,6 +18,7 @@ from desk_buddy.brain.personality import Personality, system_prompt
 from desk_buddy.config import Settings
 from desk_buddy.tools.actions import publish_action
 from desk_buddy.tools.registry import ToolRegistry
+from desk_buddy.tools.urls import SearchResults
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +140,8 @@ class Search:
     count: int = 0  # results
     sources: tuple[tuple[str, str], ...] = ()  # up to MAX_SOURCES (title, site)
     error: str = ""  # the API's error_code when it failed
+    # Every result's full address: server side only (open_search_result), never shown.
+    urls: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     def summary(self) -> str:
         """Plain text for the dashboard (untrusted titles: shown as text, never links)."""
@@ -447,7 +450,8 @@ def _search(query: str, content: Any) -> Search:
         if len(title) > MAX_TITLE:
             title = title[:MAX_TITLE] + "..."
         sources.append((title or "Untitled", _site(str(_field(result, "url") or ""))))
-    return Search(query, ok=True, count=len(content), sources=tuple(sources))
+    urls = tuple(u for u in (_field(r, "url") for r in content) if isinstance(u, str) and u)
+    return Search(query, ok=True, count=len(content), sources=tuple(sources), urls=urls)
 
 
 # Bidi controls: shown text from the web must not flip the dashboard's text direction.
@@ -510,10 +514,19 @@ def create_chat(
     tools: ToolRegistry | None = None,
     personality: Callable[[], Personality] = Personality,
     bus: Any = None,
+    search_results: SearchResults | None = None,
 ) -> Chat:
     """Build the chat client for settings.llm_provider. Add new providers here. The
     system prompt (and web search's location) is rebuilt for every request, with the
-    personality as it is then. Each web search is shown on `bus` (the dashboard)."""
+    personality as it is then. Each web search is shown on `bus` (the dashboard), and its
+    result addresses go into `search_results` (server side only: what
+    open_search_result may open)."""
+
+    def on_search(search: Search) -> None:
+        if search_results is not None:
+            search_results.add(search.urls)
+        publish_search(bus, search)
+
     if settings.llm_provider == "anthropic":
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
@@ -523,7 +536,7 @@ def create_chat(
             tools=tools,
             web_search_max=settings.web_search_max if settings.web_search else None,
             location=lambda: personality().about.location,
-            on_search=None if bus is None else (lambda search: publish_search(bus, search)),
+            on_search=on_search,
         )
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")
 
@@ -538,6 +551,7 @@ def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Pers
         web=settings.web_search and not web_search_blocked(),
         apps=tools is not None and "open_app" in tools,
         websites=tools is not None and "open_website" in tools,
+        pages=tools is not None and "open_search_result" in tools,
         computer_control=settings.computer_control,
         character=personality.character,
         about=personality.about,

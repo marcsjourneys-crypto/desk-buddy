@@ -4,12 +4,50 @@ characters, and nothing invisible or ambiguous in it."""
 
 from __future__ import annotations
 
+import re
+import threading
 import unicodedata
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
 MAX_URL = 500
 SCHEMES = ("http", "https")
+_PLAIN_HOST = re.compile(r"[a-z0-9.-]+")
+
+
+class SearchResults:
+    """The full addresses of CARL's own web search results, for this question and the one
+    before: the only pages open_search_result may open. Kept on the server side only
+    (the dashboard never gets them). Thread-safe: searches are added on the event loop,
+    tools check them from worker threads."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._now: set[str] = set()
+        self._before: set[str] = set()
+
+    def new_question(self) -> None:
+        with self._lock:
+            self._before, self._now = self._now, set()
+
+    def add(self, urls: Iterable[str]) -> None:
+        with self._lock:
+            self._now.update(u for u in urls if isinstance(u, str) and u)
+
+    def __contains__(self, url: object) -> bool:
+        with self._lock:
+            return isinstance(url, str) and (url in self._now or url in self._before)
+
+
+def site_name(url: str) -> str:
+    """The site to name aloud ("bbc.co.uk"), or "that page" if the host is anything but
+    plain letters, digits, dots and hyphens (it goes into notes Claude reads)."""
+    try:
+        host = (urlsplit(url).hostname or "").removeprefix("www.")
+    except ValueError:
+        return "that page"
+    return host if _PLAIN_HOST.fullmatch(host) else "that page"
 
 
 def check_url(url: Any) -> str:
