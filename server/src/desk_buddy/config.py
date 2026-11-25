@@ -44,6 +44,7 @@ ENV_KEYS = (
     "DASHBOARD_PORT",
     "WEB_SEARCH",
     "WEB_SEARCH_MAX",
+    "YOUTUBE_API_KEY",
 )
 
 # The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
@@ -136,6 +137,8 @@ class Settings:
     dashboard_port: int = 8766  # the dashboard, on 127.0.0.1 only
     web_search: bool = True  # Anthropic's web search tool (runs on Anthropic's side)
     web_search_max: int = 2  # searches per question, 1-MAX_WEB_SEARCHES
+    # A secret (never on the dashboard, never logged). Blank = play_youtube off.
+    youtube_api_key: str = field(default="", repr=False)
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -308,6 +311,7 @@ def _load(
         web_search_max=_int_between(
             get, "WEB_SEARCH_MAX", Settings.web_search_max, 1, MAX_WEB_SEARCHES
         ),
+        youtube_api_key=get("YOUTUBE_API_KEY", ""),
     )
 
 

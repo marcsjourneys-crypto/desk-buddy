@@ -22,7 +22,12 @@ from desk_buddy.events import EventBus
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.settings_store import LiveSettings, SettingsStore
 
-SECRETS = ("sk-ant-PLANTED-0001", "robot-token-PLANTED-0002", "spotify-id-PLANTED-0003")
+SECRETS = (
+    "sk-ant-PLANTED-0001",
+    "robot-token-PLANTED-0002",
+    "spotify-id-PLANTED-0003",
+    "youtube-key-PLANTED-0004",
+)
 TOKEN = "csrf-token-for-tests"
 WINDOWS_APPS = [
     {"Name": "Notepad", "AppID": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"},
@@ -60,7 +65,7 @@ async def running(tmp_path):
     env = tmp_path / ".env"
     env.write_text(
         f"ANTHROPIC_API_KEY={SECRETS[0]}\nROBOT_TOKEN={SECRETS[1]}\n"
-        f"SPOTIFY_CLIENT_ID={SECRETS[2]}\nTTS_ENGINE=sapi\n",
+        f"SPOTIFY_CLIENT_ID={SECRETS[2]}\nYOUTUBE_API_KEY={SECRETS[3]}\nTTS_ENGINE=sapi\n",
         encoding="utf-8",
     )
     settings = SettingsStore(tmp_path / "settings.json", env_path=env, environ={})
@@ -180,6 +185,7 @@ def test_status_has_no_secrets_only_whether_things_are_on():
         anthropic_api_key=SECRETS[0],
         robot_token=SECRETS[1],
         spotify_client_id=SECRETS[2],
+        youtube_api_key=SECRETS[3],
         computer_control=True,
     )
     status = build_status(
