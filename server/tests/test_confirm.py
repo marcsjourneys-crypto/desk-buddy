@@ -321,7 +321,7 @@ def test_the_guard_counts_a_proposal_once_and_never_the_confirmed_run():
 def test_a_waiting_result_is_not_a_success():
     tools, *_ = make()
     registry = ToolRegistry(tools.tools())
-    outcome = registry.run("open_search_result", {"url": PAGE})
+    outcome = registry.run("open_search_result", {"page": PAGE})
     assert not outcome.is_error and not outcome.done
     done = ToolRegistry([Tool("t", "d", {"type": "object"}, lambda: "ok")]).run("t", {})
     assert done.done
@@ -364,9 +364,11 @@ def test_only_offered_with_search_results_and_confirmations():
     (tool,) = tools.tools()
     schema = tool.schema()
     assert schema["name"] == "open_search_result" and schema["strict"] is True
-    url = schema["input_schema"]["properties"]["url"]
-    assert url == {**url, "type": "string", "maxLength": 500}
-    assert schema["input_schema"]["required"] == ["url"]
+    # One plain string (a number or an address): nothing a strict schema can't hold.
+    page = schema["input_schema"]["properties"]["page"]
+    assert set(page) == {"type", "description"} and page["type"] == "string"
+    assert "number" in page["description"] and "exact address" in page["description"]
+    assert schema["input_schema"]["required"] == ["page"]
     assert schema["input_schema"]["additionalProperties"] is False
     assert LaunchTools(ActionGuard(True)).tools() == []
 
@@ -400,18 +402,65 @@ def test_only_an_exact_result_address_is_accepted(url, caplog):
     assert "-> refused: I can only open a page" in caplog.text
 
 
-def test_this_and_the_last_questions_results_count_but_not_older_ones():
-    tools, confirmations, results, *_ = make(urls=(PAGE,))
-    results.new_question()
-    results.add([OTHER])
-    tools.open_search_result(PAGE)  # the last question's
-    tools.open_search_result(OTHER)  # this question's
-    results.new_question()
+def test_the_last_questions_results_by_number_and_this_questions_by_address():
+    tools, confirmations, results, opener, *_ = make(urls=(PAGE,), per_question=20, per_minute=20)
+    results.new_question()  # PAGE is now number 1 of the list
+    results.add([OTHER])  # a search in this question
     with pytest.raises(ToolError):
-        tools.open_search_result(PAGE)  # two questions ago
+        tools.open_search_result(PAGE)  # the last question's: by number only
+    tools.open_search_result("1")
+    assert confirmations.pending.log_args == f'{{"page": "1", "url": "{PAGE}"}}'
+    tools.open_search_result(OTHER)  # this question's, by its exact address
+    assert confirmations.pending.log_args == f'{{"url": "{OTHER}"}}'
+    results.new_question()  # OTHER is number 1 now; PAGE is gone
+    asked(confirmations)
+    confirmations.answer("yes", 2)
+    assert opener.calls == [OTHER]
+    with pytest.raises(ToolError):
+        tools.open_search_result(PAGE)
+    tools.open_search_result(" 1 ")
+    results.new_question()  # the next-next question: old numbers mean nothing
+    with pytest.raises(ToolError):
+        tools.open_search_result("1")
+    results.add([PAGE])
     results.clear()  # a forget command
     with pytest.raises(ToolError):
-        tools.open_search_result(OTHER)
+        tools.open_search_result(PAGE)
+
+
+@pytest.mark.parametrize("page", ["0", "3", "11", "-1", "1.0", "one", "١", "1" * 600])
+def test_anything_but_a_listed_number_or_a_result_address_is_refused(page, caplog):
+    tools, confirmations, results, opener, bus, _, guard = make(urls=(PAGE, OTHER))
+    results.new_question()  # two pages listed
+    with caplog.at_level(logging.INFO, logger="desk_buddy.tools.actions"):
+        with pytest.raises(ToolError) as info:
+            tools.open_search_result(page)
+    assert str(info.value) == NOT_A_RESULT
+    assert confirmations.pending is None and opener.calls == []
+    assert guard._this_question == 1 and bus.outcomes() == ["refused"]
+    assert "-> refused: I can only open a page by its number" in caplog.text
+
+
+def test_the_numbered_list_note():
+    results = SearchResults()
+    assert results.note() is None
+    results.add([("Leeds weather <b>&</b>", "bbc.co.uk", PAGE)])
+    assert results.note() is None  # this question's results are seen raw, in the turn
+    many = [(f"Forecast {i}", f"site{i}.example", f"https://site{i}.example/") for i in range(14)]
+    results.add([("Dup", "bbc.co.uk", PAGE), *many])
+    results.new_question()
+    note = results.note()
+    assert note.startswith(
+        "(System note: pages from your last search, for open_search_result by number: "
+        '<untrusted source="web_search_results">\n1. Leeds weather &lt;b&gt;&amp;&lt;/b&gt; '
+        "(bbc.co.uk)\n2. Forecast 0 (site0.example)\n"
+    )
+    assert note.endswith("10. Forecast 8 (site8.example)\n</untrusted>)")
+    assert "Dup" not in note and "11." not in note  # deduplicated by address, at most 10
+    assert results.resolve("10") == "https://site8.example/"
+    assert results.resolve("11") is None
+    results.new_question()  # the next question found nothing: no note
+    assert results.note() is None
 
 
 def test_a_result_address_that_fails_the_url_check_is_refused():

@@ -47,9 +47,10 @@ APP_FAILED = "I couldn't open {title}."
 SITE_FAILED = "I couldn't open {name}."
 BAD_SITE = "That website's address isn't allowed."
 NOT_A_RESULT = (
-    "I can only open a page from this question's or the last question's web search "
-    "results, with its exact address."
+    "I can only open a page by its number from the latest list of pages from your last "
+    "search, or by the exact address of a result from a search in this question."
 )
+MAX_PAGE_TEXT = MAX_URL  # characters of the page argument (an address at most)
 LOCAL_PAGE = "I can't open pages on this computer or the local network."
 
 
@@ -127,12 +128,24 @@ class LaunchTools:
             self._guard.refuse("open_website", {"name": _spoken(name)}, UNKNOWN_SITE)
         return self._guard.run("open_website", {"name": site.name}, lambda: self._open(site))
 
-    def open_search_result(self, url: str) -> str:
-        url = str(url)
-        args = {"url": url}
+    def open_search_result(self, page: str) -> str:
+        """`page`: a number from the latest numbered list ("3"), or the exact address of
+        a result from a search in this question. The server resolves it."""
+        text = str(page).strip()[: MAX_PAGE_TEXT + 1]
+        resolved = None
+        if self._results is not None and len(text) <= MAX_PAGE_TEXT:
+            resolved = self._results.resolve(text)
+        if resolved is None or self._confirmations is None:
+            # A number as it is; an address only as its site (never in full on the page).
+            refused = (
+                {"page": text[:10]} if text.isdigit() else {"site": site_name(text) or "unknown"}
+            )
+            self._guard.refuse(
+                "open_search_result", {"page": text}, NOT_A_RESULT, public_args=refused
+            )
+        url = resolved
+        args = {"page": text, "url": url} if text != url else {"url": url}
         public = {"site": site_name(url) or "unknown"}  # never the full address on the page
-        if self._results is None or self._confirmations is None or url not in self._results:
-            self._guard.refuse("open_search_result", args, NOT_A_RESULT, public_args=public)
         try:
             check_url(url)
         except ValueError:
@@ -184,21 +197,25 @@ class LaunchTools:
                 Tool(
                     name="open_search_result",
                     description=(
-                        "Open a page from your own web search results (this question's or "
-                        "the last one's) in the user's browser. url must be a result's "
-                        "exact address. It doesn't open at once: it waits for the user to "
-                        "say yes at their next question."
+                        "Open a page from your web search results in the user's browser. "
+                        "Call it as soon as the user asks to open such a page. It doesn't "
+                        "open at once: after your reply the robot asks the user, and it "
+                        "opens only if they say yes."
                     ),
                     input_schema={
                         "type": "object",
                         "properties": {
-                            "url": {
+                            "page": {
                                 "type": "string",
-                                "maxLength": MAX_URL,
-                                "description": "The exact address of a search result.",
+                                "description": (
+                                    "The page's number from the latest list of pages from "
+                                    'your last search (like "3"), or the exact address of a '
+                                    "result from a search you ran in this question (at most "
+                                    f"{MAX_PAGE_TEXT} characters)."
+                                ),
                             }
                         },
-                        "required": ["url"],
+                        "required": ["page"],
                         "additionalProperties": False,
                     },
                     func=self.open_search_result,

@@ -128,8 +128,8 @@ class ActionGuard:
         self._publish(name, public, f"Waiting for the user to say yes to {description}.", "waiting")
         return NotDone(
             f"Not done yet: opening {description} waits for the user's yes. After your "
-            "reply I will ask them myself, so don't ask and never say it's open; at most "
-            "say briefly that you can open it."
+            "reply I will ask them myself, so don't ask and never say it's open; just say "
+            "briefly which page it is."
         )
 
     def refuse(

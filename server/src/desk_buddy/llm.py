@@ -140,8 +140,13 @@ class Search:
     count: int = 0  # results
     sources: tuple[tuple[str, str], ...] = ()  # up to MAX_SOURCES (title, site)
     error: str = ""  # the API's error_code when it failed
-    # Every result's full address: server side only (open_search_result), never shown.
-    urls: tuple[str, ...] = field(default=(), compare=False, repr=False)
+    # Every result as (title, site, full address): server side only (open_search_result
+    # and its numbered list for Claude), never on the dashboard.
+    pages: tuple[tuple[str, str, str], ...] = field(default=(), compare=False, repr=False)
+
+    @property
+    def urls(self) -> tuple[str, ...]:
+        return tuple(url for _, _, url in self.pages)
 
     def summary(self) -> str:
         """Plain text for the dashboard (untrusted titles: shown as text, never links)."""
@@ -444,14 +449,16 @@ def _search(query: str, content: Any) -> Search:
     """A Search from a web_search_tool_result's content: a list of results, or an error."""
     if not isinstance(content, (list, tuple)):
         return Search(query, ok=False, error=str(_field(content, "error_code") or "unknown"))
-    sources = []
-    for result in content[:MAX_SOURCES]:
+    pages = []
+    for result in content:
+        url = _field(result, "url")
         title = _plain(str(_field(result, "title") or ""))
         if len(title) > MAX_TITLE:
             title = title[:MAX_TITLE] + "..."
-        sources.append((title or "Untitled", _site(str(_field(result, "url") or ""))))
-    urls = tuple(u for u in (_field(r, "url") for r in content) if isinstance(u, str) and u)
-    return Search(query, ok=True, count=len(content), sources=tuple(sources), urls=urls)
+        pages.append((title or "Untitled", _site(str(url or "")), url))
+    sources = tuple((title, site) for title, site, _ in pages[:MAX_SOURCES])
+    kept = tuple(p for p in pages if isinstance(p[2], str) and p[2])
+    return Search(query, ok=True, count=len(content), sources=sources, pages=kept)
 
 
 # Bidi controls: shown text from the web must not flip the dashboard's text direction.
@@ -524,7 +531,7 @@ def create_chat(
 
     def on_search(search: Search) -> None:
         if search_results is not None:
-            search_results.add(search.urls)
+            search_results.add(search.pages)
         publish_search(bus, search)
 
     if settings.llm_provider == "anthropic":

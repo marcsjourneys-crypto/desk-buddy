@@ -279,7 +279,11 @@ class Orchestrator:
                 log.info("Memory cleared")
                 await self._say(self._line("forget"), token)
                 return
-            note = await self._answer_pending(text, question)
+            answered = await self._answer_pending(text, question)
+            # The last question's search results, numbered, so Claude can open one by
+            # its number (it never sees earlier questions' raw results).
+            listed = self._search_results.note() if self._search_results is not None else None
+            note = " ".join(n for n in (answered, listed) if n) or None
             turn = _Turn(user=text, thinking_since=time.perf_counter(), note=note)
             tools_before = _tools_succeeded(self.chat)
             if hasattr(self.chat, "last_tool_rounds"):

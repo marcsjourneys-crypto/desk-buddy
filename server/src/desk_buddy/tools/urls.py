@@ -1,6 +1,6 @@
-"""The one check every web address CARL may open goes through (bookmarks now, web search
-results later): http or https, a host, no user name or password, at most MAX_URL
-characters, and nothing invisible or ambiguous in it."""
+"""The one check every web address CARL may open goes through (bookmarks and web search
+results): http or https, a host, no user name or password, at most MAX_URL characters,
+and nothing invisible or ambiguous in it. Also the search results CARL may open."""
 
 from __future__ import annotations
 
@@ -12,38 +12,86 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
+from desk_buddy.tools.untrusted import wrap
+
 MAX_URL = 500
 SCHEMES = ("http", "https")
 _PLAIN_HOST = re.compile(r"[a-z0-9.-]+")
 
 
+MAX_LISTED = 10  # pages from the last question's searches, numbered for Claude
+LIST_NOTE_START = "(System note: pages from your last search, for open_search_result by number:"
+
+# One search result: (title, site, full address).
+Page = tuple[str, str, str]
+
+
 class SearchResults:
-    """The full addresses of CARL's own web search results, for this question and the one
-    before: the only pages open_search_result may open. Kept on the server side only
-    (the dashboard never gets them). Thread-safe: searches are added on the event loop,
-    tools check them from worker threads."""
+    """CARL's own web search results: the only pages open_search_result may open. Kept on
+    the server side (the dashboard never gets the addresses).
+
+    - This question's results can be opened by their exact address (Claude saw them in
+      this turn).
+    - At the next question with speech they become a numbered list (up to MAX_LISTED,
+      one per address, in order): Claude is shown the titles and sites in a system note
+      (note()) and opens one by its number. Numbers only ever mean the latest list.
+
+    Thread-safe: searches are added on the event loop, tools resolve from worker threads.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._now: set[str] = set()
-        self._before: set[str] = set()
+        self._now: list[Page] = []
+        self._listed: list[Page] = []
 
     def new_question(self) -> None:
+        """A new question with speech: this question's results become the numbered list."""
         with self._lock:
-            self._before, self._now = self._now, set()
+            self._listed, self._now = self._now[:MAX_LISTED], []
 
     def clear(self) -> None:
         """Forget every result (a forget command)."""
         with self._lock:
-            self._before, self._now = set(), set()
+            self._listed, self._now = [], []
 
-    def add(self, urls: Iterable[str]) -> None:
+    def add(self, pages: Iterable[Page | str]) -> None:
+        """Results of a search in this question: (title, site, address) each, or just an
+        address. An address already here is kept once, where it first came."""
         with self._lock:
-            self._now.update(u for u in urls if isinstance(u, str) and u)
+            seen = {url for _, _, url in self._now}
+            for page in pages:
+                title, site, url = ("", site_name(page), page) if isinstance(page, str) else page
+                if isinstance(url, str) and url and url not in seen:
+                    seen.add(url)
+                    self._now.append((str(title), str(site), url))
+
+    def resolve(self, page: object) -> str | None:
+        """The address `page` means: a number from the latest list ("3"), or the exact
+        address of a result from this question's searches. None if it's neither."""
+        text = str(page).strip()
+        with self._lock:
+            if text.isdigit() and text.isascii():
+                n = int(text)
+                return self._listed[n - 1][2] if 1 <= n <= len(self._listed) else None
+            return text if any(url == text for _, _, url in self._now) else None
+
+    def note(self) -> str | None:
+        """The numbered list for Claude, as a system note around an untrusted block (the
+        titles are web text), or None when the last question found nothing."""
+        with self._lock:
+            listed = list(self._listed)
+        if not listed:
+            return None
+        lines = [
+            f"{i}. {title or 'Untitled'}" + (f" ({site})" if site else "")
+            for i, (title, site, _) in enumerate(listed, 1)
+        ]
+        return f"{LIST_NOTE_START} {wrap('web_search_results', chr(10).join(lines))})"
 
     def __contains__(self, url: object) -> bool:
+        """Whether an address is among the results that can still be opened."""
         with self._lock:
-            return isinstance(url, str) and (url in self._now or url in self._before)
+            return any(u == url for _, _, u in (*self._now, *self._listed))
 
 
 def site_name(url: str) -> str:

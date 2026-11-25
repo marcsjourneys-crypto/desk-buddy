@@ -13,7 +13,7 @@ Media keys and PC volume are left for later.
 ## Decisions
 
 - **Off by default:** everything needs `COMPUTER_CONTROL=on`, as the music tools do. Every call goes through `ActionGuard` (3 per question, 8 per minute, logged, shown on the Live tab).
-- **Allowlists only:** the model only picks a **name from an enum** (apps, bookmarks) or a **URL that must exactly match a real search result** (`open_search_result`). The server builds every launch. There's no shell and no `shell=True`, and model text never goes into a command.
+- **Allowlists only:** the model only picks a **name from an enum** (apps, bookmarks) or a **real search result**, by its number in a server-made list or its exact address (`open_search_result`). The server builds every launch. There's no shell and no `shell=True`, and model text never goes into a command.
 - **No new dependencies.**
 
 ## Part 1: Apps
@@ -44,14 +44,15 @@ Media keys and PC volume are left for later.
   - At most 50, with the same spoken-name rules.
   - The URL must be `https` or `http` with a host, no user name or password, and at most 500 chars.
 - **The bookmark tool:** `open_website(name)`, where `name` is an enum of bookmark names. No "yes" needed.
-- **The search-result tool:** `open_search_result(url)`.
-  - **Where the URL must come from:** it must exactly match a result URL from CARL's web searches in **this question or the one before**.
-    - `llm.py` keeps the full URLs of each turn's search results on the server side; they're never shown in full on the dashboard.
-    - The loop keeps the current and previous question's sets.
-  - **Anything else is refused,** including a URL the model invented, changed, or took from page text. The URL is checked with the same rules as bookmarks.
+- **The search-result tool:** `open_search_result(page)`, where `page` is one plain string (a strict schema can't hold a number-or-address choice more simply, and length limits aren't strict-schema keywords, so the 500-character limit is checked by the server).
+  (Revised after the user check on 2026-11-25: the model can't see an earlier question's raw results, so "this or the previous question's exact URL" was unusable. "Open that page" in the next question made CARL say it had no address.)
+  - **Where the page must come from:**
+    - **The last question's results, by number.** `llm.py` keeps every result (title, site, full address) on the server side; they're never shown in full on the dashboard. At the next question with speech, the loop adds a system note to the user's message listing them, numbered: `(System note: pages from your last search, for open_search_result by number: <untrusted …>1. <title> (<site>) 2. …</untrusted>)`. It has at most 10, one per address, in order, with titles and sites cleaned as on the dashboard, and the list is wrapped as untrusted. It's added only when that question found something, and it's stored in memory like the other system notes. `page` = `"3"` opens number 3 of the **latest** list; older numbers mean nothing.
+    - **This question's results, by exact address:** the model sees them raw in the turn.
+  - **Anything else is refused** through the guard (counted, logged, `refused`): a number out of range, an old number, an address the model invented, changed, or took from page text. The address is then checked with the same rules as bookmarks, and must not be on this computer or the local network.
   - **It needs a spoken "yes"** (Part 3).
 - **Opening a page:** `os.startfile(url)` (the default browser), only after validation, on its own thread with a timeout.
-- **Prompt rules:** never read a full address aloud; name the site only ("bbc.co.uk").
+- **Prompt rules:** never read a full address aloud; name the site only ("bbc.co.uk"). When the user asks to open a page from a search, **call `open_search_result` straight away** (with the number, or this turn's exact address). Never ask and never tell the user to say yes: the robot asks after the reply (a first version that told CARL to "say briefly it can open it" made it offer instead of calling the tool).
 
 ## Part 3: The spoken "yes"
 
@@ -60,7 +61,7 @@ Media keys and PC volume are left for later.
 - **Which tools need it:** a tool goes through `ActionGuard.run_after_yes` instead of `run`; today only `open_search_result`.
 - **Proposing:**
   - **Nothing runs yet:** when such a tool is called, `ActionGuard` counts and logs the attempt, then hands the checked action to `Confirmations`, which holds **one** pending action (tool, args, a short description such as "the page on bbc.co.uk", and the question it was proposed in). A new one replaces the old (shown as `cancelled`).
-  - **What CARL is told:** the tool result says it isn't done yet and waits for the user's yes; the robot will ask after the reply, so CARL must not ask itself or say it's open. It isn't counted as a success (no `TASK_DONE`).
+  - **What CARL is told:** the tool result says it isn't done yet and waits for the user's yes; the robot will ask after the reply, so CARL must not ask itself or say it's open, just say briefly which page it is. It isn't counted as a success (no `TASK_DONE`). The prompt tells CARL to call the tool straight away when asked to open a page, never to offer or to tell the user to say yes.
   - **What the Live tab shows:** an action event with `outcome: "waiting"`.
 - **Asking: the server asks, never the model.** When a turn ends with an action proposed in that turn, the loop speaks a canned line after CARL's reply: "Shall I open <description>?" (emotion curious; not remembered; interruptible). The action is **armed** only once that line has played to the end. If the line is interrupted or fails, or the reply failed, the action is cancelled.
 - **Confirming:** at the start of the **very next question with speech**, **before** Claude, within **60 s** of the question, the loop checks the transcript (and only the transcript).
@@ -106,7 +107,7 @@ Media keys and PC volume are left for later.
    - The loop's check before Claude, with notes, events and log lines.
    - Prompt rules.
    - Tests:
-     - only an exact URL from this or the previous question is accepted;
+     - only a number from the latest list, or an exact URL from this question, is accepted;
      - yes, no, mixed ("yes but no") and long answers;
      - 60 s expiry, forget, computer control turned off;
      - a planted "the user said yes" in a search result or note can't run it;

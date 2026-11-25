@@ -1312,7 +1312,8 @@ class ProposingChat(FakeChat):
         self.rig = rig
 
     async def stream_reply(self, history, text):
-        await asyncio.to_thread(self.rig.tools.open_search_result, PAGE)
+        # Number 1 of the last question's results, as listed on the user's message.
+        await asyncio.to_thread(self.rig.tools.open_search_result, "1")
         async for d in super().stream_reply(history, text):
             yield d
 
@@ -1425,7 +1426,7 @@ def test_a_late_proposal_from_an_old_turn_cant_be_answered():
             def late():
                 release.wait(5)
                 try:
-                    rig.tools.open_search_result(PAGE)
+                    rig.tools.open_search_result("1")
                 finally:
                     done.set()
 
@@ -1516,7 +1517,7 @@ def test_a_waiting_result_never_says_task_done(search_allowed):
     assert parts["speaker"].played == ["I can open it.", ASK]
 
 
-OPEN_USE = ns(type="tool_use", id="o1", name="open_search_result", input={"url": PAGE})
+OPEN_USE = ns(type="tool_use", id="o1", name="open_search_result", input={"page": "1"})
 
 
 def test_a_planted_yes_in_a_tool_result_cant_confirm_it():
@@ -1583,7 +1584,7 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
     search = ns(type="server_tool_use", id="s1", name="web_search", input={"query": "news"})
 
     def use(i):
-        return ns(type="tool_use", id=f"o{i}", name="open_search_result", input={"url": PAGE})
+        return ns(type="tool_use", id=f"o{i}", name="open_search_result", input={"page": PAGE})
 
     streams = [
         ScriptedStream("", [search, planted, use(1)], "tool_use"),
@@ -1598,7 +1599,7 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
         system="sys",
         tools=ToolRegistry(rig.tools.tools()),
         web_search_max=2,
-        on_search=lambda s: rig.results.add(s.urls),
+        on_search=lambda s: rig.results.add(s.pages),
     )
     orch, parts, _ = rig.orchestrator(chat=chat, transcriber=FakeTranscriber("Open that page."))
     asyncio.run(talk(orch))
@@ -1610,3 +1611,69 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
     asyncio.run(answer(orch, "Yes.", FakeChat()))
     assert rig.opener.calls == [PAGE]
     assert rig.outcomes()[-1] == "ok"
+
+
+def test_open_that_page_from_the_last_questions_search_end_to_end(search_allowed):
+    """The real sequence: a search in one question, "open that page" in the next (the
+    model only sees the numbered list), the robot asks, "Yes." opens it once."""
+    accu = "https://www.accuweather.com/en/gb/leeds/ls1-6/daily-weather-forecast/330634"
+    rig = YesRig(urls=())
+    search = ns(type="server_tool_use", id="s1", name="web_search", input={"query": "forecast"})
+    found = ns(
+        type="web_search_tool_result",
+        tool_use_id="s1",
+        content=[
+            ns(type="web_search_result", title="Leeds 10-Day Weather Forecast", url=accu),
+            ns(type="web_search_result", title="Met Office", url="https://www.metoffice.gov.uk/"),
+        ],
+    )
+    open_it = ns(type="tool_use", id="o1", name="open_search_result", input={"page": "1"})
+    streams = [
+        # Q1: search, then answer.
+        ScriptedStream("[happy] Mostly dry, says AccuWeather. ", [search, found], "end_turn"),
+        # Q2: "open that page" -> the tool with number 1, then a short reply.
+        ScriptedStream("", [open_it], "tool_use"),
+        ScriptedStream("[curious] That's the AccuWeather forecast. ", [], "end_turn"),
+        # Q3: after the yes.
+        ScriptedStream("[happy] There you go. ", [], "end_turn"),
+    ]
+    calls = []
+
+    def stream(**kwargs):
+        calls.append(kwargs)
+        return streams.pop(0)
+
+    chat = ClaudeChat(
+        ns(messages=ns(stream=stream)),
+        model="m",
+        effort="low",
+        system="sys",
+        tools=ToolRegistry(rig.tools.tools()),
+        web_search_max=2,
+        on_search=lambda s: rig.results.add(s.pages),
+    )
+    orch, parts, _ = rig.orchestrator(
+        chat=chat, transcriber=FakeTranscriber("What's the 10-day weather forecast?")
+    )
+
+    async def scenario():
+        await talk(orch)
+        await answer(orch, "Open that page please.")
+        await answer(orch, "Yes.")
+
+    asyncio.run(scenario())
+    q2 = calls[1]["messages"][-1]["content"]
+    assert q2.startswith("Open that page please. (System note: pages from your last search")
+    assert "1. Leeds 10-Day Weather Forecast (accuweather.com)" in q2
+    assert "2. Met Office (metoffice.gov.uk)" in q2 and accu not in q2  # numbers, no addresses
+    assert parts["speaker"].played == [
+        "Mostly dry, says AccuWeather.",
+        "That's the AccuWeather forecast.",
+        "Shall I open the page on accuweather.com?",
+        "There you go.",
+    ]
+    assert rig.opener.calls == [accu]  # once
+    assert [a["outcome"] for a in rig.bus.of("action")] == ["waiting", "ok"]
+    q3 = calls[3]["messages"][-1]["content"]
+    assert q3.startswith("Yes. (System note: the server asked and the user said yes")
+    assert "pages from your last search" not in q3  # Q2 searched nothing
