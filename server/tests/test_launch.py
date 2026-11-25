@@ -2,6 +2,7 @@
 built by the server as argument lists (never a shell), everything through the guard."""
 
 import logging
+import os
 import subprocess
 import threading
 
@@ -19,6 +20,14 @@ NOTEPAD = AppEntry("Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "Notepad", ("no
 EDGE = AppEntry("MSEdge", "Microsoft Edge", ("browser",))
 WEATHER = Bookmark("weather", "https://example.com/weather")
 NEWS = Bookmark("news", "https://news.example")
+
+
+class RecordingBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, type_, **fields):
+        self.events.append({"type": type_, **fields})
 
 
 class Recorder:
@@ -87,12 +96,27 @@ def test_open_website_opens_the_bookmarked_address():
         ("open_website", "evil"),
     ],
 )
-def test_unknown_names_are_refused_and_nothing_runs(tool, name):
-    tools, guard, launcher, opener = make()
-    with pytest.raises(ToolError, match="isn't one of the"):
-        getattr(tools, tool)(name)
+def test_unknown_names_are_refused_through_the_guard_and_nothing_runs(tool, name, caplog):
+    bus = RecordingBus()
+    tools, guard, launcher, opener = make(bus=bus)
+    with caplog.at_level(logging.INFO, logger="desk_buddy.tools.actions"):
+        with pytest.raises(ToolError, match="isn't one of the"):
+            getattr(tools, tool)(name)
     assert launcher.calls == [] and opener.calls == []
-    assert guard._this_question == 0  # not counted
+    assert guard._this_question == 1  # counted toward the limits like any attempt
+    ((event),) = bus.events
+    assert event["outcome"] == "refused" and event["tool"] == tool
+    assert f"Action: {tool} " in caplog.text and "-> refused: That isn't one of" in caplog.text
+
+
+def test_unknown_names_count_toward_the_limit():
+    tools, guard, launcher, _ = make()
+    for _ in range(3):
+        with pytest.raises(ToolError, match="isn't one of the"):
+            tools.open_app("cmd")
+    with pytest.raises(ToolError, match="enough actions"):
+        tools.open_app("notepad")
+    assert launcher.calls == []
 
 
 def test_the_real_launcher_is_one_argument_list_without_a_shell(monkeypatch):
@@ -104,7 +128,9 @@ def test_the_real_launcher_is_one_argument_list_without_a_shell(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "Popen", fake_popen)
     launch.launch_app(NOTEPAD.app_id)
     ((args, kwargs),) = seen
-    assert args == ["explorer.exe", "shell:AppsFolder\\" + NOTEPAD.app_id]
+    explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+    assert args == [explorer, "shell:AppsFolder\\" + NOTEPAD.app_id]
+    assert os.path.isabs(args[0])
     assert "shell" not in kwargs
 
 
@@ -113,7 +139,7 @@ def test_the_default_launcher_goes_through_the_real_one(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "Popen", lambda args, **kw: seen.append((args, kw)))
     tools = LaunchTools(ActionGuard(True), [EDGE], [], opener=Recorder())
     assert tools.open_app("browser") == "Opened Microsoft Edge."
-    assert seen == [(["explorer.exe", "shell:AppsFolder\\MSEdge"], {})]
+    assert seen == [([launch.EXPLORER, "shell:AppsFolder\\MSEdge"], {})]
 
 
 def test_the_real_opener_uses_startfile(monkeypatch):

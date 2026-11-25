@@ -22,6 +22,11 @@ class ToolError(Exception):
     """A tool couldn't do what was asked. The message is sent back to Claude."""
 
 
+class NotDone(str):
+    """A tool result for an action that hasn't happened yet (it waits for the user's
+    spoken yes): sent to Claude like any result, but not counted as a success."""
+
+
 @dataclass(frozen=True)
 class Tool:
     name: str
@@ -42,6 +47,7 @@ class Tool:
 class ToolOutcome:
     text: str
     is_error: bool = False
+    done: bool = True  # False: it only waits for a yes (NotDone), so it isn't a success
 
 
 class ToolRegistry:
@@ -78,7 +84,7 @@ class ToolRegistry:
             log.exception("Tool %s crashed", name)
             return ToolOutcome("The tool failed unexpectedly.", is_error=True)
         log.info("Tool %s -> %s", name, _preview(text))
-        return ToolOutcome(text)
+        return ToolOutcome(str(text), done=not isinstance(text, NotDone))
 
     def __len__(self) -> int:
         return len(self._tools)

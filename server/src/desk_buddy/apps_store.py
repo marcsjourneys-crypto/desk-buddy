@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -39,12 +40,16 @@ LIST_TIMEOUT_S = 30.0
 NAME_PUNCTUATION = frozenset(" -'.")
 DIGITS = frozenset("0123456789")
 
+SYSTEM_ROOT = os.environ.get("SystemRoot", r"C:\Windows")
+# By full path (never whatever powershell.exe comes first on PATH), and told to write
+# UTF-8, so app names and IDs in any language come through intact.
+POWERSHELL = os.path.join(SYSTEM_ROOT, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 LIST_COMMAND = (
-    "powershell.exe",
+    POWERSHELL,
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    "Get-StartApps | ConvertTo-Json -Compress",
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-StartApps | ConvertTo-Json -Compress",
 )
 
 # Runs a command (an argument list, never a shell) and returns its standard output.
@@ -139,15 +144,11 @@ def run_command(args: Sequence[str], timeout: float) -> bytes:
 
 
 def _decode(out: bytes) -> str:
-    """PowerShell's output: UTF-8 if it is, else the console's OEM code page."""
+    """PowerShell's output: UTF-8 (the command asks for it), with or without a BOM."""
     try:
         return out.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        pass
-    try:
-        return out.decode("oem", errors="replace")  # Windows only
-    except LookupError:
-        return out.decode("latin-1")
+    except UnicodeDecodeError as exc:
+        raise ListError("Windows' app list wasn't readable.") from exc
 
 
 def parse_listing(out: bytes | str) -> list[dict[str, str]]:

@@ -76,6 +76,7 @@ class Conversation:
             raise ValueError("max_turns must be >= 1")
         self._turns: deque[_Turn] = deque(maxlen=max_turns)
         self._pending: list[str] = []  # actions from cut-off turns, for the next message
+        self._carried: list[str] = []  # system notes from cut-off turns, likewise
 
     def add(
         self,
@@ -95,8 +96,9 @@ class Conversation:
 
         A turn with no reply is never stored as such (a history must not end a turn on
         tool results, and made-up assistant text would be copied). Its tool calls, which
-        did happen, become a note in front of the next user message instead; its searches,
-        which only read, are dropped."""
+        did happen, become a note in front of the next user message instead, and so do its
+        system notes (a page opened on the user's yes did happen too); its searches, which
+        only read, are dropped."""
         rounds = tuple(
             (tuple(dict(u) for u in uses), tuple(_compact(r) for r in results))
             for uses, results in tool_rounds
@@ -107,14 +109,17 @@ class Conversation:
                 for uses, results in rounds
                 for use, res in zip(uses, results, strict=False)
             ]
+            self._carried += [n for n in notes if n]
             return
-        note, self._pending = self._cut_off_note(), []
+        note = self._cut_off_note()
+        self._pending, self._carried = [], []
         after = [n for n in (*notes, _search_note(searches)) if n]
         self._turns.append(_Turn(user, reply, interrupted, rounds, note, " ".join(after) or None))
 
     def forget(self) -> None:
         self._turns.clear()
         self._pending = []
+        self._carried = []
 
     def set_max_turns(self, max_turns: int) -> None:
         """Change how many exchanges are kept (HISTORY_TURNS); a smaller value drops the
@@ -132,9 +137,12 @@ class Conversation:
         return _noted(text, bool(self._turns) and self._turns[-1].interrupted)
 
     def _cut_off_note(self) -> str | None:
-        if not self._pending:
-            return None
-        return f"{CUT_OFF_NOTE_START} {'; '.join(self._pending)}.)"
+        """Notes from turns that were never stored: the actions they ran, and their
+        system notes (carried as they were). None if there are none."""
+        parts = list(self._carried)
+        if self._pending:
+            parts.insert(0, f"{CUT_OFF_NOTE_START} {'; '.join(self._pending)}.)")
+        return " ".join(parts) or None
 
     def messages(self) -> list[dict[str, Any]]:
         """A fresh list in Messages API shape: user, assistant, user, assistant, ...

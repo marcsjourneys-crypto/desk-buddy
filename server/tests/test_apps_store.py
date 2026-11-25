@@ -4,6 +4,7 @@ corrupt files."""
 
 import json
 import logging
+import os
 import subprocess
 
 import pytest
@@ -55,14 +56,28 @@ def test_the_listing_runs_the_fixed_command_through_the_runner(tmp_path):
         {"name": "Notepad", "app_id": NOTEPAD["AppID"]},
     ]
     ((args, timeout),) = s._runner.calls
+    root = os.environ.get("SystemRoot", r"C:\Windows")
     assert args == (
-        "powershell.exe",
+        os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-StartApps | ConvertTo-Json -Compress",
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-StartApps | ConvertTo-Json -Compress",
     )
     assert args == LIST_COMMAND and 0 < timeout <= 60
+    assert os.path.isabs(args[0])
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+def test_non_ascii_names_and_ids_come_through_as_utf8(bom):
+    app = {"Name": "Café Élan – 日本語", "AppID": "Caf\u00e9.\u65e5\u672c_8wekyb3d8bbwe!App"}
+    raw = bom + json.dumps([app], ensure_ascii=False).encode("utf-8")
+    assert parse_listing(raw) == [{"name": app["Name"], "app_id": app["AppID"]}]
+
+
+def test_output_that_isnt_utf8_is_unreadable():
+    with pytest.raises(ListError, match="wasn't readable"):
+        parse_listing('[{"Name": "Caf\u00e9", "AppID": "x"}]'.encode("cp1252"))
 
 
 @pytest.mark.parametrize(
@@ -105,13 +120,6 @@ def test_the_listing_skips_bad_entries_and_repeats():
 def test_unreadable_output_is_a_list_error(raw):
     with pytest.raises(ListError):
         parse_listing(raw)
-
-
-def test_output_in_the_console_code_page_still_reads():
-    raw = json.dumps([{"Name": "Caf\u00e9", "AppID": "cafe"}], ensure_ascii=False)
-    out = raw.encode("cp1252")  # not valid UTF-8
-    (entry,) = parse_listing(out)
-    assert entry["app_id"] == "cafe" and entry["name"].startswith("Caf")
 
 
 def test_the_real_runner_uses_an_argument_list_and_a_timeout(monkeypatch):

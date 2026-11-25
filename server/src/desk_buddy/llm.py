@@ -428,7 +428,7 @@ class ClaudeChat:
         }
         if outcome.is_error:
             result["is_error"] = True
-        else:
+        elif getattr(outcome, "done", True):  # waiting for a yes isn't a success yet
             self.tools_succeeded += 1
         return result
 

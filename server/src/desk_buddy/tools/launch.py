@@ -28,7 +28,14 @@ from typing import Any
 
 from desk_buddy.apps_store import AppEntry, Bookmark, check_app_id
 from desk_buddy.tools.registry import Tool, ToolError
-from desk_buddy.tools.urls import MAX_URL, SearchResults, check_url, site_name
+from desk_buddy.tools.urls import (
+    MAX_URL,
+    SearchResults,
+    check_url,
+    is_public_host,
+    page_description,
+    site_name,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +50,16 @@ NOT_A_RESULT = (
     "I can only open a page from this question's or the last question's web search "
     "results, with its exact address."
 )
+LOCAL_PAGE = "I can't open pages on this computer or the local network."
+
+
+# By full path: never whatever explorer.exe comes first on PATH.
+EXPLORER = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
 
 
 def launch_app(app_id: str) -> None:
     """Start an app by its Start-menu ID: explorer.exe with one fixed-form argument."""
-    subprocess.Popen(["explorer.exe", "shell:AppsFolder\\" + app_id])
+    subprocess.Popen([EXPLORER, "shell:AppsFolder\\" + app_id])
 
 
 def open_url(url: str) -> None:
@@ -101,33 +113,40 @@ class LaunchTools:
 
     # --- the tool functions (their signatures are the tool inputs) ---
 
+    # Refusals go through the guard too: counted, logged and shown like any attempt.
+
     def open_app(self, name: str) -> str:
         app = self._apps.get(_spoken(name))
         if app is None:
-            raise ToolError(UNKNOWN_APP)
+            self._guard.refuse("open_app", {"name": _spoken(name)}, UNKNOWN_APP)
         return self._guard.run("open_app", {"name": _spoken(name)}, lambda: self._launch(app))
 
     def open_website(self, name: str) -> str:
         site = self._sites.get(_spoken(name))
         if site is None:
-            raise ToolError(UNKNOWN_SITE)
+            self._guard.refuse("open_website", {"name": _spoken(name)}, UNKNOWN_SITE)
         return self._guard.run("open_website", {"name": site.name}, lambda: self._open(site))
 
     def open_search_result(self, url: str) -> str:
+        url = str(url)
+        args = {"url": url}
+        public = {"site": site_name(url) or "unknown"}  # never the full address on the page
         if self._results is None or self._confirmations is None or url not in self._results:
-            raise ToolError(NOT_A_RESULT)
+            self._guard.refuse("open_search_result", args, NOT_A_RESULT, public_args=public)
         try:
             check_url(url)
-        except ValueError as exc:
-            raise ToolError(BAD_SITE) from exc
-        label = f"the page on {site_name(url)}"
+        except ValueError:
+            self._guard.refuse("open_search_result", args, BAD_SITE, public_args=public)
+        if not is_public_host(url):
+            self._guard.refuse("open_search_result", args, LOCAL_PAGE, public_args=public)
+        label = page_description(url)
         return self._guard.run_after_yes(
             "open_search_result",
-            {"url": url},
+            args,
             lambda: self._open_url(url, label),
             confirmations=self._confirmations,
             description=label,
-            public_args={"site": site_name(url)},  # never the full address on the page
+            public_args=public,
         )
 
     @property

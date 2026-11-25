@@ -597,7 +597,7 @@ def test_the_pending_yes_survives_rebuilds_and_expires_when_computer_control_goe
     confirmations.propose(PendingAction("t", "{}", "{}", "x", lambda: ran.append(1) or "ok"))
     brain.on_settings_now(on, off)
     assert confirmations.pending is None
-    assert confirmations.answer("yes") is None and ran == []
+    assert confirmations.answer("yes", 2) is None and ran == []
 
 
 def test_apps_and_websites_are_off_without_computer_control(

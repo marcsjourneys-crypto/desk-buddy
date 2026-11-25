@@ -19,7 +19,7 @@ from desk_buddy.brain.personality import Line, Personality
 from desk_buddy.events import NULL_BUS
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
-from desk_buddy.tools.confirm import Confirmations
+from desk_buddy.tools.confirm import QUESTION, Confirmations
 from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tts import Synthesizer
 
@@ -107,12 +107,13 @@ class Orchestrator:
         self._pondered_at: float | None = None
         self._bus = bus  # live events for the dashboard (events.EventBus)
         self._personality = personality  # the current one: lines are read when spoken
-        # An action waiting for the user's spoken yes: answered by the next question's
-        # words, before Claude sees them.
+        # An action waiting for the user's spoken yes: the loop asks about it after the
+        # reply, and the next question's words answer it before Claude sees them.
         self._confirmations = confirmations
         # Web search result addresses of this question and the one before (the pages
-        # open_search_result may open): a new question moves them along.
+        # open_search_result may open): each question with speech moves them along.
         self._search_results = search_results
+        self._questions = 0  # questions with speech so far
 
     # --- events ---
 
@@ -144,8 +145,6 @@ class Orchestrator:
             self._set_state(State.THINKING)
             self._t0 = time.perf_counter()
             self._on_question()
-            if self._search_results is not None:
-                self._search_results.new_question()
             self._turn = asyncio.create_task(self._run_turn(pcm))
         elif event == "reset":
             # A robot attached or detached: drop whatever was happening and wait.
@@ -264,14 +263,23 @@ class Orchestrator:
                 return
             log.info("You: %s", text)
             self._publish("heard", text=text, stt_ms=round(self._ms()))
+            # A question with speech: number it (this task's tool threads inherit it), and
+            # move the search results along (an empty clip isn't a question).
+            self._questions += 1
+            question = self._questions
+            QUESTION.set(question)
+            if self._search_results is not None:
+                self._search_results.new_question()
             if is_forget_command(text):
                 if self._confirmations is not None:
                     self._confirmations.expire("Forgotten (a fresh start).")
+                if self._search_results is not None:
+                    self._search_results.clear()
                 self.conversation.forget()
                 log.info("Memory cleared")
                 await self._say(self._line("forget"), token)
                 return
-            note = await self._answer_pending(text)
+            note = await self._answer_pending(text, question)
             turn = _Turn(user=text, thinking_since=time.perf_counter(), note=note)
             tools_before = _tools_succeeded(self.chat)
             if hasattr(self.chat, "last_tool_rounds"):
@@ -283,8 +291,10 @@ class Orchestrator:
                 tg.create_task(self._produce(turn, queue))
                 tg.create_task(self._consume_reply(turn, queue, token))
             turn.complete = True
+            asked = not turn.failed and await self._ask_pending(question, token)
             if (
                 not turn.failed
+                and not asked
                 and _tools_succeeded(self.chat) > tools_before
                 and self._random() < TASK_DONE_CHANCE
             ):
@@ -295,7 +305,10 @@ class Orchestrator:
             if turn:
                 turn.failed = True
         finally:
-            # Also runs when the turn is cancelled by an interrupt.
+            # Also runs when the turn is cancelled by an interrupt. An action proposed in
+            # this turn that wasn't asked about to the end is dropped.
+            if self._confirmations is not None:
+                self._confirmations.cancel_unarmed("The user wasn't asked (cut off or failed).")
             if turn:
                 self._remember(turn)
                 if turn.spoken:  # what CARL actually said, even if it was cut off
@@ -318,7 +331,7 @@ class Orchestrator:
         rounds = list(getattr(self.chat, "last_tool_rounds", None) or [])
         searches = [s.query for s in getattr(self.chat, "searches", None) or []]
         heard = turn.spoken and not turn.failed
-        if not heard and not rounds:
+        if not heard and not rounds and not turn.note:
             return
         reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken) if heard else None
         self.conversation.add(
@@ -330,7 +343,7 @@ class Orchestrator:
             notes=[turn.note] if turn.note else [],
         )
 
-    async def _answer_pending(self, text: str) -> str | None:
+    async def _answer_pending(self, text: str, question: int) -> str | None:
         """Run, cancel or expire an action waiting for a yes, on the user's words only
         (the transcript: nothing Claude, a tool or a web page says). Returns the system
         note that goes after the user's words, or None. Never raises into the turn."""
@@ -338,10 +351,29 @@ class Orchestrator:
             return None
         try:
             # Off the loop: a confirmed action may take a moment (opening a page).
-            return await asyncio.to_thread(self._confirmations.answer, text)
+            return await asyncio.to_thread(self._confirmations.answer, text, question)
         except Exception:
             log.exception("Couldn't answer the pending action")
             return None
+
+    async def _ask_pending(self, question: int, token: int) -> bool:
+        """If this turn proposed an action that needs a yes, the server (never the
+        model) asks about it after the reply: "Shall I open the page on bbc.co.uk?". The
+        action is armed only once the question has played to the end; if it fails, the
+        action is cancelled (an interrupt cancels it in _run_turn). True if it asked."""
+        if self._confirmations is None:
+            return False
+        action = self._confirmations.to_ask(question)
+        if action is None:
+            return False
+        try:
+            await self._say(Line("curious", action.ask), token)
+        except Exception as exc:
+            log.warning("Couldn't ask %r: %s", action.ask, exc)
+            self._confirmations.cancel_unarmed("The question couldn't be asked.")
+            return True
+        self._confirmations.arm(action, question)
+        return True
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:
         """Claude deltas -> emotion + sentences -> PCM, into the queue. None marks the end."""

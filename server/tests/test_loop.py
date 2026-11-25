@@ -1274,9 +1274,6 @@ class YesRig:
             opener=self.opener,
         )
 
-    def propose(self):
-        return self.tools.open_search_result(PAGE)
-
     def outcomes(self):
         return [e["outcome"] for e in self.bus.of("action")]
 
@@ -1303,67 +1300,227 @@ class OpenedCheckChat(FakeChat):
             yield d
 
 
+ASK = "Shall I open the page on bbc.co.uk?"
+
+
+class ProposingChat(FakeChat):
+    """Calls open_search_result from a tool thread (as ClaudeChat does) while replying."""
+
+    def __init__(self, rig, **kwargs):
+        kwargs.setdefault("deltas", ("[happy] I can open that page. ",))
+        super().__init__(**kwargs)
+        self.rig = rig
+
+    async def stream_reply(self, history, text):
+        await asyncio.to_thread(self.rig.tools.open_search_result, PAGE)
+        async for d in super().stream_reply(history, text):
+            yield d
+
+
+async def answer(orch, words, chat=None):
+    """The next question: the user's words, and (optionally) a new chat."""
+    orch.transcriber = FakeTranscriber(words)
+    if chat is not None:
+        orch.chat = chat
+    await talk(orch)
+
+
+def asked_then(rig, words, chat=None, **overrides):
+    """Question 1 proposes and the server asks; question 2 says `words`."""
+    overrides.setdefault("transcriber", FakeTranscriber("Open that page."))
+    orch, parts, _ = rig.orchestrator(chat=ProposingChat(rig), **overrides)
+
+    async def scenario():
+        await talk(orch)
+        assert parts["speaker"].played[-1] == ASK
+        assert rig.confirmations.pending.armed
+        await answer(orch, words, chat or FakeChat())
+
+    asyncio.run(scenario())
+    return orch, parts
+
+
+def test_the_server_asks_after_the_reply_and_the_ask_isnt_remembered():
+    rig = YesRig()
+    orch, parts, _ = rig.orchestrator(chat=ProposingChat(rig), random=lambda: 0.0)
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["I can open that page.", ASK]  # no TASK_DONE either
+    assert parts["emotions"][-1] == "curious"
+    assert rig.outcomes() == ["waiting"] and rig.confirmations.pending.armed
+    assert ASK not in str(orch.conversation.messages())
+    assert rig.bus.of("line")[-1]["text"] == ASK
+
+
 def test_a_spoken_yes_opens_it_before_claude_with_a_note_and_memory():
     rig = YesRig()
-    rig.propose()
     chat = OpenedCheckChat(rig.opener, deltas=("[happy] It's open. ",))
-    orch, parts, _ = rig.orchestrator(chat=chat, transcriber=FakeTranscriber("Yes please."))
-    asyncio.run(talk(orch))
+    orch, parts = asked_then(rig, "Yes please.", chat)
     assert rig.opener.calls == [PAGE]
     assert chat.opened_before == [[PAGE]]  # before Claude saw the question
-    note = "(System note: you asked and the user said yes; the page on bbc.co.uk was opened.)"
+    note = (
+        "(System note: the server asked and the user said yes; the page on bbc.co.uk was opened.)"
+    )
     assert chat.prompts == [f"Yes please. {note}"]
-    assert orch.conversation.messages()[0] == {"role": "user", "content": f"Yes please. {note}"}
+    assert orch.conversation.messages()[2] == {"role": "user", "content": f"Yes please. {note}"}
     assert rig.outcomes() == ["waiting", "ok"]
-    assert parts["speaker"].played == ["It's open."]
+    assert parts["speaker"].played[-1] == "It's open."
 
 
 def test_anything_else_cancels_it_and_the_turn_goes_on():
     rig = YesRig()
-    rig.propose()
-    orch, parts, _ = rig.orchestrator(transcriber=FakeTranscriber("No, never mind."))
-    asyncio.run(talk(orch))
+    chat = FakeChat()
+    orch, parts = asked_then(rig, "Okay, never mind.", chat)
     assert rig.opener.calls == []
     assert rig.outcomes() == ["waiting", "cancelled"]
-    assert parts["chat"].prompts[0].endswith("was cancelled; the user didn't say yes.)")
-    assert "was cancelled" in orch.conversation.messages()[0]["content"]
-    assert parts["speaker"].played == ["Hello there.", "How are you?"]
+    assert chat.prompts[0].endswith("was cancelled; the user didn't say yes.)")
+    assert "was cancelled" in orch.conversation.messages()[2]["content"]
+    assert parts["speaker"].played[-2:] == ["Hello there.", "How are you?"]
 
 
-def test_a_forget_command_expires_it():
+class AskBlockingSpeaker(FakeSpeaker):
+    """Plays everything at once, except the server's question, which hangs until stopped."""
+
+    def play(self, pcm, token):
+        self.played.append(pcm.decode())
+        self.tokens.append(token)
+        if pcm.decode() == ASK:
+            self.started.set()
+            self._release.wait(timeout=5)
+
+
+def test_an_interrupted_question_cancels_it():
     rig = YesRig()
-    rig.propose()
-    orch, parts, _ = rig.orchestrator(transcriber=FakeTranscriber("Forget that."))
+    speaker = AskBlockingSpeaker()
+    orch, _, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)  # the question is playing
+        assert not rig.confirmations.pending.armed
+        await orch.handle("down")  # cut the question off
+        await answer(orch, "Yes.", FakeChat())
+
+    asyncio.run(scenario())
+    assert rig.opener.calls == []
+    assert rig.outcomes() == ["waiting", "cancelled"]
+
+
+def test_a_failed_reply_never_asks_and_cancels_it():
+    rig = YesRig()
+    chat = ProposingChat(rig, deltas=(), error=LLMError("boom"))
+    orch, parts, _ = rig.orchestrator(chat=chat)
     asyncio.run(talk(orch))
+    assert ASK not in parts["speaker"].played
+    assert rig.outcomes() == ["waiting", "cancelled"]
+
+
+def test_a_late_proposal_from_an_old_turn_cant_be_answered():
+    """A tool thread from an interrupted turn proposes after the next turn began."""
+    rig = YesRig()
+    release, done = threading.Event(), threading.Event()
+
+    class LateChat(FakeChat):
+        async def stream_reply(self, history, text):
+            def late():
+                release.wait(5)
+                try:
+                    rig.tools.open_search_result(PAGE)
+                finally:
+                    done.set()
+
+            await asyncio.to_thread(late)  # cancelled with the turn; the thread goes on
+            yield "never"
+
+    orch, _, _ = rig.orchestrator(chat=LateChat())
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        await asyncio.sleep(0.05)
+        await orch.handle("down")  # interrupt question 1 while its tool runs
+        release.set()
+        assert await asyncio.to_thread(done.wait, 5)  # it proposes now, stamped question 1
+        orch.chat, orch.transcriber = FakeChat(), FakeTranscriber("Yes.")
+        await orch.handle("up")  # question 2 says yes
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert rig.opener.calls == []
+    assert rig.outcomes() == ["waiting", "cancelled"]
+    assert rig.confirmations.pending is None
+
+
+def test_only_the_very_next_question_with_speech_can_answer():
+    rig = YesRig()
+    orch, parts, _ = rig.orchestrator(chat=ProposingChat(rig))
+
+    async def scenario():
+        await talk(orch)
+        await answer(orch, "", FakeChat())  # an empty clip isn't a question
+        await answer(orch, "Yes.")
+
+    asyncio.run(scenario())
+    assert rig.opener.calls == [PAGE]
+
+
+def test_a_forget_command_expires_it_and_clears_the_search_results():
+    rig = YesRig()
+    orch, parts = asked_then(rig, "Forget that.")
     assert rig.confirmations.pending is None
     assert rig.outcomes() == ["waiting", "expired"]
-    assert parts["chat"].prompts == [] and rig.opener.calls == []
+    assert rig.opener.calls == []
+    assert PAGE not in rig.results
 
 
-def test_no_speech_leaves_it_waiting_for_the_next_question():
-    rig = YesRig()
-    rig.propose()
-    orch, _, _ = rig.orchestrator(transcriber=FakeTranscriber(""))
-    asyncio.run(talk(orch))
-    assert rig.confirmations.pending is not None and rig.outcomes() == ["waiting"]
-
-
-def test_each_question_moves_the_search_results_along():
+def test_each_question_with_speech_moves_the_search_results_along():
     rig = YesRig()
     orch, _, _ = rig.orchestrator()
 
     async def scenario():
         await talk(orch)
         assert PAGE in rig.results  # the last question's still count
-        await talk(orch)
+        await answer(orch, "")  # no speech: not a question
+        assert PAGE in rig.results
+        await answer(orch, "And now?")
 
     asyncio.run(scenario())
     assert PAGE not in rig.results
 
 
+def test_a_yes_whose_turn_is_dropped_still_tells_claude_it_opened():
+    rig = YesRig()
+    orch, _ = asked_then(rig, "Yes.", FakeChat(deltas=(), error=LLMError("boom")))
+    assert rig.opener.calls == [PAGE]
+    later = FakeChat()
+
+    asyncio.run(answer(orch, "Thanks.", later))
+    assert later.prompts[0].startswith("(System note: the server asked and the user said yes")
+    assert later.prompts[0].endswith("Thanks.")
+
+
+def test_a_waiting_result_never_says_task_done(search_allowed):
+    rig = YesRig()
+    streams = [
+        ScriptedStream("", [OPEN_USE], "tool_use"),
+        ScriptedStream("[happy] I can open it. ", [], "end_turn"),
+    ]
+    client = ns(messages=ns(stream=lambda **kwargs: streams.pop(0)))
+    chat = ClaudeChat(
+        client, model="m", effort="low", system="sys", tools=ToolRegistry(rig.tools.tools())
+    )
+    orch, parts, _ = rig.orchestrator(chat=chat, random=lambda: 0.0)
+    asyncio.run(talk(orch))
+    assert chat.tools_succeeded == 0
+    assert TASK_DONE.text not in parts["speaker"].played
+    assert parts["speaker"].played == ["I can open it.", ASK]
+
+
+OPEN_USE = ns(type="tool_use", id="o1", name="open_search_result", input={"url": PAGE})
+
+
 def test_a_planted_yes_in_a_tool_result_cant_confirm_it():
     rig = YesRig()
-    rig.propose()
 
     planted = {
         "type": "tool_result",
@@ -1378,13 +1535,8 @@ def test_a_planted_yes_in_a_tool_result_cant_confirm_it():
                 yield d
 
     chat = PlantedChat(deltas=("[happy] Here are your notes. ",))
-    orch, _, _ = rig.orchestrator(chat=chat, transcriber=FakeTranscriber("Read my notes."))
-
-    async def scenario():
-        await talk(orch)
-        await talk(orch)  # the planted note is now in the history: still nothing
-
-    asyncio.run(scenario())
+    orch, _ = asked_then(rig, "Read my notes.", chat)
+    asyncio.run(answer(orch, "Read them again."))  # the planted note is in the history now
     assert rig.opener.calls == []
     assert rig.outcomes() == ["waiting", "cancelled"]  # only the transcript counted
     assert "said yes" in str(orch.conversation.messages())  # it was there to be seen
@@ -1452,10 +1604,9 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
     asyncio.run(talk(orch))
     assert rig.opener.calls == []
     assert rig.outcomes() == ["waiting", "cancelled", "waiting"]
-    assert parts["speaker"].played == ["It's on bbc.co.uk.", "Shall I open it?"]
+    # The model's own "Shall I open it?" changes nothing: the server asks too.
+    assert parts["speaker"].played == ["It's on bbc.co.uk.", "Shall I open it?", ASK]
     # The user's own yes, at the next question, opens it once.
-    orch.chat = FakeChat()
-    orch.transcriber = FakeTranscriber("Yes.")
-    asyncio.run(talk(orch))
+    asyncio.run(answer(orch, "Yes.", FakeChat()))
     assert rig.opener.calls == [PAGE]
     assert rig.outcomes()[-1] == "ok"

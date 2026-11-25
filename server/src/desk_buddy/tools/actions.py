@@ -14,9 +14,9 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, NoReturn
 
-from desk_buddy.tools.registry import ToolError
+from desk_buddy.tools.registry import NotDone, ToolError
 from desk_buddy.tools.untrusted import shorten
 
 log = logging.getLogger(__name__)
@@ -108,8 +108,9 @@ class ActionGuard:
         """A powerful action: checked and counted now like run(), but not run. It waits
         in `confirmations` (tools.confirm.Confirmations) for the user's spoken yes at the
         next question, and runs then without being counted again (and only if computer
-        control is still on). Returns what Claude is told; raises ToolError if refused.
-        `public_args` replace `args` on the dashboard (the log shows `args`)."""
+        control is still on). Returns what Claude is told (NotDone: not a success yet);
+        raises ToolError if refused. `public_args` replace `args` on the dashboard (the
+        log shows `args`)."""
         from desk_buddy.tools.confirm import PendingAction  # it imports this module
 
         shown = _shown(args)
@@ -125,10 +126,30 @@ class ActionGuard:
         confirmations.propose(PendingAction(name, shown, public, description, confirmed))
         log.info("Action: %s %s -> waiting for a yes", name, shown)
         self._publish(name, public, f"Waiting for the user to say yes to {description}.", "waiting")
-        return (
-            f"Not done yet: ask the user to confirm opening {description}; it runs only if "
-            "they say yes."
+        return NotDone(
+            f"Not done yet: opening {description} waits for the user's yes. After your "
+            "reply I will ask them myself, so don't ask and never say it's open; at most "
+            "say briefly that you can open it."
         )
+
+    def refuse(
+        self,
+        name: str,
+        args: Mapping[str, Any],
+        message: str,
+        *,
+        public_args: Mapping[str, Any] | None = None,
+    ) -> NoReturn:
+        """Refuse a call the tool itself rejected (an unknown name, an address that isn't
+        allowed): counted toward the limits like any attempt, logged, shown on the
+        dashboard as refused, and raised as ToolError(message) for Claude. If computer
+        control is off or a limit is hit, that refusal is raised instead."""
+        shown = _shown(args)
+        public = _shown(public_args) if public_args is not None else shown
+        self._admit(name, f"{name} {shown}", public)
+        log.info("Action: %s %s -> refused: %s", name, shown, _one_line(message))
+        self._publish(name, public, message, "refused")
+        raise ToolError(message)
 
     def _admit(self, name: str, described: str, shown: str) -> None:
         """Refuse (log, show and raise) if off or over a limit; otherwise count it."""

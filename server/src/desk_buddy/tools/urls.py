@@ -4,6 +4,7 @@ characters, and nothing invisible or ambiguous in it."""
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import threading
 import unicodedata
@@ -31,6 +32,11 @@ class SearchResults:
         with self._lock:
             self._before, self._now = self._now, set()
 
+    def clear(self) -> None:
+        """Forget every result (a forget command)."""
+        with self._lock:
+            self._before, self._now = set(), set()
+
     def add(self, urls: Iterable[str]) -> None:
         with self._lock:
             self._now.update(u for u in urls if isinstance(u, str) and u)
@@ -41,13 +47,52 @@ class SearchResults:
 
 
 def site_name(url: str) -> str:
-    """The site to name aloud ("bbc.co.uk"), or "that page" if the host is anything but
-    plain letters, digits, dots and hyphens (it goes into notes Claude reads)."""
+    """The site to name aloud ("bbc.co.uk"), or "" if the host is anything but plain
+    letters, digits, dots and hyphens (it goes into notes Claude reads)."""
     try:
         host = (urlsplit(url).hostname or "").removeprefix("www.")
     except ValueError:
-        return "that page"
-    return host if _PLAIN_HOST.fullmatch(host) else "that page"
+        return ""
+    return host if _PLAIN_HOST.fullmatch(host) else ""
+
+
+def page_description(url: str) -> str:
+    """How to name a page aloud: "the page on bbc.co.uk", or just "the page"."""
+    site = site_name(url)
+    return f"the page on {site}" if site else "the page"
+
+
+_LOCAL_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home.arpa")
+_NUMERIC_HOST = re.compile(r"[0-9.]+|0x[0-9a-fx.]+")
+
+
+def is_public_host(url: str) -> bool:
+    """Whether the address's host is on the public internet as far as we can tell: not
+    this computer or the local network. Refused: localhost and single-label names,
+    .local/.localhost (and similar) names, and loopback, private, link-local, reserved,
+    multicast or unspecified IP addresses (including short numeric forms like 127.1)."""
+    try:
+        host = (urlsplit(url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if not host or host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if _NUMERIC_HOST.fullmatch(host):
+            return False  # a number a browser would still read as an IP address
+        return "." in host  # a single-label name is a local one
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped  # ::ffff:127.0.0.1 is 127.0.0.1
+    return not (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
 
 
 def check_url(url: Any) -> str:

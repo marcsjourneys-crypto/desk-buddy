@@ -55,25 +55,30 @@ Media keys and PC volume are left for later.
 
 ## Part 3: The spoken "yes"
 
-- **Which tools need it:** a tool can be marked as needing a yes (`needs_yes=True`); today only `open_search_result`.
+(Revised after review on 2026-11-25: the server asks, not the model; a strict vocabulary; the very next question only.)
+
+- **Which tools need it:** a tool goes through `ActionGuard.run_after_yes` instead of `run`; today only `open_search_result`.
 - **Proposing:**
-  - **Nothing runs yet:** when such a tool is called, `ActionGuard` counts and logs the attempt, then hands the checked action to `Confirmations`, which holds **one** pending action (tool, args, a short description such as the site, the time and the question number). A new one replaces the old.
-  - **What CARL is told:** the tool result is "Not done yet: ask the user to confirm opening <site>; it runs only if they say yes."
+  - **Nothing runs yet:** when such a tool is called, `ActionGuard` counts and logs the attempt, then hands the checked action to `Confirmations`, which holds **one** pending action (tool, args, a short description such as "the page on bbc.co.uk", and the question it was proposed in). A new one replaces the old (shown as `cancelled`).
+  - **What CARL is told:** the tool result says it isn't done yet and waits for the user's yes; the robot will ask after the reply, so CARL must not ask itself or say it's open. It isn't counted as a success (no `TASK_DONE`).
   - **What the Live tab shows:** an action event with `outcome: "waiting"`.
-- **Confirming:** at the start of the **next** question, **before** Claude, within **60 s**, the loop checks the transcript.
-  - **It's a yes only if all of these hold:**
-    - after lowercasing and removing punctuation, it has at most 6 words;
+- **Asking: the server asks, never the model.** When a turn ends with an action proposed in that turn, the loop speaks a canned line after CARL's reply: "Shall I open <description>?" (emotion curious; not remembered; interruptible). The action is **armed** only once that line has played to the end. If the line is interrupted or fails, or the reply failed, the action is cancelled.
+- **Confirming:** at the start of the **very next question with speech**, **before** Claude, within **60 s** of the question, the loop checks the transcript (and only the transcript).
+  - **It's a yes only if all of these hold** (after lowercasing, curly apostrophes made straight, and punctuation removed):
+    - it has at most 6 words;
     - it contains a yes word or phrase (`yes`, `yeah`, `yep`, `yup`, `sure`, `ok`, `okay`, `go ahead`, `do it`, `open it`, `please do`);
+    - **every** word is a yes word or one of the fillers `please`, `carl` (`karl`), `thanks`, `thank`, `you`, `it`, `go`, `ahead`, `do`, `open`, `that`, `alright`, `right`, `oh` ("Yeah, nah", "Okay, never mind" and "Sure, hang on" aren't a yes);
     - it contains none of `no`, `nope`, `don't`, `dont`, `not`, `stop`, `cancel`, `wait`.
   - **On a yes:**
-    - the action runs, without being counted again by the guard;
+    - the action runs, without being counted again by the guard (but only if computer control is still on);
     - it's logged and shown on the Live tab as `ok` or `failed`;
-    - Claude gets the user's words plus "(System note: you asked and the user said yes; <description> was opened.)", or the failure.
+    - Claude gets the user's words plus "(System note: the server asked and the user said yes; <description> was opened.)", or the failure. If that turn is dropped (no reply), the note goes in front of the next user message instead.
   - **Otherwise:**
     - the action is dropped;
     - the Live tab shows `cancelled`;
-    - the user's message gets "(System note: the pending action <description> was cancelled; the user didn't say yes.)", and the turn goes on as usual.
-- **Expiry:** after 60 s (shown as `expired`), on a forget command, when computer control is turned off, and on restart.
+    - the user's message gets "(System note: the pending action, opening <description>, was cancelled; the user didn't say yes.)", and the turn goes on as usual.
+- **Expiry:** 60 s after the question (shown as `expired`, with a note), on a forget command, when computer control is turned off, and on restart. A tool thread that proposes late (after its turn was cut off) is stamped with its own question and can never be asked about or answered.
+- **Which pages:** `open_search_result` also refuses pages on this computer or the local network (loopback, private, link-local and similar IP addresses, `localhost`, `.local`/`.localhost` and single-label names).
 - **Only the user's voice can confirm:**
   - there's no confirm tool;
   - tool results, web text and notes can't approve an action.
@@ -116,7 +121,7 @@ Media keys and PC volume are left for later.
 
 1. On the Apps tab, find apps, tick Notepad and your browser, and give the browser the name "browser". "Open notepad" opens it.
 2. Add a bookmark ("weather" → a forecast page). "Open the weather" opens it.
-3. Ask a question that needs a search, then "open that page". CARL names the site and asks. Say "yes" and it opens.
+3. Ask a question that needs a search, then "open that page". After CARL's reply, the robot asks "Shall I open the page on <site>?". Say "yes" and it opens.
 4. Repeat, but say "no, never mind": nothing opens, and the Live tab shows "cancelled".
 5. Repeat, wait more than a minute, then say "yes": nothing opens (expired).
 6. With `COMPUTER_CONTROL` off, "open notepad" gets "that isn't switched on".
