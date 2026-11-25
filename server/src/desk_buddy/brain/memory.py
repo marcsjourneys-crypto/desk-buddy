@@ -101,6 +101,13 @@ class Conversation:
         self._turns.clear()
         self._pending = []
 
+    def set_max_turns(self, max_turns: int) -> None:
+        """Change how many exchanges are kept (HISTORY_TURNS); a smaller value drops the
+        oldest at once."""
+        if max_turns < 1:
+            raise ValueError("max_turns must be >= 1")
+        self._turns = deque(self._turns, maxlen=max_turns)
+
     def user_message(self, text: str) -> str:
         """The next user message as sent to Claude: noted if the last reply was cut off,
         or if CARL ran tools and was cut off before replying."""

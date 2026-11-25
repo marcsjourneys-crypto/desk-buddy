@@ -108,15 +108,17 @@ class PiperSynthesizer:
         speed: float = 1.0,
         loader: Callable[[Any], Any] | None = None,
     ) -> None:
-        if not MIN_TTS_SPEED <= speed <= MAX_TTS_SPEED:  # also rejects nan
-            raise ValueError(f"speed must be {MIN_TTS_SPEED}-{MAX_TTS_SPEED}, got {speed!r}")
+        self._length_scale = _length_scale(speed)
         if loader is None:
             from piper import PiperVoice
 
             loader = PiperVoice.load
         self._voice = loader(model_path)
-        self._length_scale = 1.0 / speed  # Piper: bigger length_scale = slower speech
         self._lock = threading.Lock()
+
+    def set_speed(self, speed: float) -> None:
+        """Change the speed (TTS_SPEED from the dashboard); the next sentence uses it."""
+        self._length_scale = _length_scale(speed)
 
     def synthesize(self, text: str) -> bytes:
         if not text.strip():
@@ -136,6 +138,13 @@ class PiperSynthesizer:
 
     def close(self) -> None:
         """Nothing to release (the model is freed with the object); safe to call twice."""
+
+
+def _length_scale(speed: float) -> float:
+    """Piper's length_scale for a speed: bigger is slower."""
+    if not MIN_TTS_SPEED <= speed <= MAX_TTS_SPEED:  # also rejects nan
+        raise ValueError(f"speed must be {MIN_TTS_SPEED}-{MAX_TTS_SPEED}, got {speed!r}")
+    return 1.0 / speed
 
 
 Opener = Callable[..., Any]  # urllib.request.urlopen(url, timeout=...)

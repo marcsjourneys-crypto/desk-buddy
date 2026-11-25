@@ -7,7 +7,9 @@ import contextlib
 import logging
 import socket
 import sys
+import threading
 from collections.abc import Callable
+from typing import Any
 
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
@@ -18,6 +20,7 @@ from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator, State
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
+from desk_buddy.settings_store import LiveSettings
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
@@ -84,33 +87,38 @@ async def _run(settings: Settings) -> None:
         speaker = Speaker()
         stack.callback(speaker.close)
         bus = EventBus()  # live events for the dashboard; never blocks the voice loop
-        guard = ActionGuard(settings.computer_control, bus=bus)
-        music, ducker = _music_tools(settings, guard)
-        if ducker is not None:
-            stack.callback(ducker.close)  # runs after the farewell, which restores the music
-        tools = build_tools(settings, music=music)
-        log.info(
-            "Note tools: %s",
-            f"on ({settings.obsidian_vault_path})"
-            if "take_note" in tools
-            else "off (no OBSIDIAN_VAULT_PATH)",
-        )
-        chat = create_chat(settings, tools)
+        brain = Brain(settings, bus=bus)
+        stack.callback(brain.close)  # runs after the farewell, which restores the music
+        conversation = Conversation(settings.history_turns)
         # A connected robot takes over the mic, speaker and button; else the PC's are used.
         switch = DeviceSwitch(mic, speaker)
+        live = LiveSettings(settings)
+
+        def on_question() -> None:
+            live.apply()  # dashboard changes land between turns, never during one
+            brain.guard.new_question()
+
+        def on_state(state: State) -> None:
+            switch.send_state(state)
+            brain.on_state(state)  # ducking; never blocks or raises
+
         orchestrator = Orchestrator(
             mic=switch.mic,
             transcriber=transcriber,
-            chat=chat,
+            chat=brain.chat,
             synthesizer=synthesizer,
             speaker=switch.player,
-            conversation=Conversation(settings.history_turns),
-            on_state=_with_ducking(switch.send_state, ducker),
+            conversation=conversation,
+            on_state=on_state,
             on_emotion=switch.send_emotion,
-            on_question=guard.new_question,
+            on_question=on_question,
             bus=bus,
         )
         stack.push_async_callback(orchestrator.shutdown)
+        live.on_question(brain.on_settings)
+        live.on_question(lambda old, new: setattr(orchestrator, "chat", brain.chat))
+        live.on_question(lambda old, new: conversation.set_max_turns(new.history_turns))
+        live.on_now(lambda old, new: _set_speed(synthesizer, new.tts_speed))
 
         events: asyncio.Queue[str] = asyncio.Queue()
         if settings.robot_token:
@@ -158,6 +166,67 @@ async def _run(settings: Settings) -> None:
         await orchestrator.run(events)
 
 
+# Settings whose change means new tools and a new chat (prompt, model, effort, tools).
+_CHAT_SETTINGS = (
+    "computer_control",
+    "music_duck",
+    "max_sentences",
+    "llm_model",
+    "llm_effort",
+    "obsidian_vault_path",
+    "obsidian_daily_folder",
+    "obsidian_ideas_folder",
+)
+_MUSIC_SETTINGS = ("computer_control", "music_duck")
+
+
+class Brain:
+    """What a turn uses that a live setting can change: the action guard, the music tools
+    and their ducker, the tool registry and the chat. Rebuilt between turns (from
+    LiveSettings.apply at the start of a question), never during one."""
+
+    def __init__(self, settings: Settings, *, bus: EventBus) -> None:
+        self.guard = ActionGuard(settings.computer_control, bus=bus)
+        self.music: MusicTools | None = None
+        self.ducker: MusicDucker | None = None
+        self._build(settings, music=True)
+
+    def on_settings(self, old: Settings, new: Settings) -> None:
+        self.guard.enabled = new.computer_control
+        music = any(getattr(old, a) != getattr(new, a) for a in _MUSIC_SETTINGS)
+        if music or any(getattr(old, a) != getattr(new, a) for a in _CHAT_SETTINGS):
+            self._build(new, music=music)
+
+    def on_state(self, state: State) -> None:
+        if self.ducker is not None:
+            self.ducker.on_state(state)
+
+    def close(self) -> None:
+        if self.ducker is not None:
+            self.ducker.close()
+
+    def _build(self, settings: Settings, *, music: bool) -> None:
+        if music:
+            old = self.ducker
+            self.music, self.ducker = _music_tools(settings, self.guard)
+            if old is not None:
+                # It restores the music, which can take a moment: never on the event loop.
+                threading.Thread(target=old.close, name="duck-close", daemon=True).start()
+        self.tools = build_tools(settings, music=self.music)
+        log.info(
+            "Note tools: %s",
+            f"on ({settings.obsidian_vault_path})"
+            if "take_note" in self.tools
+            else "off (no OBSIDIAN_VAULT_PATH)",
+        )
+        self.chat = create_chat(settings, self.tools)
+
+
+def _set_speed(synthesizer: Any, speed: float) -> None:
+    if hasattr(synthesizer, "set_speed"):  # Piper; SAPI keeps its own pace
+        synthesizer.set_speed(speed)
+
+
 def _music_tools(
     settings: Settings, guard: ActionGuard
 ) -> tuple[MusicTools | None, MusicDucker | None]:
@@ -182,19 +251,6 @@ def _music_tools(
         return MusicTools(control, guard, ducker=ducker), ducker
     log.info("Music tools: off (%s)", reason)
     return None, None
-
-
-def _with_ducking(
-    send_state: Callable[[State], None], ducker: MusicDucker | None
-) -> Callable[[State], None]:
-    if ducker is None:
-        return send_state
-
-    def on_state(state: State) -> None:
-        send_state(state)
-        ducker.on_state(state)  # never blocks or raises
-
-    return on_state
 
 
 async def _make_synthesizer(settings: Settings) -> SapiSynthesizer | PiperSynthesizer:

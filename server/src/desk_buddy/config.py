@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -9,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 
 from desk_buddy.ptt import parse_key
+
+log = logging.getLogger(__name__)
 
 DEFAULT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
@@ -37,6 +41,27 @@ ENV_KEYS = (
     "COMPUTER_CONTROL",
     "SPOTIFY_CLIENT_ID",
     "MUSIC_DUCK",
+)
+
+# The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
+DASHBOARD_KEYS = frozenset(
+    {
+        "COMPUTER_CONTROL",
+        "MUSIC_DUCK",
+        "MAX_SENTENCES",
+        "HISTORY_TURNS",
+        "TTS_SPEED",
+        "TTS_VOICE",
+        "OBSIDIAN_VAULT_PATH",
+        "OBSIDIAN_DAILY_FOLDER",
+        "OBSIDIAN_IDEAS_FOLDER",
+        "LLM_MODEL",
+        "LLM_EFFORT",
+        "STT_MODEL",
+        "STT_DEVICE",
+        "STT_COMPUTE_TYPE",
+        "PTT_KEY",
+    }
 )
 
 # The provider seam: each value maps to one Chat class in llm.create_chat().
@@ -129,15 +154,86 @@ def parse_env_file(text: str) -> dict[str, str]:
     return values
 
 
-def load_settings(
-    env_path: Path | None = DEFAULT_ENV_PATH,
-    environ: Mapping[str, str] | None = None,
-) -> Settings:
+def read_env(
+    env_path: Path | None = DEFAULT_ENV_PATH, environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The raw values from .env, overridden by non-blank process environment variables."""
     merged: dict[str, str] = {}
     if env_path is not None and env_path.is_file():
         merged.update(parse_env_file(env_path.read_text(encoding="utf-8-sig")))
     env = os.environ if environ is None else environ
     merged.update({k: env[k] for k in ENV_KEYS if env.get(k, "").strip()})
+    return merged
+
+
+def dashboard_settings_path() -> Path:
+    return app_data_dir() / "settings.json"
+
+
+def read_dashboard_values(path: Path) -> tuple[dict[str, str], str | None]:
+    """The dashboard's saved settings ({KEY: text}, editable keys only) and, if the file
+    couldn't be used, why. A missing file is fine; a corrupt one is ignored."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError) as exc:
+        return {}, f"{path.name} couldn't be read ({type(exc).__name__}); using .env and defaults"
+    if not isinstance(raw, dict):
+        return {}, f"{path.name} isn't a settings object; using .env and defaults"
+    values = {
+        k: str(v)
+        for k, v in raw.items()
+        if k in DASHBOARD_KEYS and isinstance(v, (str, int, float, bool))
+    }
+    return values, None
+
+
+def load_settings(
+    env_path: Path | None = DEFAULT_ENV_PATH,
+    environ: Mapping[str, str] | None = None,
+    dashboard: Mapping[str, str] | None = None,
+) -> Settings:
+    """Settings: the dashboard over .env (and the process environment) over defaults.
+
+    Only DASHBOARD_KEYS can come from the dashboard; a blank one means the default. With
+    `dashboard` left out, the real startup (default .env, real environment) reads the
+    dashboard's file and skips, with a warning, any value of it that no longer validates:
+    a dashboard setting must never stop CARL from starting. Any other call (tests, tools)
+    leaves the file alone."""
+    if dashboard is None:
+        if env_path == DEFAULT_ENV_PATH and environ is None:
+            values, error = read_dashboard_values(dashboard_settings_path())
+            if error:
+                log.warning("Dashboard settings: %s", error)
+            return _load_skipping_bad(env_path, environ, values)
+        dashboard = {}
+    return _load(env_path, environ, dashboard)
+
+
+def _load_skipping_bad(
+    env_path: Path | None, environ: Mapping[str, str] | None, dashboard: Mapping[str, str]
+) -> Settings:
+    try:
+        return _load(env_path, environ, dashboard)
+    except ConfigError:
+        if not dashboard:
+            raise
+    bad = []
+    for key, value in dashboard.items():
+        try:
+            _load(env_path, environ, {key: value})
+        except ConfigError as exc:
+            log.warning("Dashboard setting %s ignored: %s", key, exc)
+            bad.append(key)
+    return _load(env_path, environ, {k: v for k, v in dashboard.items() if k not in bad})
+
+
+def _load(
+    env_path: Path | None, environ: Mapping[str, str] | None, dashboard: Mapping[str, str]
+) -> Settings:
+    merged = read_env(env_path, environ)
+    merged.update({k: str(v) for k, v in dashboard.items() if k in DASHBOARD_KEYS})
 
     def get(key: str, default: str) -> str:
         return merged.get(key, "").strip() or default

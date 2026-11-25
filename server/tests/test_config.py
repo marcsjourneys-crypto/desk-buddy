@@ -90,6 +90,82 @@ def test_invalid_values_are_rejected(key, value):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
 
 
+def test_dashboard_values_win_over_env_and_defaults(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_API_KEY=k\nMAX_SENTENCES=3\nLLM_EFFORT=high\n")
+    s = load_settings(
+        env_path=env, environ={}, dashboard={"MAX_SENTENCES": "5", "COMPUTER_CONTROL": "on"}
+    )
+    assert (s.max_sentences, s.computer_control, s.llm_effort) == (5, True, "high")
+
+
+def test_a_blank_dashboard_value_means_the_default_even_over_env(tmp_path):
+    env = tmp_path / ".env"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    env.write_text(f"ANTHROPIC_API_KEY=k\nOBSIDIAN_VAULT_PATH={vault}\nMAX_SENTENCES=3\n")
+    s = load_settings(
+        env_path=env, environ={}, dashboard={"OBSIDIAN_VAULT_PATH": "", "MAX_SENTENCES": ""}
+    )
+    assert s.obsidian_vault_path == ""  # notes turned off from the dashboard
+    assert s.max_sentences == 2
+
+
+def test_dashboard_can_never_set_secrets_or_hosts(tmp_path):
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k"},
+        dashboard={
+            "ANTHROPIC_API_KEY": "evil",
+            "ROBOT_TOKEN": "x" * 20,
+            "SPOTIFY_CLIENT_ID": "evil",
+            "SERVER_HOST": "0.0.0.0",
+            "SERVER_PORT": "1",
+        },
+    )
+    assert s.anthropic_api_key == "k"
+    assert (s.robot_token, s.spotify_client_id, s.server_host, s.server_port) == (
+        "",
+        "",
+        "127.0.0.1",
+        8765,
+    )
+
+
+def test_the_real_startup_reads_the_dashboard_file_and_skips_bad_values(
+    monkeypatch, tmp_path, caplog
+):
+    import json
+
+    import desk_buddy.config as config
+
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_API_KEY=k\n")
+    monkeypatch.setattr(config, "DEFAULT_ENV_PATH", env)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("MAX_SENTENCES", raising=False)
+    settings_file = tmp_path / "desk-buddy" / "settings.json"
+    settings_file.parent.mkdir()
+    gone = tmp_path / "deleted-vault"
+    settings_file.write_text(
+        json.dumps({"MAX_SENTENCES": "4", "OBSIDIAN_VAULT_PATH": str(gone)}), encoding="utf-8"
+    )
+    s = config.load_settings(env_path=env)
+    assert s.max_sentences == 4  # the good value is used
+    assert s.obsidian_vault_path == ""  # the bad one is skipped, never fatal
+    assert "OBSIDIAN_VAULT_PATH" in caplog.text
+
+
+def test_tests_and_tools_never_read_the_dashboard_file(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    (tmp_path / "desk-buddy").mkdir()
+    (tmp_path / "desk-buddy" / "settings.json").write_text(json.dumps({"MAX_SENTENCES": "9"}))
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.max_sentences == 2
+
+
 def test_computer_control_defaults():
     s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
     assert s.computer_control is False

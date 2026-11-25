@@ -148,6 +148,15 @@ def test_piper_close_is_safe_twice():
     synth.close()
 
 
+def test_piper_speed_can_change_between_sentences():
+    synth, voice, _ = make_synth(1.0)
+    synth.set_speed(1.25)
+    synth.synthesize("Hi.")
+    assert voice.configs[0].length_scale == pytest.approx(0.8)
+    with pytest.raises(ValueError):
+        synth.set_speed(5)
+
+
 @pytest.mark.parametrize("speed", [0.4, 2.1, float("nan")])
 def test_piper_refuses_a_speed_out_of_range(speed):
     with pytest.raises(ValueError, match="speed"):

@@ -20,8 +20,9 @@ def calls():
 
 
 @pytest.fixture
-def fakes(monkeypatch, calls):
+def fakes(monkeypatch, calls, tmp_path):
     """Patch every device and model in __main__ with fakes that record their closing."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))  # never the user's real app data
 
     class FakeTranscriber:
         def __init__(self, *args, **kwargs):
@@ -35,6 +36,9 @@ def fakes(monkeypatch, calls):
 
         def close(self):
             calls.append("synthesizer closed")
+
+        def set_speed(self, speed):
+            calls.append(("synthesizer speed", speed))
 
     class FakeMicrophone:
         def __init__(self, *args, **kwargs):
@@ -383,6 +387,57 @@ def test_one_event_bus_feeds_the_dashboard(monkeypatch, fakes, calls):
     assert app_kwargs["bus"] is bus
 
 
+def test_dashboard_settings_apply_live_at_the_next_question(monkeypatch, fakes, calls):
+    lives, guards, chats = [], [], []
+
+    class SpyLive(entry.LiveSettings):
+        def __init__(self, settings):
+            super().__init__(settings)
+            lives.append(self)
+
+    class SpyGuard(entry.ActionGuard):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            guards.append(self)
+
+    monkeypatch.setattr(entry, "LiveSettings", SpyLive)
+    monkeypatch.setattr(entry, "ActionGuard", SpyGuard)
+    monkeypatch.setattr(entry, "create_chat", lambda s, tools=None: chats.append(s) or object())
+    entry.main()
+    (live,) = lives
+    (guard,) = guards
+    kwargs = orchestrator_kwargs(calls)
+    conversation = kwargs["conversation"]
+    for n in range(5):
+        conversation.add(f"q{n}", "[happy] r")
+    assert len(chats) == 1
+
+    new = Settings(anthropic_api_key="k", computer_control=True, history_turns=2, tts_speed=1.5)
+    live.propose(new)
+    assert ("synthesizer speed", 1.5) in calls  # the next sentence
+    assert guard.enabled is False  # the rest waits for the next question
+    kwargs["on_question"]()
+    assert guard.enabled is True
+    assert len(conversation) == 2
+    assert len(chats) == 2 and chats[-1] is new  # tools and chat rebuilt
+
+
+def test_a_settings_change_that_doesnt_touch_the_chat_doesnt_rebuild_it(monkeypatch, fakes, calls):
+    lives, chats = [], []
+
+    class SpyLive(entry.LiveSettings):
+        def __init__(self, settings):
+            super().__init__(settings)
+            lives.append(self)
+
+    monkeypatch.setattr(entry, "LiveSettings", SpyLive)
+    monkeypatch.setattr(entry, "create_chat", lambda s, tools=None: chats.append(s) or object())
+    entry.main()
+    lives[0].propose(Settings(anthropic_api_key="k", history_turns=3))
+    orchestrator_kwargs(calls)["on_question"]()
+    assert len(chats) == 1
+
+
 def orchestrator_kwargs(calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     return kwargs
@@ -430,6 +485,14 @@ def test_music_tools_are_off_unless_switched_on_and_logged_in(
 def test_music_tools_are_on_with_a_login(monkeypatch, fakes, calls, caplog):
     from desk_buddy.tools.spotify import SpotifyControl
 
+    questions = []
+
+    class SpyGuard(entry.ActionGuard):
+        def new_question(self):
+            questions.append(1)
+            super().new_question()
+
+    monkeypatch.setattr(entry, "ActionGuard", SpyGuard)
     control = SpotifyControl(object(), pc_name="pc")
     made, tools = music_run(
         monkeypatch,
@@ -444,9 +507,8 @@ def test_music_tools_are_on_with_a_login(monkeypatch, fakes, calls, caplog):
     assert "play_music" in tools
     assert "Music tools: on (Spotify)" in caplog.messages
     # Each turn starts a new question for the action limits.
-    on_question = orchestrator_kwargs(calls)["on_question"]
-    assert on_question.__self__.__class__.__name__ == "ActionGuard"
-    assert on_question.__name__ == "new_question"
+    orchestrator_kwargs(calls)["on_question"]()
+    assert questions == [1]
 
 
 def test_music_ducking_follows_the_state_with_its_own_quick_client(

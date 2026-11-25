@@ -23,6 +23,19 @@ def test_cap_drops_oldest_exchange():
     assert [m["content"] for m in c.messages()] == ["q1", "a1", "q2", "a2"]
 
 
+def test_a_smaller_history_keeps_the_newest_exchanges():
+    c = Conversation(max_turns=5)
+    for n in range(5):
+        c.add(f"q{n}", f"[happy] r{n}")
+    c.set_max_turns(2)
+    assert len(c) == 2
+    assert c.messages()[0]["content"] == "q3"
+    c.set_max_turns(4)
+    c.add("q5", "[happy] r5")
+    c.add("q6", "[happy] r6")
+    assert len(c) == 4
+
+
 def test_forget_empties_memory():
     c = Conversation()
     c.add("hi", "hello")
