@@ -4,11 +4,85 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="carl-token" content="__CARL_TOKEN__">
-<title>CARL dashboard</title>
+<title>CARL-42</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<main id="app">CARL dashboard</main>
+<header class="top">
+  <svg id="eye" class="eye" viewBox="0 0 100 100" role="img" aria-label="CARL's eye">
+    <defs>
+      <clipPath id="eye-clip"><circle cx="50" cy="50" r="44"></circle></clipPath>
+    </defs>
+    <circle class="eye-rim" cx="50" cy="50" r="48"></circle>
+    <g clip-path="url(#eye-clip)">
+      <circle class="eye-white" cx="50" cy="50" r="44"></circle>
+      <g id="gaze">
+        <circle id="iris" class="eye-iris" cx="50" cy="50" r="17"></circle>
+        <circle id="pupil" class="eye-pupil" cx="50" cy="50" r="8"></circle>
+        <circle class="eye-glint" cx="44" cy="43" r="3"></circle>
+      </g>
+      <rect id="lid-top" class="eye-lid" x="0" y="-100" width="100" height="100"></rect>
+      <rect id="lid-bottom" class="eye-lid" x="0" y="100" width="100" height="100"></rect>
+    </g>
+  </svg>
+  <div class="title">
+    <h1>CARL-42</h1>
+    <p><span id="state" class="state">connecting</span> <span id="emotion" class="emotion"></span></p>
+  </div>
+  <ul id="status" class="chips" aria-label="Status"></ul>
+  <span id="conn" class="conn off">offline</span>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button type="button" role="tab" data-tab="live" aria-selected="true">Live</button>
+  <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+  <button type="button" role="tab" data-tab="personality" aria-selected="false">Personality</button>
+</nav>
+
+<p id="banner" class="banner" hidden></p>
+
+<main>
+  <section id="tab-live" class="tab live" role="tabpanel">
+    <div class="panel">
+      <h2>Conversation</h2>
+      <ol id="transcript" class="transcript" aria-live="polite"></ol>
+      <p id="transcript-empty" class="empty">Hold the talk key and say something.</p>
+    </div>
+    <div class="panel">
+      <h2>Actions</h2>
+      <ol id="actions" class="actions"></ol>
+      <p id="actions-empty" class="empty">Nothing done on this PC yet.</p>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab" role="tabpanel" hidden>
+    <p class="hint">Settings from here win over <code>.env</code>. Each one says where its value comes from and when a change takes effect. Secrets, hosts and ports stay in <code>.env</code>.</p>
+    <div id="settings"></div>
+  </section>
+
+  <section id="tab-personality" class="tab" role="tabpanel" hidden>
+    <div class="panel">
+      <h2>Character</h2>
+      <p class="hint">Who CARL is, in a paragraph. The technical rules (spoken style, emotion tags, notes, music, safety) are always added after it.</p>
+      <textarea id="character" rows="10" spellcheck="true" aria-label="Character"></textarea>
+      <div class="row">
+        <span id="character-count" class="count"></span>
+        <span id="character-msg" class="msg"></span>
+        <button type="button" id="character-reset" class="secondary">Reset to default</button>
+        <button type="button" id="character-save">Save</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Signature lines</h2>
+      <div id="lines"></div>
+    </div>
+    <div class="panel">
+      <h2>What CARL is told</h2>
+      <p class="hint">The full system prompt for the next question (read-only).</p>
+      <pre id="preview" class="preview"></pre>
+    </div>
+  </section>
+</main>
 </body>
 </html>
