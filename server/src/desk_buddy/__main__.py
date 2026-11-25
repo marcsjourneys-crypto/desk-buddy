@@ -13,6 +13,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from desk_buddy.apps_store import AppsStore
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.brain.personality import Personality
@@ -106,6 +107,7 @@ async def _run(settings: Settings) -> None:
         stack.callback(speaker.close)
         bus = EventBus()  # live events for the dashboard; never blocks the voice loop
         personality = PersonalityStore()  # edited on the dashboard; defaults otherwise
+        apps = AppsStore()  # the apps and websites CARL may open, from the Apps tab
         guard = ActionGuard(settings.computer_control, bus=bus)
         # Reads the Spotify login from disk: off the event loop.
         music = await asyncio.to_thread(_music_tools, settings, guard)
@@ -194,6 +196,7 @@ async def _run(settings: Settings) -> None:
                 computer_control=brain.guard.enabled,  # what's in force right now
             ),
             preview=lambda: prompt_for(live.current, brain.tools, personality.current()),
+            apps=apps,
         )
         dashboard = await start_dashboard(dashboard_app, settings.dashboard_port)
         if dashboard is not None:  # never fatal: CARL runs without it

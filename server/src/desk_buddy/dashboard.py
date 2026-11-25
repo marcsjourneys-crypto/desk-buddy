@@ -1,4 +1,5 @@
-"""The dashboard: a local web page for CARL (live events, settings, personality).
+"""The dashboard: a local web page for CARL (live events, settings, personality, the apps
+and websites CARL may open).
 
 It listens on 127.0.0.1 only (DASHBOARD_PORT, default 8766), in CARL's own event loop.
 Nothing off this PC can connect, so there's no password, but a web page in the user's own
@@ -8,6 +9,7 @@ browser could still try to reach it, so:
   DNS rebinding from reading anything;
 - every change (PUT/DELETE) must carry our Origin and the X-CARL-Token header, a random
   per-process token put into the page we serve (CSRF);
+- listing Windows' apps (it starts PowerShell) needs the X-CARL-Token header too;
 - the event WebSocket must carry our Origin;
 - anything else gets a 403.
 
@@ -31,6 +33,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import desk_buddy
+from desk_buddy.apps_store import AppsStore, ListError
 from desk_buddy.config import ConfigError, Settings
 from desk_buddy.events import EventBus
 from desk_buddy.personality_store import PersonalityStore
@@ -88,7 +91,9 @@ def create_dashboard(
     bus: EventBus,
     status: Callable[[], dict[str, Any]],
     preview: Callable[[], str],
+    apps: AppsStore | None = None,
 ) -> FastAPI:
+    """The dashboard app. Without `apps`, there is no Apps API."""
     app = FastAPI(title="CARL dashboard", docs_url=None, redoc_url=None, openapi_url=None)
     hosts = {f"{HOST}:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
@@ -210,6 +215,58 @@ def create_dashboard(
             return _store_failed(exc)
         log.info("Dashboard: personality %s reset", item)
         return JSONResponse(await asyncio.to_thread(personality_view))
+
+    # --- apps and bookmarks ---
+
+    if apps is not None:
+
+        @app.get("/api/apps/available")
+        async def get_available(request: Request) -> Response:
+            # It starts PowerShell, so it needs the page's token like a change does
+            # (a foreign page can't send that header without a preflight we never allow).
+            sent = request.headers.get("x-carl-token", "").encode()
+            if not hmac.compare_digest(sent, token.encode()):
+                return _refused("Only the dashboard page can list the apps.")
+            try:
+                listing = await asyncio.to_thread(apps.available)
+            except ListError as exc:
+                log.warning("Dashboard: couldn't list the apps: %s", exc)
+                return JSONResponse({"error": str(exc)}, status_code=503)
+            return JSONResponse({"apps": listing})
+
+        @app.get("/api/apps")
+        async def get_apps() -> dict[str, Any]:
+            return apps.apps_view()
+
+        @app.put("/api/apps")
+        async def put_apps(request: Request) -> Response:
+            body = await _json_object(request)
+            if isinstance(body, Response):
+                return body
+            try:
+                errors = await asyncio.to_thread(apps.update_apps, body.get("apps"))
+            except OSError as exc:
+                return _store_failed(exc)
+            if errors:
+                return JSONResponse({"errors": errors}, status_code=400)
+            return JSONResponse(apps.apps_view())
+
+        @app.get("/api/bookmarks")
+        async def get_bookmarks() -> dict[str, Any]:
+            return apps.bookmarks_view()
+
+        @app.put("/api/bookmarks")
+        async def put_bookmarks(request: Request) -> Response:
+            body = await _json_object(request)
+            if isinstance(body, Response):
+                return body
+            try:
+                errors = await asyncio.to_thread(apps.update_bookmarks, body.get("bookmarks"))
+            except OSError as exc:
+                return _store_failed(exc)
+            if errors:
+                return JSONResponse({"errors": errors}, status_code=400)
+            return JSONResponse(apps.bookmarks_view())
 
     # --- live events ---
 

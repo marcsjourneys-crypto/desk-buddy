@@ -15,6 +15,7 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
+from desk_buddy.apps_store import AppsStore
 from desk_buddy.config import Settings
 from desk_buddy.dashboard import build_status, create_dashboard, start_dashboard
 from desk_buddy.events import EventBus
@@ -23,6 +24,10 @@ from desk_buddy.settings_store import LiveSettings, SettingsStore
 
 SECRETS = ("sk-ant-PLANTED-0001", "robot-token-PLANTED-0002", "spotify-id-PLANTED-0003")
 TOKEN = "csrf-token-for-tests"
+WINDOWS_APPS = [
+    {"Name": "Notepad", "AppID": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"},
+    {"Name": "<b>Edge</b>", "AppID": "MSEdge"},
+]
 
 
 def free_port():
@@ -38,6 +43,8 @@ class Dash:
     bus: EventBus
     settings: SettingsStore
     personality: PersonalityStore
+    apps: AppsStore
+    listings: list
 
     @property
     def base(self):
@@ -60,6 +67,13 @@ async def running(tmp_path):
     personality = PersonalityStore(tmp_path / "personality.json")
     live = LiveSettings(settings.settings())
     bus = EventBus()
+    listings = []
+
+    def runner(args, timeout):  # never PowerShell
+        listings.append(tuple(args))
+        return json.dumps(WINDOWS_APPS).encode()
+
+    apps = AppsStore(tmp_path / "apps.json", tmp_path / "bookmarks.json", runner=runner)
     port = free_port()
     app = create_dashboard(
         port=port,
@@ -72,11 +86,12 @@ async def running(tmp_path):
             live.current, voice="sapi", tools=(), robot=None, state="idle", dashboard_port=port
         ),
         preview=lambda: "THE PROMPT " + personality.current().character,
+        apps=apps,
     )
     server = await start_dashboard(app, port)
     assert server is not None
     try:
-        yield Dash(port, live, bus, settings, personality)
+        yield Dash(port, live, bus, settings, personality, apps, listings)
     finally:
         await asyncio.wait_for(server.stop(), 5)
 
@@ -427,6 +442,171 @@ def test_a_body_bigger_than_the_cap_is_refused_even_without_a_length(tmp_path):
     assert asyncio.run(run()) == 413
 
 
+# --- apps and bookmarks ---
+
+
+def test_find_apps_then_save_the_allowlist(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            put = {"apps": [{"app_id": "MSEdge", "names": ["Browser", "edge"]}]}
+            # Not listed yet: refused.
+            status, _, body = await call(
+                "PUT", d.base + "/api/apps", body=put, headers=change_headers(d)
+            )
+            assert status == 400 and "apps.0" in json.loads(body)["errors"]
+            status, _, body = await call(
+                "GET", d.base + "/api/apps/available", headers={"X-CARL-Token": TOKEN}
+            )
+            assert status == 200, body
+            assert json.loads(body)["apps"] == [
+                {"name": "<b>Edge</b>", "app_id": "MSEdge"},  # data, as is
+                {"name": "Notepad", "app_id": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"},
+            ]
+            assert len(d.listings) == 1
+            status, _, body = await call(
+                "PUT", d.base + "/api/apps", body=put, headers=change_headers(d)
+            )
+            assert status == 200, body
+            view = json.loads(body)
+            assert view["apps"] == [
+                {"app_id": "MSEdge", "title": "<b>Edge</b>", "names": ["browser", "edge"]}
+            ]
+            assert view["limits"] == {"apps": 50, "names": 3, "name": 40}
+            status, _, body = await call("GET", d.base + "/api/apps")
+            assert json.loads(body)["apps"] == view["apps"]
+            status, _, body = await call(
+                "PUT", d.base + "/api/apps", body={"apps": "x"}, headers=change_headers(d)
+            )
+            assert status == 400
+
+    asyncio.run(run())
+
+
+def test_bookmarks_round_trip_through_the_api(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            status, _, body = await call("GET", d.base + "/api/bookmarks")
+            assert status == 200 and json.loads(body)["bookmarks"] == []
+            good = {"bookmarks": [{"name": "Weather", "url": "https://example.com/weather"}]}
+            status, _, body = await call(
+                "PUT", d.base + "/api/bookmarks", body=good, headers=change_headers(d)
+            )
+            assert status == 200, body
+            assert json.loads(body)["bookmarks"] == [
+                {"name": "weather", "url": "https://example.com/weather"}
+            ]
+            bad = {"bookmarks": [{"name": "evil", "url": "file:///C:/Windows/notepad.exe"}]}
+            status, _, body = await call(
+                "PUT", d.base + "/api/bookmarks", body=bad, headers=change_headers(d)
+            )
+            assert status == 400 and "bookmarks.0" in json.loads(body)["errors"]
+            assert d.apps.snapshot()[2][0].name == "weather"  # unchanged
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-CARL-Token": "wrong"}, {"Origin": "ORIGIN"}],
+    ids=["none", "wrong", "origin-only"],
+)
+def test_listing_the_apps_needs_the_token(tmp_path, headers):
+    async def run():
+        async with running(tmp_path) as d:
+            sent = {k: (d.origin if v == "ORIGIN" else v) for k, v in headers.items()}
+            status, _, _ = await call("GET", d.base + "/api/apps/available", headers=sent)
+            assert status == 403
+            assert d.listings == []  # PowerShell never started
+
+    asyncio.run(run())
+
+
+def test_a_failed_listing_is_a_json_error(tmp_path):
+    from desk_buddy.apps_store import ListError
+
+    async def run():
+        async with running(tmp_path) as d:
+
+            def broken(args, timeout):
+                raise ListError("Windows took too long to list the apps.")
+
+            d.apps._runner = broken
+            status, _, body = await call(
+                "GET", d.base + "/api/apps/available", headers={"X-CARL-Token": TOKEN}
+            )
+            assert status == 503
+            assert json.loads(body)["error"] == "Windows took too long to list the apps."
+
+    asyncio.run(run())
+
+
+def test_a_corrupt_apps_file_shows_as_a_banner(tmp_path):
+    (tmp_path / "apps.json").write_text("{broken", encoding="utf-8")
+
+    async def run():
+        async with running(tmp_path) as d:
+            return [json.loads((await call("GET", d.base + p))[2]) for p in ("/api/apps",)]
+
+    (view,) = asyncio.run(run())
+    assert "apps.json" in view["error"] and view["apps"] == []
+
+
+def test_no_secret_appears_in_apps_responses(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            bodies = [
+                (
+                    await call(
+                        "GET", d.base + "/api/apps/available", headers={"X-CARL-Token": TOKEN}
+                    )
+                )[2]
+            ]
+            for path, body in (
+                ("/api/apps", {"apps": [{"app_id": "MSEdge", "names": ["browser"]}]}),
+                ("/api/apps", {"apps": [{"app_id": "ANTHROPIC_API_KEY", "names": ["k"]}]}),
+                ("/api/bookmarks", {"bookmarks": [{"name": "a", "url": "https://a.example"}]}),
+                ("/api/bookmarks", {"bookmarks": [{"name": "a", "url": "nope"}]}),
+            ):
+                bodies.append(
+                    (await call("PUT", d.base + path, body=body, headers=change_headers(d)))[2]
+                )
+            for path in ("/api/apps", "/api/bookmarks"):
+                bodies.append((await call("GET", d.base + path))[2])
+            return "\n".join(bodies)
+
+    text = asyncio.run(run())
+    assert "browser" in text
+    for secret in SECRETS:
+        assert secret not in text
+
+
+def test_a_failed_apps_save_is_a_json_error(tmp_path, monkeypatch):
+    import desk_buddy.apps_store as apps_store
+
+    def disk_full(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(apps_store, "write_json_atomic", disk_full)
+
+    async def run():
+        async with running(tmp_path) as d:
+            return [
+                await call(
+                    "PUT", d.base + "/api/apps", body={"apps": []}, headers=change_headers(d)
+                ),
+                await call(
+                    "PUT",
+                    d.base + "/api/bookmarks",
+                    body={"bookmarks": []},
+                    headers=change_headers(d),
+                ),
+            ]
+
+    for status, _, body in asyncio.run(run()):
+        assert status == 503
+        assert "Couldn't save" in json.loads(body)["error"]
+
+
 # --- CSRF and rebinding ---
 
 
@@ -446,6 +626,7 @@ def test_changes_without_the_token_and_our_origin_are_refused(tmp_path, headers)
     async def run():
         async with running(tmp_path) as d:
             sent = {k: (d.origin if v == "ORIGIN" else v) for k, v in headers.items()}
+            d.apps.available()  # so a refused app change isn't refused for its ID
             results = [
                 await call(
                     "PUT", d.base + "/api/settings", body={"MAX_SENTENCES": 4}, headers=sent
@@ -455,10 +636,24 @@ def test_changes_without_the_token_and_our_origin_are_refused(tmp_path, headers)
                 ),
                 await call("DELETE", d.base + "/api/settings/MAX_SENTENCES", headers=sent),
                 await call("DELETE", d.base + "/api/personality/character", headers=sent),
+                await call(
+                    "PUT",
+                    d.base + "/api/apps",
+                    body={"apps": [{"app_id": "MSEdge", "names": ["browser"]}]},
+                    headers=sent,
+                ),
+                await call(
+                    "PUT",
+                    d.base + "/api/bookmarks",
+                    body={"bookmarks": [{"name": "x", "url": "https://x.example"}]},
+                    headers=sent,
+                ),
             ]
-            assert [r[0] for r in results] == [403, 403, 403, 403]
+            assert [r[0] for r in results] == [403] * 6
             assert d.settings.values == {}
             assert not (tmp_path / "personality.json").exists()
+            assert not (tmp_path / "apps.json").exists()
+            assert not (tmp_path / "bookmarks.json").exists()
 
     asyncio.run(run())
 
@@ -480,12 +675,18 @@ def test_localhost_origin_is_ours_too(tmp_path):
 def test_a_foreign_host_header_is_refused_dns_rebinding(tmp_path):
     async def run():
         async with running(tmp_path) as d:
-            for path in ("/", "/api/settings", "/api/status"):
+            for path in ("/", "/api/settings", "/api/status", "/api/apps", "/api/bookmarks"):
                 status, _, body = await call(
                     "GET", d.base + path, headers={"Host": f"evil.example:{d.port}"}
                 )
                 assert status == 403
                 assert SECRETS[0] not in body
+            status, _, _ = await call(
+                "GET",
+                d.base + "/api/apps/available",
+                headers={"Host": f"evil.example:{d.port}", "X-CARL-Token": TOKEN},
+            )
+            assert status == 403 and d.listings == []
 
     asyncio.run(run())
 
