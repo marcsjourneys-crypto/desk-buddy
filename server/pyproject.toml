@@ -10,6 +10,7 @@ dependencies = [
     "fastapi>=0.165.0",
     "faster-whisper>=1.2.1",
     "numpy>=2.5.5",
+    "piper-tts==1.8.0",
     "sounddevice>=0.5.6",
     "uvicorn[standard]>=0.54.0",
     "websockets>=17.4",

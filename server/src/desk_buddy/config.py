@@ -22,6 +22,9 @@ ENV_KEYS = (
     "STT_DEVICE",
     "STT_COMPUTE_TYPE",
     "TTS_ENGINE",
+    "TTS_VOICE",
+    "TTS_SPEED",
+    "VOICES_DIR",
     "MAX_SENTENCES",
     "HISTORY_TURNS",
     "PTT_KEY",
@@ -38,8 +41,18 @@ ENV_KEYS = (
 LLM_PROVIDERS = ("anthropic",)
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 STT_DEVICES = ("cpu", "cuda")
-TTS_ENGINES = ("sapi",)  # "piper" arrives later behind the same interface
+TTS_ENGINES = ("sapi", "piper")
+MIN_TTS_SPEED, MAX_TTS_SPEED = 0.5, 2.0
+# A Piper voice name: <language>_<REGION>-<name>-<quality>, as piper.download_voices
+# expects it (e.g. en_GB-northern_english_male-medium).
+_PIPER_VOICE_NAME = re.compile(r"^[^-_\s]+_[^-\s]+-[^-\s]+-[^-\s]+$")
 MIN_TOKEN_CHARS = 16
+
+
+def default_voices_dir() -> str:
+    """%LOCALAPPDATA%\\desk-buddy\\voices (falls back to the usual place under home)."""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return str(Path(base) / "desk-buddy" / "voices")
 
 
 _INLINE_COMMENT = re.compile(r"\s#")
@@ -59,6 +72,9 @@ class Settings:
     stt_device: str = "cpu"
     stt_compute_type: str = "int8"
     tts_engine: str = "sapi"
+    tts_voice: str = "en_GB-northern_english_male-medium"  # Piper name or .onnx path
+    tts_speed: float = 1.0
+    voices_dir: str = field(default_factory=default_voices_dir)
     max_sentences: int = 2
     history_turns: int = 20
     ptt_key: str = "right_ctrl"
@@ -142,6 +158,9 @@ def load_settings(
         stt_device=device,
         stt_compute_type=get("STT_COMPUTE_TYPE", Settings.stt_compute_type),
         tts_engine=engine,
+        tts_voice=_tts_voice(get),
+        tts_speed=_tts_speed(get),
+        voices_dir=get("VOICES_DIR", default_voices_dir()),
         max_sentences=max_sentences,
         history_turns=history_turns,
         ptt_key=ptt_key,
@@ -156,6 +175,33 @@ def load_settings(
         server_host=get("SERVER_HOST", Settings.server_host),
         server_port=_port(get, "SERVER_PORT", Settings.server_port),
     )
+
+
+def _tts_voice(get: Callable[[str, str], str]) -> str:
+    raw = get("TTS_VOICE", Settings.tts_voice)
+    if raw.lower().endswith(".onnx"):
+        if not Path(raw).is_file():
+            raise ConfigError(f"TTS_VOICE is not an existing .onnx file: {raw!r}")
+        return raw
+    if not _PIPER_VOICE_NAME.match(raw):
+        raise ConfigError(
+            "TTS_VOICE must be a Piper voice name like en_GB-northern_english_male-medium, "
+            f"or a path to an .onnx file; got {raw!r}"
+        )
+    return raw
+
+
+def _tts_speed(get: Callable[[str, str], str]) -> float:
+    raw = get("TTS_SPEED", str(Settings.tts_speed))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if not MIN_TTS_SPEED <= value <= MAX_TTS_SPEED:  # also rejects nan
+        raise ConfigError(
+            f"TTS_SPEED must be a number {MIN_TTS_SPEED}-{MAX_TTS_SPEED}, got {raw!r}"
+        )
+    return value
 
 
 def _robot_token(get: Callable[[str, str], str]) -> str:

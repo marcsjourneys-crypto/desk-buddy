@@ -9,6 +9,7 @@ from desk_buddy.audio import AudioDeviceError
 from desk_buddy.config import Settings
 from desk_buddy.link.switch import DeviceSwitch, SwitchedMic, SwitchedPlayer
 from desk_buddy.server import ServerStartError
+from desk_buddy.tts import VoiceError
 
 TOKEN = "s3cret-token-1234567"
 
@@ -27,8 +28,10 @@ def fakes(monkeypatch, calls):
             calls.append("transcriber created")
 
     class FakeSynthesizer:
-        def __init__(self):
+        def __init__(self, *args, **kwargs):
             calls.append("synthesizer created")
+            if args or kwargs:
+                calls.append(("synthesizer args", args, kwargs))
 
         def close(self):
             calls.append("synthesizer closed")
@@ -76,6 +79,13 @@ def fakes(monkeypatch, calls):
     monkeypatch.setattr(entry, "check_audio_devices", lambda: None)
     monkeypatch.setattr(entry, "WhisperTranscriber", FakeTranscriber)
     monkeypatch.setattr(entry, "SapiSynthesizer", FakeSynthesizer)
+    monkeypatch.setattr(entry, "PiperSynthesizer", FakeSynthesizer)
+
+    def fake_find_voice(voice, voices_dir):
+        calls.append(("find_voice", voice, voices_dir))
+        return f"{voices_dir}/{voice}.onnx"
+
+    monkeypatch.setattr(entry, "find_voice", fake_find_voice)
     monkeypatch.setattr(entry, "Microphone", FakeMicrophone)
     monkeypatch.setattr(entry, "Speaker", FakeSpeaker)
     monkeypatch.setattr(entry, "create_chat", lambda settings, tools=None: object())
@@ -134,7 +144,75 @@ def test_whisper_failure_is_a_clear_startup_error(monkeypatch, capsys, fakes, ca
     assert calls == []  # nothing was built before it, so nothing to close
 
 
+PIPER = Settings(
+    anthropic_api_key="k",
+    tts_engine="piper",
+    tts_voice="en_GB-northern_english_male-medium",
+    tts_speed=1.25,
+    voices_dir="V",
+)
+
+
+def test_piper_engine_finds_and_loads_the_voice(monkeypatch, fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(entry, "load_settings", lambda: PIPER)
+
+    assert entry.main() == 0
+
+    assert ("find_voice", "en_GB-northern_english_male-medium", "V") in calls
+    assert (
+        "synthesizer args",
+        ("V/en_GB-northern_english_male-medium.onnx",),
+        {"speed": 1.25},
+    ) in calls
+    assert "Voice: piper en_GB-northern_english_male-medium" in caplog.messages
+    assert "synthesizer closed" in steps(calls)
+
+
+def test_sapi_engine_logs_its_voice(monkeypatch, fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", tts_engine="sapi")
+    )
+    assert entry.main() == 0
+    assert "Voice: sapi" in caplog.messages
+    assert not [c for c in calls if isinstance(c, tuple) and c[0] == "find_voice"]
+
+
+def test_a_voice_that_cannot_be_downloaded_is_a_clear_startup_error(
+    monkeypatch, capsys, fakes, calls
+):
+    monkeypatch.setattr(entry, "load_settings", lambda: PIPER)
+    monkeypatch.setattr(
+        entry, "find_voice", _raise(VoiceError("Couldn't get voice 'x': HTTP Error 404"))
+    )
+
+    assert entry.main() == 2
+
+    err = capsys.readouterr().err
+    assert "Can't start: Couldn't get voice 'x': HTTP Error 404" in err
+    assert "set TTS_ENGINE=sapi to use the Windows voice" in err
+    assert "Traceback" not in err
+    assert calls == ["transcriber created"]
+
+
+def test_a_piper_voice_that_fails_to_load_is_a_clear_startup_error(
+    monkeypatch, capsys, fakes, calls
+):
+    monkeypatch.setattr(entry, "load_settings", lambda: PIPER)
+    monkeypatch.setattr(entry, "PiperSynthesizer", _raise(RuntimeError("bad model")))
+
+    assert entry.main() == 2
+
+    err = capsys.readouterr().err
+    assert "Can't load Piper voice 'en_GB-northern_english_male-medium': bad model" in err
+    assert "set TTS_ENGINE=sapi" in err
+
+
 def test_sapi_failure_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", tts_engine="sapi")
+    )
     monkeypatch.setattr(entry, "SapiSynthesizer", _raise(OSError("no voice")))
 
     assert entry.main() == 2

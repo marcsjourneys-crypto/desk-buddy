@@ -19,7 +19,7 @@ from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
-from desk_buddy.tts import SapiSynthesizer
+from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, find_voice
 
 log = logging.getLogger("desk_buddy")
 
@@ -73,10 +73,7 @@ async def _run(settings: Settings) -> None:
                 f"Can't load Whisper model {settings.stt_model!r} on {settings.stt_device} "
                 f"({settings.stt_compute_type}): {exc}"
             ) from exc
-        try:
-            synthesizer = SapiSynthesizer()
-        except Exception as exc:
-            raise StartupError(f"Can't start Windows SAPI voice: {exc}") from exc
+        synthesizer = await _make_synthesizer(settings)
         stack.callback(synthesizer.close)
         mic = Microphone()
         stack.callback(mic.close)
@@ -145,6 +142,31 @@ async def _run(settings: Settings) -> None:
         log.info("Ready. Hold %s to talk, Ctrl+C to quit.", settings.ptt_key)
         events.put_nowait("greet")
         await orchestrator.run(events)
+
+
+async def _make_synthesizer(settings: Settings) -> SapiSynthesizer | PiperSynthesizer:
+    """The TTS engine from settings. Piper may download its voice first (blocking, in a
+    worker thread; Ctrl+C waits for it, like the Whisper download)."""
+    if settings.tts_engine == "sapi":
+        try:
+            synthesizer = SapiSynthesizer()
+        except Exception as exc:
+            raise StartupError(f"Can't start Windows SAPI voice: {exc}") from exc
+        log.info("Voice: sapi")
+        return synthesizer
+    fallback = "or set TTS_ENGINE=sapi to use the Windows voice"
+    try:
+        model = await asyncio.to_thread(find_voice, settings.tts_voice, settings.voices_dir)
+    except VoiceError as exc:
+        raise StartupError(f"{exc}; {fallback}") from exc
+    try:
+        synthesizer = await asyncio.to_thread(PiperSynthesizer, model, speed=settings.tts_speed)
+    except Exception as exc:
+        raise StartupError(
+            f"Can't load Piper voice {settings.tts_voice!r}: {exc}; {fallback}"
+        ) from exc
+    log.info("Voice: piper %s", settings.tts_voice)
+    return synthesizer
 
 
 async def _say_farewell(orchestrator: Orchestrator) -> None:

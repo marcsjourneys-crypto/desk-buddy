@@ -70,13 +70,62 @@ def test_missing_api_key_is_a_clear_error():
         ("HISTORY_TURNS", "lots"),
         ("LLM_EFFORT", "turbo"),
         ("STT_DEVICE", "gpu"),
-        ("TTS_ENGINE", "piper"),
+        ("TTS_ENGINE", "espeak"),
         ("PTT_KEY", "banana"),
+        ("TTS_SPEED", "fast"),
+        ("TTS_SPEED", "0.4"),
+        ("TTS_SPEED", "2.5"),
+        ("TTS_SPEED", "nan"),
+        ("TTS_VOICE", "northern"),
+        ("TTS_VOICE", "en_GB-northern_english_male"),
     ],
 )
 def test_invalid_values_are_rejected(key, value):
     with pytest.raises(ConfigError, match=key):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", key: value})
+
+
+def test_voice_defaults():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.tts_voice == "en_GB-northern_english_male-medium"
+    assert s.tts_speed == 1.0
+    assert Path(s.voices_dir).parts[-2:] == ("desk-buddy", "voices")
+
+
+def test_default_voices_dir_is_under_localappdata(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert Path(s.voices_dir) == tmp_path / "desk-buddy" / "voices"
+
+
+def test_voice_settings_are_read(tmp_path):
+    s = load_settings(
+        env_path=None,
+        environ={
+            "ANTHROPIC_API_KEY": "k",
+            "TTS_ENGINE": "Piper",
+            "TTS_VOICE": "en_US-lessac-medium",
+            "TTS_SPEED": "1.25",
+            "VOICES_DIR": str(tmp_path),
+        },
+    )
+    assert (s.tts_engine, s.tts_voice, s.tts_speed) == ("piper", "en_US-lessac-medium", 1.25)
+    assert s.voices_dir == str(tmp_path)
+
+
+def test_tts_voice_may_be_a_path_to_an_onnx_file(tmp_path):
+    model = tmp_path / "my voice.onnx"
+    model.write_bytes(b"x")
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "TTS_VOICE": str(model)})
+    assert s.tts_voice == str(model)
+
+
+def test_a_missing_onnx_path_is_a_clear_error(tmp_path):
+    with pytest.raises(ConfigError, match="TTS_VOICE"):
+        load_settings(
+            env_path=None,
+            environ={"ANTHROPIC_API_KEY": "k", "TTS_VOICE": str(tmp_path / "nope.onnx")},
+        )
 
 
 def test_api_key_is_hidden_from_repr():
