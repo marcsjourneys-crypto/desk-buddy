@@ -2,6 +2,18 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — M7 Spotify control built (voice check pending)
+
+- **Built:**
+  - Untrusted-text wrapping for tool results (`tools/untrusted.py`), used by `read_notes` and the music tools, with a prompt rule.
+  - `ActionGuard` (`tools/actions.py`): `COMPUTER_CONTROL` off by default, 3 actions per question and 8 per minute, one `Action:` log line per attempt.
+  - Spotify (`spotipy==2.26.0`): `tools/spotify.py` with device choice and start-and-wait, and the tools `play_music`, `music_control`, `music_volume` and `now_playing`. Login: `python -m desk_buddy.spotify_login` (PKCE).
+  - Ducking while CARL listens and talks (`tools/ducking.py`, `MUSIC_DUCK`).
+- **Plan:** `docs/plans/2026-11-25-m7-spotify.md`.
+- **Tests:** 620 server tests pass (16 integration tests deselected; the live Spotify search passes with the user's login).
+- **Voice check by the user (pending):** "Play some Queen"; pause, resume, skip and back; "What's playing?"; "Turn the music down"; ask a question while music plays (it ducks and comes back); with Spotify closed, ask for music (CARL starts it); ask for 4 things in one go (CARL stops at 3).
+- **Next:** the voice check, the servo check, then the rest of M7 (media keys, apps, websites, PC volume) or M8 (the dashboard).
+
 ## 2026-11-25 — CARL's voice (Piper) done (voice check pending)
 
 - **Built:** Piper TTS (`piper-tts==1.8.0`) as the default engine, with CARL's voice `en_GB-northern_english_male-medium`, chosen by the user from an audition of 8 voices. New settings: `TTS_VOICE`, `TTS_SPEED`, `VOICES_DIR`. A missing voice downloads at startup (about 60 MB); `TTS_ENGINE=sapi` is the fallback. Piper's 22050 Hz output is resampled to 16 kHz in numpy (`tts.resample`).

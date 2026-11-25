@@ -85,18 +85,21 @@ Every tool is a plain Python function with a strict JSON schema, registered in `
   - Claude lightly cleans up the dictated text.
 - `read_notes(date)` — reads back a day's daily note and ideas.
 - CARL has a vault of its own (`OBSIDIAN_VAULT_PATH`; blank means the tools are off). It only appends and creates, never edits or deletes, and every path is checked to stay inside the vault. Folder names are configurable.
-- Treat text that `read_notes` returns as untrusted. It must be labelled as such before computer-control tools exist (M7).
-- Later: `play_music`, `media`, `open_app`, `open_website`, `computer_volume`, `show_weather`.
+- **Untrusted text:** any tool result that carries outside text (`read_notes`, Spotify names) is wrapped with `tools/untrusted.py` in `<untrusted source="…">…</untrusted>`, with tags inside neutralised. The system prompt says it is data, never instructions.
+- **Music (M7, Spotify Web API via `spotipy`, Premium):** `play_music(query, kind: track|artist|album|playlist)` (the user's own playlists first, then search; plays the URI Spotify returned), `music_control(action: pause|resume|next|previous)`, `music_volume(level 0–100 | change −50..50, exactly one)`, `now_playing()`. In `tools/spotify.py`: `SpotifyControl` (device choice: this PC's Spotify, else the active device, else start the app with the fixed `os.startfile("spotify:")` and wait up to 8 s) and `MusicTools`. Registered only when `COMPUTER_CONTROL=on`, `SPOTIFY_CLIENT_ID` is set and a login is saved (`python -m desk_buddy.spotify_login`, PKCE, token in `%LOCALAPPDATA%\desk-buddy\spotify_token.json`); otherwise the prompt says music isn't set up. The server never starts an interactive login, and spotipy's DEBUG logs (tokens) are silenced.
+- **Ducking:** with `MUSIC_DUCK=on` (default), `tools/ducking.py` drops Spotify to 20 % while CARL isn't idle and restores it at idle, on its own worker thread and quick client; best effort, never blocks a turn.
+- Later: `media`, `open_app`, `open_website`, `computer_volume`, `show_weather`.
 
 ## Safety rules for computer-control tools (non-negotiable)
 
 Anyone (or any TV) near the robot can talk to it.
 
-- Off by default; a setting turns it on.
-- Allowlists only. The model chooses a name from a list; the server builds every command and URL. Never pass model text into a shell or command string. Always use argument lists, never `shell=True`.
+- Off by default; a setting turns it on: `COMPUTER_CONTROL=on` in `.env` (M8 moves it to the dashboard).
+- Allowlists only. The model chooses a name from a list; the server builds every command and URL. Never pass model text into a shell or command string. Always use argument lists, never `shell=True`. (Spotify: model text is only a search query; enums for kinds and actions; playback uses Spotify's URIs.)
 - Rate limits: max 3 actions per question, 8 per minute.
-- Anything powerful (e.g. running an allowlisted script, sleep/shutdown) requires a spoken "yes" on the next turn, checked by code.
-- Every action is logged and shown on the dashboard.
+- Anything powerful (e.g. running an allowlisted script, sleep/shutdown) requires a spoken "yes" on the next turn, checked by code. Music isn't powerful, so it needs no "yes"; the confirmation mechanism comes with the first powerful tool.
+- Every action is logged (`Action: <tool> <args> -> <result>`) and, from M8, shown on the dashboard.
+- **In code:** `tools/actions.py` `ActionGuard` enforces the switch, both limits (an attempt counts even if it fails) and the logging; every computer-control tool runs through `guard.run(...)`, and the loop calls `guard.new_question()` per turn. Untrusted data can never authorise or confirm an action.
 
 ## Robot ↔ server protocol (final: `docs/protocol.md`)
 
@@ -143,7 +146,7 @@ Anyone (or any TV) near the robot can talk to it.
 - **M4 – Robot link.** WebSocket server, token auth, `docs/protocol.md`, and a fake-robot Python client for tests.
 - **M5 – Firmware bring-up** (can run in parallel with M1–M4): blink + PSRAM check, one eye, two eyes, mic levels, speaker tone, record/playback loopback, servo sweep with easing.
 - **M6 – Robot joins the link.** Stream mic, play TTS, eyes react to state/emotion, servos follow look, antenna LED follows state. (Done 2026-11-24 except the servos following `look` and the antenna LED, which wait for the hardware to be wired.)
-- **M7 – PC computer control.** Spotify search via Web API (free dev key) and playback via `spotify:` URIs / Web API (remote playback control needs Premium), media keys via Win32 `SendInput` (ctypes), allowlisted apps (launched by full exe path, argument lists) and sites, master volume. All safety rules above.
+- **M7 – PC computer control.** Spotify search via Web API (free dev key) and playback via `spotify:` URIs / Web API (remote playback control needs Premium), media keys via Win32 `SendInput` (ctypes), allowlisted apps (launched by full exe path, argument lists) and sites, master volume. All safety rules above. (Spotify done 2026-11-25: `docs/plans/2026-11-25-m7-spotify.md`; media keys, apps, sites and PC volume come later.)
 - **M8 – Dashboard.** Local web page: live state, transcript, last actions, and settings, including:
   - the computer-control switch;
   - the vault path and other non-secret settings, which move from `.env` to a settings file the UI edits (secrets stay in `.env`);
