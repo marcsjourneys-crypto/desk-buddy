@@ -424,6 +424,13 @@
     refusal: "Refusal",
     forget: "Fresh start (after “forget that”)",
   };
+  const ABOUT_LABELS = {
+    name: "Name",
+    city: "Town or city",
+    region: "Region or state",
+    country: "Country (two letters, like GB)",
+    notes: "About me",
+  };
   let personality = null;
 
   async function loadPersonality() {
@@ -444,6 +451,11 @@
     $("character-msg").textContent = data.character.custom ? "custom" : "default";
     $("character-msg").className = "msg";
     updateCount();
+    const about = $("about");
+    about.replaceChildren();
+    for (const [name, label] of Object.entries(ABOUT_LABELS)) {
+      about.append(aboutRow(name, label, data.about[name] || "", data.limits.about[name]));
+    }
     const lines = $("lines");
     lines.replaceChildren();
     for (const [name, line] of Object.entries(data.lines)) lines.append(lineRow(name, line, data));
@@ -454,6 +466,42 @@
     if (!personality) return;
     const n = $("character").value.length;
     $("character-count").textContent = `${n} / ${personality.limits.character}`;
+  }
+
+  function aboutRow(name, label, value, limit) {
+    const input =
+      name === "notes"
+        ? el("textarea", { rows: 4, value, maxLength: limit, spellcheck: true, "aria-label": label })
+        : el("input", { type: "text", value, maxLength: limit, spellcheck: false, "aria-label": label });
+    const message = el("span", { class: "msg", text: value ? "" : "not set" });
+    const save = el("button", { type: "button", text: "Save" });
+    const reset = el("button", { type: "button", class: "secondary", text: "Clear", hidden: !value });
+    save.addEventListener("click", async () => {
+      try {
+        renderPersonality(await api("PUT", "/api/personality", { about: { [name]: input.value } }));
+      } catch (error) {
+        const errors = (error.data && error.data.errors) || {};
+        message.textContent = errors[`about.${name}`] || error.message;
+        message.className = "msg error";
+      }
+    });
+    reset.addEventListener("click", async () => {
+      try {
+        renderPersonality(await api("DELETE", `/api/personality/${encodeURIComponent(`about.${name}`)}`));
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = "msg error";
+      }
+    });
+    return el(
+      "div",
+      { class: `about-field${name === "notes" ? " notes" : ""}` },
+      el("label", { class: "label", text: label }),
+      input,
+      save,
+      reset,
+      message,
+    );
   }
 
   function lineRow(name, line, data) {

@@ -165,9 +165,23 @@ fieldset.panel legend { color: var(--brass); padding: 0 6px; font-weight: 600; }
 .line { grid-template-columns: 220px minmax(160px, 1fr) 120px auto auto; }
 .setting .msg, .line .msg, .line .default { grid-column: 2 / -1; font-size: 12px; }
 .line .default { color: var(--muted); }
+
+.about-field {
+  display: grid;
+  grid-template-columns: 220px minmax(160px, 1fr) auto auto;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--panel-2);
+}
+.about-field.notes { align-items: start; }
+.about-field .msg { grid-column: 2 / -1; font-size: 12px; }
+.privacy { font-size: 13px; }
+
 @media (max-width: 800px) {
-  .setting, .line { grid-template-columns: 1fr 1fr; }
-  .setting .label, .line .label { grid-column: 1 / -1; }
+  .setting, .line, .about-field { grid-template-columns: 1fr 1fr; }
+  .setting .label, .line .label, .about-field .label { grid-column: 1 / -1; }
+  .about-field input, .about-field textarea { grid-column: 1 / -1; }
 }
 
 .label { color: var(--text); }

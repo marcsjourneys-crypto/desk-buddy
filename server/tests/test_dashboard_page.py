@@ -53,3 +53,14 @@ def test_every_change_sends_the_token_and_reconnects_with_back_off():
 def test_the_three_tabs_are_there():
     for tab in ("live", "settings", "personality"):
         assert f'id="tab-{tab}"' in HTML
+
+
+def test_the_about_you_card_is_first_on_the_personality_tab_with_its_privacy_note():
+    tab = HTML[HTML.index('id="tab-personality"') :]
+    assert tab.index("About you") < tab.index("Character")
+    assert 'id="about"' in tab
+    assert "goes to Anthropic with every question" in tab
+    assert "search provider" in tab
+    for name in ("name", "city", "region", "country", "notes"):
+        assert f"{name}:" in JS  # a label for every field
+    assert "about.${name}" in JS  # per-field errors and reset

@@ -63,6 +63,12 @@
 
   <section id="tab-personality" class="tab" role="tabpanel" hidden>
     <div class="panel">
+      <h2>About you</h2>
+      <p class="hint">Optional: what CARL should know about you. Leave a field blank to leave it out. Changes apply at the next question.</p>
+      <p class="hint privacy">This text goes to Anthropic with every question, and your town, region and country go to the search provider when CARL searches the web. It's saved on this PC only, never in git.</p>
+      <div id="about"></div>
+    </div>
+    <div class="panel">
       <h2>Character</h2>
       <p class="hint">Who CARL is, in a paragraph. The technical rules (spoken style, emotion tags, notes, music, safety) are always added after it.</p>
       <textarea id="character" rows="10" spellcheck="true" aria-label="Character"></textarea>

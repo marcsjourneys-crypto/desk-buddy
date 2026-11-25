@@ -257,6 +257,86 @@ def test_personality_change_preview_and_reset(tmp_path):
     asyncio.run(run())
 
 
+def test_about_you_change_and_reset_through_the_api(tmp_path):
+    me = {"name": "Marta", "city": "Leeds", "region": "", "country": "gb", "notes": "a\nb"}
+
+    async def run():
+        async with running(tmp_path) as d:
+            status, _, body = await call("GET", d.base + "/api/personality")
+            assert status == 200
+            view = json.loads(body)
+            assert view["about"] == dict.fromkeys(me, "")
+            assert view["limits"]["about"]["country"] == 2
+            status, _, body = await call(
+                "PUT", d.base + "/api/personality", body={"about": me}, headers=change_headers(d)
+            )
+            assert status == 200, body
+            assert json.loads(body)["about"] == {**me, "country": "GB"}
+            assert d.personality.current().about.location == {"city": "Leeds", "country": "GB"}
+            status, _, body = await call(
+                "PUT",
+                d.base + "/api/personality",
+                body={"about": {"name": "two\nlines", "country": "Britain"}},
+                headers=change_headers(d),
+            )
+            assert status == 400
+            assert set(json.loads(body)["errors"]) == {"about.name", "about.country"}
+            assert d.personality.current().about.name == "Marta"  # all or nothing
+            status, _, body = await call(
+                "DELETE", d.base + "/api/personality/about.city", headers=change_headers(d)
+            )
+            assert status == 200, body
+            assert json.loads(body)["about"]["city"] == ""
+            assert d.personality.current().about.name == "Marta"
+            status, _, _ = await call(
+                "DELETE", d.base + "/api/personality/about.shoe", headers=change_headers(d)
+            )
+            assert status == 404
+            # Without the token, nothing changes.
+            status, _, _ = await call(
+                "PUT",
+                d.base + "/api/personality",
+                body={"about": {"name": "Mallory"}},
+                headers={"Origin": d.origin},
+            )
+            assert status == 403
+            assert d.personality.current().about.name == "Marta"
+
+    asyncio.run(run())
+
+
+def test_no_secret_appears_in_about_you_responses(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            bodies = []
+            for body in (
+                {"about": {"name": "Marta", "notes": "Hi."}},
+                {"about": {"name": "x" * 500, "country": "nope"}},
+                {"about": {"ANTHROPIC_API_KEY": "x"}},
+            ):
+                bodies.append(
+                    (
+                        await call(
+                            "PUT", d.base + "/api/personality", body=body, headers=change_headers(d)
+                        )
+                    )[2]
+                )
+            bodies.append(
+                (
+                    await call(
+                        "DELETE", d.base + "/api/personality/about.name", headers=change_headers(d)
+                    )
+                )[2]
+            )
+            bodies.append((await call("GET", d.base + "/api/personality"))[2])
+            return "\n".join(bodies)
+
+    text = asyncio.run(run())
+    assert "about" in text
+    for secret in SECRETS:
+        assert secret not in text
+
+
 def test_a_failed_save_is_a_json_error_never_a_500(tmp_path, monkeypatch):
     import desk_buddy.settings_store as settings_store
 
