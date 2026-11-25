@@ -50,7 +50,8 @@ void printHelp() {
   Serial.println("  help                      this list");
   Serial.println("  info                      chip, flash, PSRAM, memory, uptime");
   Serial.println("  eyes <look>               idle happy sad sleep blink surprised wink skeptical");
-  Serial.println("                            listening thinking left right up down test");
+  Serial.println("                            listening thinking small test");
+  Serial.println("                            left right up down lookaround (crescents)");
   Serial.println("  fps                       eye frame rate over 3 s");
   Serial.println("  tone [50-7900]            1 s test tone in Hz (440 default)");
   Serial.println("  vol <0-100>               speaker volume (starts at 20)");

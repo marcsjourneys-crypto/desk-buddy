@@ -22,6 +22,13 @@ struct Params {
   // Rotates both lids about the eye's centre, in radians; positive droops the outer
   // corner. The drawing mirrors it for the second eye.
   float tilt = 0;
+  // Crescent looks (docs/looking.png). fill: 0 = outline ring, 1 = solid disc. cut: radius
+  // of a black disc cut out of the eye, as a fraction of radius (0 = none); cut_x/cut_y:
+  // where that disc sits, as fractions of radius from the eye's centre. Not mirrored.
+  float fill = 0;
+  float cut = 0;
+  float cut_x = 0;
+  float cut_y = 0;
 };
 
 inline Params lerp(const Params& a, const Params& b, float t) {
@@ -33,6 +40,10 @@ inline Params lerp(const Params& a, const Params& b, float t) {
   p.gaze_x = ease::lerp(a.gaze_x, b.gaze_x, t);
   p.gaze_y = ease::lerp(a.gaze_y, b.gaze_y, t);
   p.tilt = ease::lerp(a.tilt, b.tilt, t);
+  p.fill = ease::lerp(a.fill, b.fill, t);
+  p.cut = ease::lerp(a.cut, b.cut, t);
+  p.cut_x = ease::lerp(a.cut_x, b.cut_x, t);
+  p.cut_y = ease::lerp(a.cut_y, b.cut_y, t);
   return p;
 }
 
@@ -41,7 +52,8 @@ inline bool same(const Params& a, const Params& b) {
   auto near = [](float x, float y) { return fabsf(x - y) < 0.01f; };
   return near(a.upper, b.upper) && near(a.lower, b.lower) && near(a.radius, b.radius) &&
          near(a.thickness, b.thickness) && near(a.gaze_x, b.gaze_x) &&
-         near(a.gaze_y, b.gaze_y) && near(a.tilt, b.tilt);
+         near(a.gaze_y, b.gaze_y) && near(a.tilt, b.tilt) && near(a.fill, b.fill) &&
+         near(a.cut, b.cut) && near(a.cut_x, b.cut_x) && near(a.cut_y, b.cut_y);
 }
 
 // The thinking look drifts its gaze left and right by this much (px), once per period.
@@ -52,6 +64,8 @@ constexpr uint32_t kThinkingPeriodMs = 3000;
 inline Params closedLike(Params p) {
   p.upper = 0.3f;
   p.lower = 0.3f;
+  p.fill = 0;  // a crescent blinks shut like a ring
+  p.cut = 0;
   return p;
 }
 
@@ -82,6 +96,29 @@ inline Params look(float x, float y) {
   p.radius = 62;
   p.gaze_x = x;
   p.gaze_y = y;
+  return p;
+}
+// A filled crescent looking toward (x, y) px (docs/looking.png): a solid disc with a black
+// disc cut out at (cut_x, cut_y) radii from its centre.
+inline Params crescent(float x, float y, float cut_x, float cut_y) {
+  Params p = look(x, y);
+  p.fill = 1;
+  p.cut = 0.85f;
+  p.cut_x = cut_x;
+  p.cut_y = cut_y;
+  return p;
+}
+// Crescents lean toward the gaze with the hollow facing the middle (left/right), or sit
+// high/low with the hollow facing up (up/down), as in docs/looking.png.
+inline Params lookLeft() { return crescent(-28, 0, 0.45f, -0.1f); }
+inline Params lookRight() { return crescent(28, 0, -0.45f, -0.1f); }
+inline Params lookUp() { return crescent(0, -28, 0, -0.45f); }
+inline Params lookDown() { return crescent(0, 28, 0, -0.45f); }
+// Small rings: the start of "look around" (docs/look around.png).
+inline Params small() {
+  Params p;
+  p.radius = 38;
+  p.thickness = 12;
   return p;
 }
 inline Params closedLine() {

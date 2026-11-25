@@ -76,6 +76,19 @@ bool testMode = false;
 bool drifting = false;  // the thinking look's slow left-right gaze
 uint32_t driftStart = 0;
 
+// A short animation: each step shows a look, then holds it for `ms`.
+struct Step {
+  const char* look;
+  uint32_t ms;
+};
+// docs/look around.png: small rings, crescents left, crescents right, back to normal.
+constexpr Step kLookAround[] = {
+    {"small", 700}, {"left", 1100}, {"right", 1100}, {"small", 600}, {"idle", 0}};
+const Step* sequence = nullptr;
+size_t sequenceLen = 0;
+size_t sequenceStep = 0;
+uint32_t stepAt = 0;  // when the next step starts
+
 // The thinking drift's offset: starts at 0, so the look eases in without a jump.
 float driftAt(uint32_t now) {
   if (!drifting) return 0;
@@ -143,6 +156,15 @@ void draw(int side, const eye::Params& params) {
     sprite.fillScreen(kBlack);
     drawLid(sprite, p, p.upper);
     if (fabsf(p.lower - p.upper) > 0.02f) drawLid(sprite, p, p.lower);
+    const float cx = kSpriteCenter + p.gaze_x;
+    const float cy = kSpriteCenter + p.gaze_y;
+    if (p.fill > 0.01f) {  // grow a solid disc inside the ring
+      sprite.fillSmoothCircle(cx, cy, p.fill * p.radius, kCyan);
+    }
+    if (p.cut > 0.01f) {  // carve the crescent: a black disc over ring and fill
+      sprite.fillSmoothCircle(cx + p.cut_x * p.radius, cy + p.cut_y * p.radius,
+                              p.cut * p.radius, kBlack);
+    }
     inSprite = p;
     spriteValid = true;
   }
@@ -167,6 +189,8 @@ void drawTest() {
     s.drawString(labels[i], kCenter - s.textWidth(labels[i]) / 2, kCenter - s.fontHeight() / 2);
   }
 }
+
+bool apply(const char* name, uint32_t now);  // shows one look; defined below
 
 }  // namespace
 
@@ -201,6 +225,22 @@ bool begin() {
 bool show(const char* name) {
   if (!ready) return false;
   const uint32_t now = millis();
+  if (!strcmp(name, "lookaround")) {
+    sequence = kLookAround;
+    sequenceLen = sizeof(kLookAround) / sizeof(kLookAround[0]);
+    sequenceStep = 0;
+    stepAt = now;  // update() starts it
+    return true;
+  }
+  sequence = nullptr;  // any other look stops a running animation
+  return apply(name, now);
+}
+
+}  // namespace eyes
+
+namespace {
+
+bool apply(const char* name, uint32_t now) {
   if (!strcmp(name, "blink")) {
     blinker.blinkNow(now);
     return true;
@@ -211,7 +251,6 @@ bool show(const char* name) {
     return true;
   }
   namespace ps = eye::presets;
-  constexpr float kLook = 28;  // px; fitInSprite() keeps it inside the sprite
   eye::Params left, right;
   uint32_t ms = 250;
   bool blinks = true;
@@ -226,14 +265,25 @@ bool show(const char* name) {
   } else if (!strcmp(name, "surprised")) {
     left = right = ps::surprised();
     ms = 150;
-  } else if (!strcmp(name, "left")) {  // as you look at the robot
-    left = right = ps::look(-kLook, 0);
+  } else if (!strcmp(name, "left")) {  // as you look at the robot; crescents
+    left = right = ps::lookLeft();
+    ms = 300;
+    blinks = false;
   } else if (!strcmp(name, "right")) {
-    left = right = ps::look(kLook, 0);
+    left = right = ps::lookRight();
+    ms = 300;
+    blinks = false;
   } else if (!strcmp(name, "up")) {
-    left = right = ps::look(0, -kLook);
+    left = right = ps::lookUp();
+    ms = 300;
+    blinks = false;
   } else if (!strcmp(name, "down")) {
-    left = right = ps::look(0, kLook);
+    left = right = ps::lookDown();
+    ms = 300;
+    blinks = false;
+  } else if (!strcmp(name, "small")) {
+    left = right = ps::small();
+    ms = 300;
   } else if (!strcmp(name, "wink")) {
     left = ps::happy();
     right = ps::closedLine();
@@ -270,8 +320,22 @@ bool show(const char* name) {
   return true;
 }
 
+// Advances a running animation (show("lookaround")) when its current step is over.
+void stepSequence(uint32_t now) {
+  if (sequence == nullptr || static_cast<int32_t>(now - stepAt) < 0) return;
+  const Step& step = sequence[sequenceStep];
+  apply(step.look, now);
+  stepAt = now + step.ms;
+  if (++sequenceStep >= sequenceLen) sequence = nullptr;
+}
+
+}  // namespace
+
+namespace eyes {
+
 void update(uint32_t now) {
   if (!ready || testMode) return;
+  stepSequence(now);
   if (autoBlink && blinker.finished(now)) blinker.schedule(now, 3000 + esp_random() % 3000);
   const float b = blinker.amount(now);
   for (int i = 0; i < 2; i++) {

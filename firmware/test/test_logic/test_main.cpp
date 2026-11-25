@@ -274,7 +274,9 @@ void test_presets_fit_sprite() {
                                ps::surprised(),   ps::look(-28, 0),  ps::look(28, 0),
                                ps::look(0, -28),  ps::look(0, 28),   ps::closedLine(),
                                ps::skeptical(),   ps::sad(),         ps::listening(),
-                               thinkingL,         thinkingR};
+                               thinkingL,         thinkingR,         ps::lookLeft(),
+                               ps::lookRight(),   ps::lookUp(),      ps::lookDown(),
+                               ps::small()};
   for (const auto& p : looks) {
     const float w = p.thickness / 2 + 1;
     const float t = p.radius * fabsf(sinf(p.tilt));
@@ -284,6 +286,18 @@ void test_presets_fit_sprite() {
     TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, up);
     TEST_ASSERT_LESS_OR_EQUAL_FLOAT(100.0f, down);
   }
+}
+
+// A ring blends smoothly into a crescent, and a blink shuts a crescent like a ring.
+void test_crescent_blend_and_blink() {
+  const eye::Params mid = eye::lerp(eye::presets::idle(), eye::presets::lookLeft(), 0.5f);
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, mid.fill);
+  TEST_ASSERT_EQUAL_FLOAT(0.425f, mid.cut);
+  TEST_ASSERT_EQUAL_FLOAT(0.225f, mid.cut_x);
+  const eye::Params shut = eye::closedLike(eye::presets::lookLeft());
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, shut.fill);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, shut.cut);
+  TEST_ASSERT_FALSE(eye::same(eye::presets::lookLeft(), eye::presets::lookRight()));
 }
 
 void test_dc_block_removes_offset() {
@@ -447,6 +461,7 @@ void setup() {
   RUN_TEST(test_tween_set_and_settle);
   RUN_TEST(test_blinker);
   RUN_TEST(test_presets_fit_sprite);
+  RUN_TEST(test_crescent_blend_and_blink);
   RUN_TEST(test_blinker_default_is_not_blinking);
   RUN_TEST(test_blinker_symmetric);
   RUN_TEST(test_blinker_survives_millis_wrap);
