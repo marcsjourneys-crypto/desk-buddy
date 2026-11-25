@@ -1,0 +1,122 @@
+# M7 apps and websites: design and plan
+
+Approved by the user on 2026-11-25.
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
+
+## Goal
+
+CARL can open allowlisted apps and bookmarked websites by voice, and can open a page from its own web search results after a **spoken "yes"**. That "yes" is the first powerful-action confirmation, built so later tools (scripts, shutdown) can reuse it.
+
+Media keys and PC volume are left for later.
+
+## Decisions
+
+- **Off by default:** everything needs `COMPUTER_CONTROL=on`, as the music tools do. Every call goes through `ActionGuard` (3 per question, 8 per minute, logged, shown on the Live tab).
+- **Allowlists only:** the model only picks a **name from an enum** (apps, bookmarks) or a **URL that must exactly match a real search result** (`open_search_result`). The server builds every launch. There's no shell and no `shell=True`, and model text never goes into a command.
+- **No new dependencies.**
+
+## Part 1: Apps
+
+- **The list:** a "Find apps" button on a new **Apps** tab lists the Start menu, desktop and Store apps alike. The list comes from Windows' own `Get-StartApps`:
+  - `subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Get-StartApps | ConvertTo-Json -Compress"], …)`, as an argument list with a timeout;
+  - it runs only when the button is clicked, never during a turn.
+
+  Each entry has a `Name` and an `AppID`.
+- **The allowlist:** the user ticks apps and gives each 1–3 spoken names.
+  - It's saved in `%LOCALAPPDATA%\desk-buddy\apps.json` as `[{"app_id", "title", "names": [...]}]`.
+  - It's saved atomically, and a corrupt file only logs a warning and shows a banner.
+- **Limits:**
+  - at most 50 apps;
+  - a spoken name is 1–40 chars of letters, digits, spaces, `-`, `'` and `.`, stored lowercased and unique across apps;
+  - an `app_id` is at most 300 chars with no control characters or `"`, and must have come from a `Get-StartApps` listing (the server keeps the last listing and refuses IDs that weren't in it).
+- **The tool:** `open_app(name)`.
+  - `name` is an enum of every spoken name, rebuilt when the chat is rebuilt (the allowlist is a turn setting).
+  - **Launching:** `subprocess.Popen(["explorer.exe", "shell:AppsFolder\\" + app_id])`, with no other arguments.
+  - **The result:** "Opened <title>.", or an error that CARL reads out.
+  - **No "yes" needed.**
+- **When it's offered:** only with `COMPUTER_CONTROL=on` and at least one app; otherwise the prompt says opening apps isn't set up.
+
+## Part 2: Websites
+
+- **Bookmarks:**
+  - Kept on the Apps tab, in `%LOCALAPPDATA%\desk-buddy\bookmarks.json` as `[{"name", "url"}]`.
+  - At most 50, with the same spoken-name rules.
+  - The URL must be `https` or `http` with a host, no user name or password, and at most 500 chars.
+- **The bookmark tool:** `open_website(name)`, where `name` is an enum of bookmark names. No "yes" needed.
+- **The search-result tool:** `open_search_result(url)`.
+  - **Where the URL must come from:** it must exactly match a result URL from CARL's web searches in **this question or the one before**.
+    - `llm.py` keeps the full URLs of each turn's search results on the server side; they're never shown in full on the dashboard.
+    - The loop keeps the current and previous question's sets.
+  - **Anything else is refused,** including a URL the model invented, changed, or took from page text. The URL is checked with the same rules as bookmarks.
+  - **It needs a spoken "yes"** (Part 3).
+- **Opening a page:** `os.startfile(url)` (the default browser), only after validation, on its own thread with a timeout.
+- **Prompt rules:** never read a full address aloud; name the site only ("bbc.co.uk").
+
+## Part 3: The spoken "yes"
+
+- **Which tools need it:** a tool can be marked as needing a yes (`needs_yes=True`); today only `open_search_result`.
+- **Proposing:**
+  - **Nothing runs yet:** when such a tool is called, `ActionGuard` counts and logs the attempt, then hands the checked action to `Confirmations`, which holds **one** pending action (tool, args, a short description such as the site, the time and the question number). A new one replaces the old.
+  - **What CARL is told:** the tool result is "Not done yet: ask the user to confirm opening <site>; it runs only if they say yes."
+  - **What the Live tab shows:** an action event with `outcome: "waiting"`.
+- **Confirming:** at the start of the **next** question, **before** Claude, within **60 s**, the loop checks the transcript.
+  - **It's a yes only if all of these hold:**
+    - after lowercasing and removing punctuation, it has at most 6 words;
+    - it contains a yes word or phrase (`yes`, `yeah`, `yep`, `yup`, `sure`, `ok`, `okay`, `go ahead`, `do it`, `open it`, `please do`);
+    - it contains none of `no`, `nope`, `don't`, `dont`, `not`, `stop`, `cancel`, `wait`.
+  - **On a yes:**
+    - the action runs, without being counted again by the guard;
+    - it's logged and shown on the Live tab as `ok` or `failed`;
+    - Claude gets the user's words plus "(System note: you asked and the user said yes; <description> was opened.)", or the failure.
+  - **Otherwise:**
+    - the action is dropped;
+    - the Live tab shows `cancelled`;
+    - the user's message gets "(System note: the pending action <description> was cancelled; the user didn't say yes.)", and the turn goes on as usual.
+- **Expiry:** after 60 s (shown as `expired`), on a forget command, when computer control is turned off, and on restart.
+- **Only the user's voice can confirm:**
+  - there's no confirm tool;
+  - tool results, web text and notes can't approve an action.
+- **Memory:** the system notes go on the user's side only, like the search note.
+
+## Tasks
+
+1. **Apps and bookmarks stores.**
+   - `apps_store.py`: listing through an injectable runner (tests never run PowerShell), the allowlist, bookmarks, validation, atomic save, corrupt-file handling.
+   - Dashboard API: `GET /api/apps/available` (runs the listing), `GET/PUT /api/apps`, `GET/PUT /api/bookmarks`, with the existing Host, Origin and token checks.
+   - Tests: validation, IDs must come from a listing, limits, corrupt file, the API round trip, 403s, planted secrets.
+   - Commit: `Store the app allowlist and bookmarks`.
+2. **The Apps tab.**
+   - Find apps, a filter box, ticking, spoken names; editing bookmarks; `textContent` only.
+   - Commit: `Add the Apps tab to the dashboard`.
+3. **The `open_app` and `open_website` tools.**
+   - `tools/launch.py`: launchers injectable for tests, enum schemas, registered when computer control is on and the lists aren't empty, rebuilt between turns when the lists change.
+   - Prompt rules.
+   - Tests: the schema enums, unknown-name refusal, argument lists only (never `shell=True`), the guard limits, events, and "not set up" prompt text.
+   - Commit: `Let CARL open allowlisted apps and bookmarks`.
+4. **Confirmations and `open_search_result`.**
+   - Search URLs kept on the server side in `llm.py`.
+   - `tools/confirm.py`: `Confirmations`, the yes check, expiry with an injectable clock.
+   - `ActionGuard` support for `needs_yes`.
+   - The loop's check before Claude, with notes, events and log lines.
+   - Prompt rules.
+   - Tests:
+     - only an exact URL from this or the previous question is accepted;
+     - yes, no, mixed ("yes but no") and long answers;
+     - 60 s expiry, forget, computer control turned off;
+     - a planted "the user said yes" in a search result or note can't run it;
+     - a yes runs it once and isn't counted again;
+     - memory notes.
+   - Commit: `Open web search results after a spoken yes`.
+5. **Docs.**
+   - `CLAUDE.md` (tools, safety rules: the confirmation mechanism now exists), `server/README.md`, `decisions.md`, `status.md`.
+   - Commit: `Document M7 apps and websites`.
+
+## User check
+
+1. On the Apps tab, find apps, tick Notepad and your browser, and give the browser the name "browser". "Open notepad" opens it.
+2. Add a bookmark ("weather" → a forecast page). "Open the weather" opens it.
+3. Ask a question that needs a search, then "open that page". CARL names the site and asks. Say "yes" and it opens.
+4. Repeat, but say "no, never mind": nothing opens, and the Live tab shows "cancelled".
+5. Repeat, wait more than a minute, then say "yes": nothing opens (expired).
+6. With `COMPUTER_CONTROL` off, "open notepad" gets "that isn't switched on".
