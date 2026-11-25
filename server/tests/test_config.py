@@ -166,6 +166,14 @@ def test_tests_and_tools_never_read_the_dashboard_file(monkeypatch, tmp_path):
     assert s.max_sentences == 2
 
 
+def test_dashboard_port():
+    assert load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"}).dashboard_port == 8766
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "DASHBOARD_PORT": "9000"})
+    assert s.dashboard_port == 9000
+    with pytest.raises(ConfigError, match="DASHBOARD_PORT"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "DASHBOARD_PORT": "0"})
+
+
 def test_computer_control_defaults():
     s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
     assert s.computer_control is False

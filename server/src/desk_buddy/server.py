@@ -274,6 +274,8 @@ class RunningServer:
     server: uvicorn.Server
     task: asyncio.Task[None]
     port: int
+    host: str = ""
+    name: str = "Robot link"
     stopping: bool = False
 
     def __post_init__(self) -> None:
@@ -288,14 +290,16 @@ class RunningServer:
         if self.stopping:
             return
         if task.cancelled():
-            log.error("Robot link stopped unexpectedly: cancelled")
+            log.error("%s stopped unexpectedly: cancelled", self.name)
         elif (exc := task.exception()) is not None:
-            log.error("Robot link stopped unexpectedly: %s", exc, exc_info=exc)
+            log.error("%s stopped unexpectedly: %s", self.name, exc, exc_info=exc)
         else:
-            log.error("Robot link stopped unexpectedly")
+            log.error("%s stopped unexpectedly", self.name)
 
 
-async def start_server(app: FastAPI, host: str, port: int) -> RunningServer:
+async def start_server(
+    app: FastAPI, host: str, port: int, *, name: str = "Robot link"
+) -> RunningServer:
     """Bind first (so a busy port is a clear error), then serve in this event loop."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -330,4 +334,5 @@ async def start_server(app: FastAPI, host: str, port: int) -> RunningServer:
             await task
         sock.close()
         raise
-    return RunningServer(server, task, sock.getsockname()[1])
+    bound_host, bound_port = sock.getsockname()[:2]
+    return RunningServer(server, task, bound_port, host=bound_host, name=name)

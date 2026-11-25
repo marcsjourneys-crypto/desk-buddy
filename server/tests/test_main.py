@@ -57,6 +57,7 @@ def fakes(monkeypatch, calls, tmp_path):
     class FakeOrchestrator:
         def __init__(self, **kwargs):
             calls.append(("orchestrator kwargs", kwargs))
+            self.state = entry.State.IDLE
 
         async def run(self, events):
             calls.append(("events at run", list(events._queue), events))
@@ -111,6 +112,16 @@ def fakes(monkeypatch, calls, tmp_path):
 
     monkeypatch.setattr(entry, "create_app", fake_create_app)
     monkeypatch.setattr(entry, "start_server", fake_start_server)
+
+    class FakeDashboard:
+        async def stop(self):
+            calls.append("dashboard stopped")
+
+    async def fake_start_dashboard(app, port):
+        calls.append(("start_dashboard", app, port))
+        return FakeDashboard()
+
+    monkeypatch.setattr(entry, "start_dashboard", fake_start_dashboard)
 
 
 def steps(calls):
@@ -221,6 +232,7 @@ def test_ctrl_c_shuts_down_in_reverse_creation_order(fakes, calls):
         "watcher started",
         "farewell",
         "watcher stopped",
+        "dashboard stopped",
         "orchestrator shutdown",
         "speaker closed",
         "mic closed",
@@ -290,9 +302,10 @@ def test_robot_link_on_with_token(monkeypatch, fakes, calls, caplog):
     assert names.index("orchestrator kwargs") < names.index("start_server")
     assert names.index("start_server") < names.index("watcher started")
     shutdown = steps(calls)
-    assert shutdown[shutdown.index("farewell") :][:4] == [
+    assert shutdown[shutdown.index("farewell") :][:5] == [
         "farewell",  # before the server and the devices close
         "watcher stopped",
+        "dashboard stopped",
         "server stopped",
         "orchestrator shutdown",
     ]
@@ -372,6 +385,53 @@ def test_the_orchestrator_uses_the_device_switch(fakes, calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     assert isinstance(kwargs["mic"], SwitchedMic)
     assert isinstance(kwargs["speaker"], SwitchedPlayer)
+
+
+def test_the_dashboard_starts_on_its_port_and_stops_on_exit(monkeypatch, fakes, calls):
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", dashboard_port=9123)
+    )
+    assert entry.main() == 0
+    ((_, app, port),) = [c for c in calls if isinstance(c, tuple) and c[0] == "start_dashboard"]
+    assert port == 9123
+    assert app.title == "CARL dashboard"
+    shutdown = steps(calls)
+    assert shutdown.index("farewell") < shutdown.index("dashboard stopped")
+
+
+def test_the_dashboard_status_and_preview_use_the_running_parts(monkeypatch, fakes, calls):
+    monkeypatch.setattr(
+        entry,
+        "load_settings",
+        lambda: Settings(anthropic_api_key="sk-ant-PLANTED", robot_token="t" * 20, max_sentences=3),
+    )
+    seen = {}
+
+    async def start_and_ask(app, port):
+        routes = {
+            r.path: r.endpoint for r in app.routes if "GET" in (getattr(r, "methods", None) or ())
+        }
+        seen["status"] = await routes["/api/status"]()
+        seen["personality"] = await routes["/api/personality"]()
+        return None
+
+    monkeypatch.setattr(entry, "start_dashboard", start_and_ask)
+    entry.main()
+    status = seen["status"]
+    assert status["state"] == "idle"
+    assert status["voice"] == "piper en_GB-northern_english_male-medium"
+    assert status["robot"] == {"enabled": True, "connected": False, "fw_version": None}
+    assert "sk-ant-PLANTED" not in str(seen)
+    assert "at most 3 short sentences" in seen["personality"]["preview"]
+
+
+def test_a_dashboard_that_cant_start_is_not_fatal(monkeypatch, fakes, calls):
+    async def no_dashboard(app, port):
+        return None
+
+    monkeypatch.setattr(entry, "start_dashboard", no_dashboard)
+    assert entry.main() == 0
+    assert "orchestrator shutdown" in steps(calls)
 
 
 def test_one_event_bus_feeds_the_dashboard(monkeypatch, fakes, calls):

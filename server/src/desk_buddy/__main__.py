@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import socket
 import sys
 import threading
@@ -15,14 +16,15 @@ from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.brain.personality import Personality
 from desk_buddy.config import ConfigError, Settings, load_settings
+from desk_buddy.dashboard import build_status, create_dashboard, start_dashboard
 from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
-from desk_buddy.llm import create_chat
+from desk_buddy.llm import create_chat, prompt_for
 from desk_buddy.loop import Orchestrator, State
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
-from desk_buddy.settings_store import LiveSettings
+from desk_buddy.settings_store import LiveSettings, SettingsStore
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
@@ -154,6 +156,28 @@ async def _run(settings: Settings) -> None:
                 log.info("Robot link: on (ws://%s:%d/robot)", settings.server_host, port)
         else:
             log.info("Robot link: off (no ROBOT_TOKEN)")
+
+        voice = "sapi" if settings.tts_engine == "sapi" else f"piper {settings.tts_voice}"
+        dashboard_app = create_dashboard(
+            port=settings.dashboard_port,
+            token=secrets.token_urlsafe(32),  # put into the page: changes must carry it
+            settings=SettingsStore(),
+            live=live,
+            personality=personality,
+            bus=bus,
+            status=lambda: build_status(
+                live.current,
+                voice=voice,
+                tools=[s["name"] for s in brain.tools.schemas()],
+                robot=switch.robot,
+                state=orchestrator.state.value,
+                dashboard_port=settings.dashboard_port,
+            ),
+            preview=lambda: prompt_for(live.current, brain.tools, personality.current()),
+        )
+        dashboard = await start_dashboard(dashboard_app, settings.dashboard_port)
+        if dashboard is not None:  # never fatal: CARL runs without it
+            stack.push_async_callback(dashboard.stop)
 
         loop = asyncio.get_running_loop()
         on_key = key_handler(switch, events)

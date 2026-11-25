@@ -41,6 +41,7 @@ ENV_KEYS = (
     "COMPUTER_CONTROL",
     "SPOTIFY_CLIENT_ID",
     "MUSIC_DUCK",
+    "DASHBOARD_PORT",
 )
 
 # The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
@@ -122,6 +123,7 @@ class Settings:
     computer_control: bool = False  # off by default: COMPUTER_CONTROL=on enables it
     spotify_client_id: str = ""  # blank = music tools off
     music_duck: bool = True  # lower Spotify while CARL listens and talks
+    dashboard_port: int = 8766  # the dashboard, on 127.0.0.1 only
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -287,6 +289,7 @@ def _load(
         computer_control=_switch(get, "COMPUTER_CONTROL", Settings.computer_control),
         spotify_client_id=get("SPOTIFY_CLIENT_ID", ""),
         music_duck=_switch(get, "MUSIC_DUCK", Settings.music_duck),
+        dashboard_port=_port(get, "DASHBOARD_PORT", Settings.dashboard_port),
     )
 
 
