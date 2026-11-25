@@ -185,6 +185,26 @@ def test_create_chat_builds_claude_for_anthropic_provider():
     assert isinstance(create_chat(Settings(anthropic_api_key="k")), ClaudeChat)
 
 
+def _tool(name):
+    return Tool(name, "d", SCHEMA, lambda text: "ok")
+
+
+@pytest.mark.parametrize(
+    ("names", "notes", "music"),
+    [
+        ([], False, False),
+        (["take_note", "read_notes"], True, False),
+        (["play_music"], False, True),
+        (["take_note", "play_music"], True, True),
+    ],
+)
+def test_create_chat_tells_the_prompt_which_tools_exist(names, notes, music):
+    chat = create_chat(Settings(anthropic_api_key="k"), ToolRegistry([_tool(n) for n in names]))
+    prompt = chat._system()
+    assert ("take_note" in prompt) is notes
+    assert ("play_music" in prompt) is music
+
+
 SCHEMA = {
     "type": "object",
     "properties": {"text": {"type": "string"}},

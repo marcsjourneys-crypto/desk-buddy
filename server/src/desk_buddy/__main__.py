@@ -19,6 +19,8 @@ from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
+from desk_buddy.tools.actions import ActionGuard
+from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
 
 log = logging.getLogger("desk_buddy")
@@ -79,10 +81,14 @@ async def _run(settings: Settings) -> None:
         stack.callback(mic.close)
         speaker = Speaker()
         stack.callback(speaker.close)
-        tools = build_tools(settings)
+        guard = ActionGuard(settings.computer_control)
+        music = _music_tools(settings, guard)
+        tools = build_tools(settings, music=music)
         log.info(
             "Note tools: %s",
-            f"on ({settings.obsidian_vault_path})" if tools else "off (no OBSIDIAN_VAULT_PATH)",
+            f"on ({settings.obsidian_vault_path})"
+            if "take_note" in tools
+            else "off (no OBSIDIAN_VAULT_PATH)",
         )
         chat = create_chat(settings, tools)
         # A connected robot takes over the mic, speaker and button; else the PC's are used.
@@ -96,6 +102,7 @@ async def _run(settings: Settings) -> None:
             conversation=Conversation(settings.history_turns),
             on_state=switch.send_state,
             on_emotion=switch.send_emotion,
+            on_question=guard.new_question,
         )
         stack.push_async_callback(orchestrator.shutdown)
 
@@ -142,6 +149,22 @@ async def _run(settings: Settings) -> None:
         log.info("Ready. Hold %s to talk, Ctrl+C to quit.", settings.ptt_key)
         events.put_nowait("greet")
         await orchestrator.run(events)
+
+
+def _music_tools(settings: Settings, guard: ActionGuard) -> MusicTools | None:
+    """The music tools, only when computer control is on and Spotify is set up and logged
+    in. Otherwise CARL's prompt says music isn't set up."""
+    if not settings.computer_control:
+        reason = "COMPUTER_CONTROL is off"
+    elif not settings.spotify_client_id:
+        reason = "no SPOTIFY_CLIENT_ID"
+    elif (control := create_control(settings.spotify_client_id)) is None:
+        reason = "not logged in: run uv run python -m desk_buddy.spotify_login"
+    else:
+        log.info("Music tools: on (Spotify)")
+        return MusicTools(control, guard)
+    log.info("Music tools: off (%s)", reason)
+    return None
 
 
 async def _make_synthesizer(settings: Settings) -> SapiSynthesizer | PiperSynthesizer:

@@ -86,6 +86,7 @@ class Orchestrator:
         on_emotion: Callable[[str], None] = lambda emotion: None,
         clock: Callable[[], float] = time.monotonic,
         random: Callable[[], float] = random_module.random,
+        on_question: Callable[[], None] = lambda: None,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -96,6 +97,7 @@ class Orchestrator:
         self.conversation = Conversation() if conversation is None else conversation
         self._on_state = on_state
         self._on_emotion = on_emotion
+        self._on_question = on_question  # a new turn: resets the per-question action limit
         self._turn: asyncio.Task[None] | None = None
         self._t0 = 0.0
         self._clock = clock
@@ -132,6 +134,7 @@ class Orchestrator:
                 return
             self._set_state(State.THINKING)
             self._t0 = time.perf_counter()
+            self._on_question()
             self._turn = asyncio.create_task(self._run_turn(pcm))
         elif event == "reset":
             # A robot attached or detached: drop whatever was happening and wait.

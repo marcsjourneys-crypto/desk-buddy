@@ -136,6 +136,25 @@ def test_turn_after_interrupt_uses_new_token():
     assert speaker.tokens == [0, 1, 1]
 
 
+def test_each_turn_starts_a_new_question_for_the_action_limits():
+    questions = []
+    orch, _, _ = make(on_question=lambda: questions.append(1))
+
+    async def scenario():
+        await talk(orch)
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert questions == [1, 1]
+
+
+def test_a_tap_is_not_a_question():
+    questions = []
+    orch, _, _ = make(mic=FakeMic(pcm=b"\x00" * 100), on_question=lambda: questions.append(1))
+    asyncio.run(talk(orch))
+    assert questions == []
+
+
 def test_short_tap_is_ignored():
     orch, parts, states = make(mic=FakeMic(pcm=b"\x00" * 100))
     asyncio.run(talk(orch))

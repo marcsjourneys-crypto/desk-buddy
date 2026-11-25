@@ -16,6 +16,26 @@ def test_vault_gives_note_tools(tmp_path):
         assert set(inp["required"]) == set(inp["properties"])
 
 
+def test_music_tools_are_added_when_given(tmp_path):
+    from desk_buddy.tools.actions import ActionGuard
+    from desk_buddy.tools.spotify import MusicTools, SpotifyControl
+
+    music = MusicTools(SpotifyControl(object(), pc_name="pc"), ActionGuard(True))
+    tools = build_tools(
+        Settings(anthropic_api_key="k", obsidian_vault_path=str(tmp_path)), music=music
+    )
+    names = [s["name"] for s in tools.schemas()]
+    assert names == [
+        "take_note",
+        "read_notes",
+        "play_music",
+        "music_control",
+        "music_volume",
+        "now_playing",
+    ]
+    assert "play_music" in tools and "take_note" in tools and "nope" not in tools
+
+
 def test_take_note_tool_writes_into_the_vault(tmp_path):
     tools = build_tools(Settings(anthropic_api_key="k", obsidian_vault_path=str(tmp_path)))
     outcome = tools.run("take_note", {"text": "hello", "kind": "note", "title": ""})

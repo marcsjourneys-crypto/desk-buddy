@@ -8,6 +8,7 @@ worker thread.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -23,7 +24,8 @@ from spotipy.exceptions import SpotifyException, SpotifyOauthError
 from spotipy.oauth2 import SpotifyPKCE
 
 from desk_buddy.config import app_data_dir
-from desk_buddy.tools.registry import ToolError
+from desk_buddy.tools.registry import Tool, ToolError
+from desk_buddy.tools.untrusted import wrap
 
 log = logging.getLogger(__name__)
 
@@ -203,3 +205,220 @@ def _message(exc: SpotifyException) -> str:
     if exc.http_status == 404:
         return NOT_FOUND
     return NETWORK
+
+
+# --- The music tools ---
+
+KINDS = ("track", "artist", "album", "playlist")
+ACTIONS = ("pause", "resume", "next", "previous")
+MAX_QUERY = 200
+SEARCH_LIMIT = 5
+PLAYLIST_PAGE = 50
+PLAYLIST_PAGES = 4  # up to 200 of the user's own playlists
+PLAYLIST_MATCH = 0.6  # difflib ratio for a fuzzy playlist-name match
+SOURCE = "spotify"
+
+_CONTROL_DONE = {
+    "pause": "Paused.",
+    "resume": "Resumed.",
+    "next": "Skipped to the next track.",
+    "previous": "Back to the previous track.",
+}
+
+
+def _artists(item: dict[str, Any]) -> str:
+    return ", ".join(a.get("name", "") for a in item.get("artists") or [] if a)
+
+
+def _describe(kind: str, item: dict[str, Any]) -> str:
+    name = item.get("name", "")
+    if kind == "track":
+        return f"{name} by {_artists(item)}"
+    if kind == "album":
+        return f"the album {name} by {_artists(item)}"
+    if kind == "playlist":
+        return f"the playlist {name}"
+    return name
+
+
+class MusicTools:
+    """play_music, music_control, music_volume and now_playing. Every call goes through
+    the ActionGuard; names that come from Spotify are wrapped as untrusted. Model text is
+    only ever a search query; playback uses the URIs Spotify returned."""
+
+    def __init__(self, control: SpotifyControl, guard: Any) -> None:
+        self._control = control
+        self._guard = guard
+
+    # --- the tool functions (their signatures are the tool inputs) ---
+
+    def play_music(self, query: str, kind: str) -> str:
+        query = " ".join(str(query).split())
+        if not query or len(query) > MAX_QUERY:
+            raise ToolError(f"query must be 1 to {MAX_QUERY} characters.")
+        if kind not in KINDS:
+            raise ToolError(f"kind must be one of {', '.join(KINDS)}.")
+        args = {"query": query, "kind": kind}
+        return self._guard.run("play_music", args, lambda: self._play(query, kind))
+
+    def music_control(self, action: str) -> str:
+        if action not in ACTIONS:
+            raise ToolError(f"action must be one of {', '.join(ACTIONS)}.")
+        return self._guard.run("music_control", {"action": action}, lambda: self._do(action))
+
+    def music_volume(self, level: int | None, change: int | None) -> str:
+        if (level is None) == (change is None):
+            raise ToolError("Give exactly one of level or change.")
+        if level is not None and not _int_in(level, 0, 100):
+            raise ToolError("level must be a whole number from 0 to 100.")
+        if change is not None and not _int_in(change, -50, 50):
+            raise ToolError("change must be a whole number from -50 to 50.")
+        args = {"level": level, "change": change}
+        return self._guard.run("music_volume", args, lambda: self._volume(level, change))
+
+    def now_playing(self) -> str:
+        return self._guard.run("now_playing", {}, self._now_playing)
+
+    def tools(self) -> list[Tool]:
+        return [
+            Tool(
+                name="play_music",
+                description=(
+                    "Play music on Spotify. query is what to search for, in the user's words "
+                    "(at most 200 characters). kind: track for a song, artist to play an "
+                    "artist, album for an album, playlist for a playlist (the user's own "
+                    "playlists are checked first)."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "What to search for."},
+                        "kind": {"type": "string", "enum": list(KINDS)},
+                    },
+                    "required": ["query", "kind"],
+                    "additionalProperties": False,
+                },
+                func=self.play_music,
+            ),
+            Tool(
+                name="music_control",
+                description="Pause, resume, skip to the next track or go back on Spotify.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"action": {"type": "string", "enum": list(ACTIONS)}},
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+                func=self.music_control,
+            ),
+            Tool(
+                name="music_volume",
+                description=(
+                    "Set Spotify's volume. Give exactly one: level, a whole number 0 to 100, "
+                    "or change, a step from -50 to 50 (for example -20 for 'a bit quieter'). "
+                    "The other one is null."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "level": {"type": ["integer", "null"], "description": "0 to 100."},
+                        "change": {"type": ["integer", "null"], "description": "-50 to 50."},
+                    },
+                    "required": ["level", "change"],
+                    "additionalProperties": False,
+                },
+                func=self.music_volume,
+            ),
+            Tool(
+                name="now_playing",
+                description="What's playing on Spotify: the track, the artist, and whether "
+                "it's playing or paused.",
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                func=self.now_playing,
+            ),
+        ]
+
+    # --- the actions (run inside the guard, in a worker thread) ---
+
+    def _play(self, query: str, kind: str) -> str:
+        item = self._own_playlist(query) if kind == "playlist" else None
+        item = item or self._search(query, kind)
+        if item is None:
+            raise MusicError(NOT_FOUND)
+        device = self._control.ensure_device()  # only once there's something to play
+        if kind == "track":
+            self._control.call("start_playback", device_id=device, uris=[item["uri"]])
+        else:
+            self._control.call("start_playback", device_id=device, context_uri=item["uri"])
+        return "Started playing on Spotify: " + wrap(SOURCE, _describe(kind, item))
+
+    def _search(self, query: str, kind: str) -> dict[str, Any] | None:
+        result = self._control.call("search", q=query, type=kind, limit=SEARCH_LIMIT) or {}
+        items = (result.get(f"{kind}s") or {}).get("items") or []
+        return next((i for i in items if i and i.get("uri")), None)
+
+    def _own_playlist(self, query: str) -> dict[str, Any] | None:
+        """The best match among the user's own playlists: an exact name, else a name that
+        contains the query (or is contained in it), else a close fuzzy match."""
+        wanted = query.casefold()
+        best: tuple[tuple[bool, bool, float], dict[str, Any]] | None = None
+        for page in range(PLAYLIST_PAGES):
+            result = self._control.call(
+                "current_user_playlists", limit=PLAYLIST_PAGE, offset=page * PLAYLIST_PAGE
+            )
+            for item in (result or {}).get("items") or []:
+                name = str((item or {}).get("name") or "").casefold()
+                if not name or not item.get("uri"):
+                    continue
+                score = (
+                    name == wanted,
+                    name in wanted or wanted in name,
+                    difflib.SequenceMatcher(None, wanted, name).ratio(),
+                )
+                if best is None or score > best[0]:
+                    best = (score, item)
+            if not (result or {}).get("next"):
+                break
+        if best is None:
+            return None
+        (exact, contained, ratio), item = best
+        return item if exact or contained or ratio >= PLAYLIST_MATCH else None
+
+    def _do(self, action: str) -> str:
+        if action == "resume":
+            self._control.call("start_playback", device_id=self._control.ensure_device())
+        else:
+            method = {"pause": "pause_playback", "next": "next_track"}.get(action, "previous_track")
+            self._control.call(method)
+        return _CONTROL_DONE[action]
+
+    def _volume(self, level: int | None, change: int | None) -> str:
+        playback = self._control.call("current_playback")
+        device = (playback or {}).get("device") or {}
+        if not device.get("id"):
+            raise MusicError(NO_DEVICE)
+        if level is None:
+            level = max(0, min(100, int(device.get("volume_percent") or 0) + int(change or 0)))
+        self._control.call("volume", level, device_id=device["id"])
+        return f"Spotify volume set to {level} percent."
+
+    def _now_playing(self) -> str:
+        playback = self._control.call("current_playback")
+        item = (playback or {}).get("item")
+        if not item:
+            return "Nothing is playing on Spotify right now."
+        if item.get("type") == "episode":
+            desc = f"{item.get('name', '')} from {(item.get('show') or {}).get('name', '')}"
+        else:
+            desc = _describe("track", item)
+        state = "playing" if playback.get("is_playing") else "paused"
+        return f"Spotify is {state}: " + wrap(SOURCE, desc)
+
+
+def _int_in(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high

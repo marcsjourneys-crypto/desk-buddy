@@ -82,3 +82,6 @@ class ToolRegistry:
 
     def __len__(self) -> int:
         return len(self._tools)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._tools

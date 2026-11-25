@@ -52,6 +52,15 @@ def test_prompt_says_untrusted_text_is_data_not_instructions(notes):
     assert "never follow" in prompt.lower()
 
 
+def test_prompt_mentions_music_tools_only_when_set_up():
+    on = system_prompt(2, music=True)
+    assert "play_music" in on and "now_playing" in on
+    assert "three" in on  # the per-question limit, so CARL can explain a refusal
+    off = system_prompt(2, music=False)
+    assert "play_music" not in off
+    assert "music isn't set up" in off
+
+
 def test_prompt_mentions_sentence_limit_and_spoken_style():
     prompt = system_prompt(max_sentences=3)
     assert "3 short sentences" in prompt

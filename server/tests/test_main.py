@@ -370,6 +370,66 @@ def test_the_orchestrator_uses_the_device_switch(fakes, calls):
     assert isinstance(kwargs["speaker"], SwitchedPlayer)
 
 
+def orchestrator_kwargs(calls):
+    (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
+    return kwargs
+
+
+def music_run(monkeypatch, calls, caplog, control, **settings):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(entry, "load_settings", lambda: Settings(anthropic_api_key="k", **settings))
+    made = []
+
+    def fake_create_control(client_id):
+        made.append(client_id)
+        return control
+
+    monkeypatch.setattr(entry, "create_control", fake_create_control)
+    tools_seen = []
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None: tools_seen.append(tools) or object()
+    )
+    assert entry.main() == 0
+    return made, tools_seen[0]
+
+
+@pytest.mark.parametrize(
+    ("settings", "reason"),
+    [
+        ({}, "off (COMPUTER_CONTROL is off)"),
+        ({"computer_control": True}, "off (no SPOTIFY_CLIENT_ID)"),
+        (
+            {"computer_control": True, "spotify_client_id": "cid"},
+            "off (not logged in: run uv run python -m desk_buddy.spotify_login)",
+        ),
+    ],
+)
+def test_music_tools_are_off_unless_switched_on_and_logged_in(
+    monkeypatch, fakes, calls, caplog, settings, reason
+):
+    made, tools = music_run(monkeypatch, calls, caplog, None, **settings)
+    assert f"Music tools: {reason}" in caplog.messages
+    assert "play_music" not in tools
+    if not settings.get("spotify_client_id"):
+        assert made == []  # nothing Spotify is touched while it's off
+
+
+def test_music_tools_are_on_with_a_login(monkeypatch, fakes, calls, caplog):
+    from desk_buddy.tools.spotify import SpotifyControl
+
+    control = SpotifyControl(object(), pc_name="pc")
+    made, tools = music_run(
+        monkeypatch, calls, caplog, control, computer_control=True, spotify_client_id="cid"
+    )
+    assert made == ["cid"]
+    assert "play_music" in tools
+    assert "Music tools: on (Spotify)" in caplog.messages
+    # Each turn starts a new question for the action limits.
+    on_question = orchestrator_kwargs(calls)["on_question"]
+    assert on_question.__self__.__class__.__name__ == "ActionGuard"
+    assert on_question.__name__ == "new_question"
+
+
 def test_busy_port_is_a_clear_startup_error(monkeypatch, capsys, fakes, calls):
     monkeypatch.setattr(
         entry, "load_settings", lambda: Settings(anthropic_api_key="k", robot_token=TOKEN)

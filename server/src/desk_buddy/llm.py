@@ -227,7 +227,11 @@ def create_chat(settings: Settings, tools: ToolRegistry | None = None) -> Chat:
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
             model=settings.llm_model,
             effort=settings.llm_effort,
-            system=lambda: system_prompt(settings.max_sentences, notes=bool(tools)),
+            system=lambda: system_prompt(
+                settings.max_sentences,
+                notes=tools is not None and "take_note" in tools,
+                music=tools is not None and "play_music" in tools,
+            ),
             tools=tools,
         )
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")

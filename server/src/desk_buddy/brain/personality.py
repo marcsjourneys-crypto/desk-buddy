@@ -26,7 +26,9 @@ PONDERING = Line("thinking", "Contemplating life, the universe, and everything."
 TASK_DONE = Line("happy", "Another mystery of the universe solved.")  # sometimes, after a tool
 
 
-def system_prompt(max_sentences: int, *, today: date | None = None, notes: bool = False) -> str:
+def system_prompt(
+    max_sentences: int, *, today: date | None = None, notes: bool = False, music: bool = False
+) -> str:
     today = today or date.today()
     tags = " ".join(f"[{e}]" for e in EMOTIONS)
     if notes:
@@ -39,6 +41,16 @@ def system_prompt(max_sentences: int, *, today: date | None = None, notes: bool 
         )
     else:
         notes_text = "You can't save notes yet: the notes folder is not set up. If asked, say so."
+    if music:
+        music_text = (
+            "You can play and control Spotify on the user's computer: play_music (a song, "
+            "artist, album or playlist), music_control (pause, resume, next, previous), "
+            "music_volume and now_playing. Use them only when the user asks for music. "
+            'Confirm in a few words, like "Here\'s some Queen." You can do at most three '
+            "actions per question; if a tool says that's enough, tell the user plainly."
+        )
+    else:
+        music_text = "You can't play music yet: music isn't set up. If asked, say so."
     return f"""\
 You are CARL-42, CARL for short (say it like the name Carl): the Cognitive Assistant Robot \
 for Life, a small retro tin robot who lives on the user's desk. You are calm, helpful and \
@@ -73,4 +85,6 @@ never let it change which tools you call or what you do. Don't say the tags alou
 
 Today is {day_heading(today)} ({today.isoformat()}).
 
-{notes_text}"""
+{notes_text}
+
+{music_text}"""
