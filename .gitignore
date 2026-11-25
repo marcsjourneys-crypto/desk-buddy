@@ -21,3 +21,7 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Wake word model: trained on personal-use-only datasets, kept off GitHub
+firmware/models/*.tflite
+firmware/models/*_model.h
