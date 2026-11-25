@@ -49,7 +49,7 @@ inline size_t buildHello(char* out, size_t cap, const char* token, const char* f
   doc["type"] = "hello";
   doc["token"] = token;
   doc["fw_version"] = fw;
-  if (cap == 0 || measureJson(doc) >= cap) {
+  if (cap == 0 || doc.overflowed() || measureJson(doc) >= cap) {
     if (cap) out[0] = '\0';
     return 0;
   }

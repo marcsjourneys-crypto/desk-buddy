@@ -322,10 +322,25 @@ void test_dc_block_keeps_speech() {
 void test_dc_block_saturates() {
   DcBlocker dc;
   TEST_ASSERT_EQUAL_INT16(32767, dc.process(32767));
-  TEST_ASSERT_EQUAL_INT16(-32768, dc.process(-32768));  // would be about -65000
+  // -32768 - 32767 + 0.995 * 32767 = about -32932 unclamped
+  TEST_ASSERT_EQUAL_INT16(-32768, dc.process(-32768));
+  // The state holds the clamped value: 0 + 32768 + 0.995 * -32768 = about 164
+  // (an unclamped y1 of -32932 would give about 1).
+  TEST_ASSERT_INT16_WITHIN(1, 164, dc.process(0));
   DcBlocker up;
   up.process(-32768);
   TEST_ASSERT_EQUAL_INT16(32767, up.process(32767));
+}
+
+void test_dc_block_reset() {
+  DcBlocker dc;
+  for (int i = 0; i < 10; i++) dc.process(5000);
+  dc.reset();
+  TEST_ASSERT_EQUAL_INT16(0, dc.process(0));
+  dc.reset(1000);  // seeded with the stream's first sample: no step from its DC offset
+  TEST_ASSERT_EQUAL_INT16(0, dc.process(1000));
+  DcBlocker fresh;
+  TEST_ASSERT_EQUAL_INT16(1000, fresh.process(1000));  // unseeded, the offset steps through
 }
 
 void test_ring_wraps() {
@@ -401,6 +416,8 @@ void test_parse_bad_and_unknown() {
   TEST_ASSERT_TRUE(parse("{\"name\":\"idle\"}").type == Msg::Bad);
   TEST_ASSERT_TRUE(parse("{\"type\":\"state\"}").type == Msg::Bad);  // name missing
   TEST_ASSERT_TRUE(parse("{\"type\":\"look\"}").type == Msg::Unknown);
+  // A length that cuts the JSON short makes it bad.
+  TEST_ASSERT_TRUE(linkmsg::parseServerText("{\"type\":\"welcome\"}", 10).type == Msg::Bad);
   // Only the given length counts, even when the buffer carries on.
   TEST_ASSERT_TRUE(linkmsg::parseServerText("{\"type\":\"welcome\"}xx", 18).type == Msg::Welcome);
 }
@@ -483,6 +500,7 @@ void setup() {
   RUN_TEST(test_dc_block_removes_offset);
   RUN_TEST(test_dc_block_keeps_speech);
   RUN_TEST(test_dc_block_saturates);
+  RUN_TEST(test_dc_block_reset);
   RUN_TEST(test_ring_wraps);
   RUN_TEST(test_ring_partial_write_when_full);
   RUN_TEST(test_ring_clear_and_counts);

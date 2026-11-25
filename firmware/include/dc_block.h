@@ -19,6 +19,13 @@ struct DcBlocker {
     return static_cast<int16_t>(lrintf(y));
   }
 
+  // Start afresh. Seeding x1 with the first sample of the new stream means a mic's large
+  // DC offset doesn't come out as a step (a thump) at the start.
+  void reset(int16_t first = 0) {
+    x1 = first;
+    y1 = 0;
+  }
+
   void processBlock(int16_t* buf, size_t n) {
     for (size_t i = 0; i < n; i++) buf[i] = process(buf[i]);
   }

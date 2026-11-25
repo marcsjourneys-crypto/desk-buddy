@@ -13,7 +13,7 @@
 
 namespace {
 
-constexpr char kFwVersion[] = "0.1.0-m5";
+constexpr char kFwVersion[] = "0.2.0-m6";
 
 char line[301];  // room for "token " plus a 256-char token
 size_t lineLen = 0;
@@ -60,7 +60,8 @@ void printHelp() {
   Serial.println("  rec / play                record 3 s, play it back");
   Serial.println("  servo                     eased pan/tilt sweep");
   Serial.println("Robot link setup (saved on the robot):");
-  Serial.println("  wifi <name> <password>    Wi-Fi network (the name can't contain spaces)");
+  Serial.println("  wifi <name> <password>    Wi-Fi network; the name can't contain spaces, the");
+  Serial.println("                            password is 8-63 chars (no tabs) or - for open");
   Serial.println("  server <host>:<port>      the PC running Buddy, e.g. 192.168.1.20:8765");
   Serial.println("  token <value>             ROBOT_TOKEN from server/.env (16-256 chars)");
   Serial.println("  config                    show the settings (secrets masked)");
@@ -105,21 +106,33 @@ void printConfig() {
   }
 }
 
-// Settings commands take the whole rest of the line. Returns false if `name` isn't one.
-bool handleSettings(const char* name, char* rest) {
+// `wifi <name> <password>`: the password is everything after the single space that follows
+// the name, untrimmed, so it may contain spaces. "-" means an open network.
+const char* wifiCommand(char* raw) {
+  char* ssid = raw;
+  if (ssid == nullptr) return settings::kWifiUsage;
+  while (*ssid == ' ') ssid++;
+  char* space = strchr(ssid, ' ');
+  if (!*ssid || space == nullptr || space[1] == '\0') return settings::kWifiUsage;
+  *space = '\0';
+  const char* pass = space + 1;
+  if (!strcmp(pass, "-")) pass = "";
+  return settings::setWifi(ssid, pass);
+}
+
+// Settings commands get the raw rest of the line. Returns false if `name` isn't one.
+bool handleSettings(const char* name, char* raw) {
   if (!strcmp(name, "wifi")) {
-    char* ssid = rest ? strtok(rest, " ") : nullptr;
-    char* pass = ssid ? trimmed(strtok(nullptr, "")) : nullptr;
-    printSaved(settings::setWifi(ssid, pass));
+    printSaved(wifiCommand(raw));
   } else if (!strcmp(name, "server")) {
-    printSaved(settings::setServer(rest));
+    printSaved(settings::setServer(trimmed(raw)));
   } else if (!strcmp(name, "token")) {
-    printSaved(settings::setToken(rest));
+    printSaved(settings::setToken(trimmed(raw)));
   } else if (!strcmp(name, "config")) {
     printConfig();
   } else if (!strcmp(name, "forget")) {
-    settings::forget();
-    Serial.println("Forgot the Wi-Fi, server and token.");
+    const char* error = settings::forget();
+    Serial.println(error ? error : "Forgot the Wi-Fi, server and token.");
   } else {
     return false;
   }
@@ -213,8 +226,9 @@ void runPlay() {
 void handle(char* cmd) {
   char* name = strtok(cmd, " ");
   if (name == nullptr) return;
-  char* rest = trimmed(strtok(nullptr, ""));  // everything after the name
-  if (handleSettings(name, rest)) return;
+  char* raw = strtok(nullptr, "");  // everything after the name, untouched
+  if (handleSettings(name, raw)) return;
+  char* rest = trimmed(raw);
   char* arg = rest ? strtok(rest, " ") : nullptr;
   if (!strcmp(name, "help")) {
     printHelp();
@@ -266,7 +280,12 @@ void handle(char* cmd) {
       Serial.println("Servo sweep stopped");
     }
   } else {
-    Serial.printf("Unknown command '%s'\n", name);
+    // A long "name" may be a pasted secret (a token without "token "): don't echo it.
+    if (strlen(name) > 12) {
+      Serial.println("Unknown command");
+    } else {
+      Serial.printf("Unknown command '%s'\n", name);
+    }
     printHelp();
   }
 }
