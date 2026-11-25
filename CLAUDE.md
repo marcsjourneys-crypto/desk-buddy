@@ -57,7 +57,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 - Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
 - STT: faster-whisper (CTranslate2), int8 on CPU. Start with `base.en`; model size, device (cpu/cuda) and compute type configurable in `.env`.
 - LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done. Provider is pluggable via `LLM_PROVIDER` (only `anthropic` today); OpenAI-compatible providers such as Kimi are planned after M3.
-- TTS: start with the built-in Windows SAPI voices (via comtypes), then Piper (local, runs on Windows) as the default voice. Cloud voice (e.g. ElevenLabs) optional later behind the same interface.
+- TTS: **Piper** (`piper-tts==1.8.0`, local, onnxruntime on CPU) is the default (`TTS_ENGINE=piper`). CARL's voice is `en_GB-northern_english_male-medium` (`TTS_VOICE`; a voice name or an `.onnx` path), downloaded once into `VOICES_DIR` (default `%LOCALAPPDATA%\desk-buddy\voices`); `TTS_SPEED` 0.5–2.0. Piper renders at 22050 Hz; `tts.resample` (a windowed-sinc low-pass at 7.4 kHz, numpy) brings it to the 16 kHz everything else uses. The built-in Windows SAPI voice (comtypes) is the fallback (`TTS_ENGINE=sapi`). Piper is GPL-3.0, fine for this personal project; revisit before distributing anything. Cloud voice (e.g. ElevenLabs) optional later behind the same `Synthesizer` interface.
 - Obsidian: write markdown files directly into the vault folder (path in `.env`). No plugin needed.
 
 ## Personality

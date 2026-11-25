@@ -71,7 +71,7 @@ class Settings:
     stt_model: str = "base.en"
     stt_device: str = "cpu"
     stt_compute_type: str = "int8"
-    tts_engine: str = "sapi"
+    tts_engine: str = "piper"  # "sapi" is the Windows fallback
     tts_voice: str = "en_GB-northern_english_male-medium"  # Piper name or .onnx path
     tts_speed: float = 1.0
     voices_dir: str = field(default_factory=default_voices_dir)

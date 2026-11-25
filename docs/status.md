@@ -2,6 +2,14 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — CARL's voice (Piper) done (voice check pending)
+
+- **Built:** Piper TTS (`piper-tts==1.8.0`) as the default engine, with CARL's voice `en_GB-northern_english_male-medium`, chosen by the user from an audition of 8 voices. New settings: `TTS_VOICE`, `TTS_SPEED`, `VOICES_DIR`. A missing voice downloads at startup (about 60 MB); `TTS_ENGINE=sapi` is the fallback. Piper's 22050 Hz output is resampled to 16 kHz in numpy (`tts.resample`).
+- **Speed (i7-1355U, measured outside the app):** 90–210 ms per typical sentence including resampling (about 20× real time); SAPI took 16–20 ms. So first audio should come roughly 0.1–0.2 s later than with SAPI.
+- **Tests:** 478 server tests pass (15 integration tests deselected, including 2 new real-Piper ones, which pass).
+- **Voice check by the user (pending):** start CARL and listen to the greeting in the new voice; ask a question and note the first-audio time in the log; try it through the robot too.
+- **Next:** the servo check, then M7 (PC computer control). Before M7, mark `read_notes` output as untrusted.
+
 ## 2026-11-25 — CARL-42 personality done (voice check pending)
 
 - **Built:**

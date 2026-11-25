@@ -21,7 +21,7 @@ def test_defaults_apply_when_only_api_key_is_set():
     assert s.stt_model == "base.en"
     assert s.stt_device == "cpu"
     assert s.stt_compute_type == "int8"
-    assert s.tts_engine == "sapi"
+    assert s.tts_engine == "piper"
     assert s.max_sentences == 2
     assert s.history_turns == 20
     assert s.ptt_key == "right_ctrl"
