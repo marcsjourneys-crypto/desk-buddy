@@ -135,6 +135,55 @@ def test_off_switch_refusals_are_logged(caplog):
     assert caplog.messages == ['Action: music_control {"action": "pause"} -> refused: off']
 
 
+class RecordingBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, type_, **fields):
+        self.events.append({"type": type_, **fields})
+
+
+def test_every_action_is_published_for_the_dashboard():
+    bus = RecordingBus()
+    guard = ActionGuard(True, clock=FakeClock(), bus=bus)
+    guard.run("play_music", {"query": "Queen", "kind": "artist"}, lambda: "Playing Queen.")
+
+    def boom():
+        raise ToolError("Spotify didn't open.")
+
+    with pytest.raises(ToolError):
+        guard.run("play_music", {"query": "x" * 5000, "kind": "track"}, boom)
+    act(guard)
+    with pytest.raises(ToolError):
+        act(guard)  # over the limit
+    outcomes = [(e["tool"], e["outcome"]) for e in bus.events]
+    assert outcomes == [
+        ("play_music", "ok"),
+        ("play_music", "failed"),
+        ("music_control", "ok"),
+        ("music_control", "refused"),
+    ]
+    assert bus.events[0] == {
+        "type": "action",
+        "tool": "play_music",
+        "args": '{"kind": "artist", "query": "Queen"}',
+        "result": "Playing Queen.",
+        "outcome": "ok",
+    }
+    assert bus.events[1]["result"] == "Spotify didn't open."
+    assert len(bus.events[1]["args"]) < 400
+    assert bus.events[3]["result"] == "That's enough actions for one go."
+
+
+def test_a_broken_bus_never_breaks_an_action():
+    class BrokenBus:
+        def publish(self, type_, **fields):
+            raise RuntimeError("no")
+
+    guard = ActionGuard(True, bus=BrokenBus())
+    assert act(guard) == "Paused."
+
+
 def test_the_limits_hold_across_threads():
     guard, _ = make()
     done = []

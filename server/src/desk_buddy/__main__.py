@@ -12,6 +12,7 @@ from collections.abc import Callable
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.config import ConfigError, Settings, load_settings
+from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
 from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator, State
@@ -82,7 +83,8 @@ async def _run(settings: Settings) -> None:
         stack.callback(mic.close)
         speaker = Speaker()
         stack.callback(speaker.close)
-        guard = ActionGuard(settings.computer_control)
+        bus = EventBus()  # live events for the dashboard; never blocks the voice loop
+        guard = ActionGuard(settings.computer_control, bus=bus)
         music, ducker = _music_tools(settings, guard)
         if ducker is not None:
             stack.callback(ducker.close)  # runs after the farewell, which restores the music
@@ -106,6 +108,7 @@ async def _run(settings: Settings) -> None:
             on_state=_with_ducking(switch.send_state, ducker),
             on_emotion=switch.send_emotion,
             on_question=guard.new_question,
+            bus=bus,
         )
         stack.push_async_callback(orchestrator.shutdown)
 
@@ -118,6 +121,7 @@ async def _run(settings: Settings) -> None:
                 current_state=lambda: orchestrator.state.value,
                 # Queued after the connect's "reset", so the greeting follows it.
                 on_connect=lambda: events.put_nowait("greet"),
+                bus=bus,
             )
             try:
                 server = await start_server(app, settings.server_host, settings.server_port)

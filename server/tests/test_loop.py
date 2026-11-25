@@ -877,6 +877,75 @@ def test_a_chat_without_a_tool_count_never_says_task_done():
     assert parts["speaker"].played == ["Hello there.", "How are you?"]
 
 
+# --- Events for the dashboard ---
+
+
+class RecordingBus:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, type_, **fields):
+        self.events.append({"type": type_, **fields})
+
+    def of(self, type_):
+        return [e for e in self.events if e["type"] == type_]
+
+
+def test_a_turn_publishes_state_heard_emotion_and_reply_with_timings():
+    bus = RecordingBus()
+    orch, _, _ = make(chat=FakeChat(deltas=("[happy] Hello there. ", "How are you?")), bus=bus)
+    asyncio.run(talk(orch))
+    assert [e["name"] for e in bus.of("state")] == ["listening", "thinking", "speaking", "idle"]
+    (heard,) = bus.of("heard")
+    assert heard["text"] == "hi buddy" and heard["stt_ms"] >= 0
+    assert [e["name"] for e in bus.of("emotion")] == ["happy"]
+    (reply,) = bus.of("reply")
+    assert reply["text"] == "Hello there. How are you?"
+    assert reply["emotion"] == "happy"
+    assert reply["first_token_ms"] >= 0 and reply["first_audio_ms"] >= reply["first_token_ms"]
+
+
+def test_a_canned_line_is_published_as_a_line():
+    bus = RecordingBus()
+    orch, _, _ = make(bus=bus)
+
+    async def scenario():
+        orch.say(GREETING)
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert bus.of("line") == [{"type": "line", "text": GREETING.text, "emotion": "happy"}]
+    assert bus.of("reply") == []
+
+
+def test_an_interrupt_is_published():
+    bus = RecordingBus()
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(speaker=speaker, bus=bus)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")
+
+    asyncio.run(scenario())
+    assert len(bus.of("interrupted")) == 1
+    (reply,) = bus.of("reply")  # what was said before the cut is still shown
+    assert reply["text"] == "Hello there."
+
+
+def test_a_broken_bus_never_breaks_a_turn():
+    class BrokenBus:
+        def publish(self, type_, **fields):
+            raise RuntimeError("dashboard down")
+
+    orch, parts, _ = make(bus=BrokenBus())
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Hello there.", "How are you?"]
+    assert len(orch.conversation) == 1
+
+
 # --- Tool calls are remembered ---
 
 USE = {"type": "tool_use", "id": "t1", "name": "play_music", "input": {"query": "Queen"}}

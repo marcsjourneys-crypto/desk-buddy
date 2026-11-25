@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from desk_buddy.audio import duration_seconds
 from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
@@ -25,6 +25,7 @@ from desk_buddy.brain.personality import (
     TASK_DONE,
     Line,
 )
+from desk_buddy.events import NULL_BUS
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
 from desk_buddy.tts import Synthesizer
@@ -68,6 +69,8 @@ class _Turn:
     thinking_since: float = 0.0  # perf_counter when transcription ended
     shown: str | None = None  # the emotion the reply wants on the eyes now
     pondering: bool = False  # PONDERING is playing: hold the reply's emotion back
+    first_token_ms: int | None = None  # from key release, for the dashboard
+    first_audio_ms: int | None = None
 
 
 class Orchestrator:
@@ -87,6 +90,7 @@ class Orchestrator:
         clock: Callable[[], float] = time.monotonic,
         random: Callable[[], float] = random_module.random,
         on_question: Callable[[], None] = lambda: None,
+        bus: Any = NULL_BUS,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -104,6 +108,7 @@ class Orchestrator:
         self._random = random
         self._greeted_at: float | None = None
         self._pondered_at: float | None = None
+        self._bus = bus  # live events for the dashboard (events.EventBus)
 
     # --- events ---
 
@@ -205,7 +210,15 @@ class Orchestrator:
         if state is not self.state:
             self.state = state
             log.debug("state -> %s", state)
+            self._publish("state", name=state.value)
             self._on_state(state)
+
+    def _publish(self, type_: str, **fields: Any) -> None:
+        """An event for the dashboard. Never raises into the loop."""
+        try:
+            self._bus.publish(type_, **fields)
+        except Exception:
+            log.debug("Dashboard event %s failed", type_, exc_info=True)
 
     def _ms(self) -> float:
         return (time.perf_counter() - self._t0) * 1000
@@ -214,6 +227,7 @@ class Orchestrator:
         turn, self._turn = self._turn, None
         if turn and not turn.done():
             log.info("Interrupted")
+            self._publish("interrupted")
             turn.cancel()
             self.speaker.stop()
             # wait() returns when the turn is done without re-raising its CancelledError,
@@ -235,6 +249,7 @@ class Orchestrator:
                 log.info("No speech detected")
                 return
             log.info("You: %s", text)
+            self._publish("heard", text=text, stt_ms=round(self._ms()))
             if is_forget_command(text):
                 self.conversation.forget()
                 log.info("Memory cleared")
@@ -264,6 +279,14 @@ class Orchestrator:
             # Also runs when the turn is cancelled by an interrupt.
             if turn:
                 self._remember(turn)
+                if turn.spoken:  # what CARL actually said, even if it was cut off
+                    self._publish(
+                        "reply",
+                        text=" ".join(turn.spoken),
+                        emotion=turn.emotion or DEFAULT_EMOTION,
+                        first_token_ms=turn.first_token_ms,
+                        first_audio_ms=turn.first_audio_ms,
+                    )
             if not asyncio.current_task().cancelling():
                 self._set_state(State.IDLE)
 
@@ -302,6 +325,7 @@ class Orchestrator:
                 async for delta in deltas:
                     if first_token:
                         log.info("First token %.0f ms", self._ms())
+                        turn.first_token_ms = round(self._ms())
                         first_token = False
                     text = parser.feed(delta)
                     self._note_emotion(turn, parser.emotion)
@@ -334,12 +358,14 @@ class Orchestrator:
             self._emit_emotion(emotion)
 
     def _emit_emotion(self, emotion: str) -> None:
+        self._publish("emotion", name=emotion)
         self._on_emotion(emotion)
 
     async def _say(self, line: Line, token: int) -> None:
         """Speak one canned line (no Claude, nothing remembered)."""
         self._emit_emotion(line.emotion)
         log.info("CARL [%s]: %s", line.emotion, line.text)
+        self._publish("line", text=line.text, emotion=line.emotion)
         queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
         await self._enqueue(line.text, queue)
         await queue.put(None)
@@ -372,6 +398,7 @@ class Orchestrator:
             first = await queue.get()
         if first is not None:
             log.info("First audio %.0f ms", self._ms())  # the reply's, not a canned line's
+            turn.first_audio_ms = round(self._ms())
             await self._play(first, token, turn.spoken)
             await self._consume(queue, token, turn.spoken)
 

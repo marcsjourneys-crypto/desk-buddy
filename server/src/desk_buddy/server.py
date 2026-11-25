@@ -11,10 +11,12 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, WebSocket
 
+from desk_buddy.events import NULL_BUS
 from desk_buddy.link import protocol
 from desk_buddy.link.protocol import ProtocolError
 from desk_buddy.link.robot import RobotLink
@@ -116,8 +118,10 @@ def create_app(
     hello_timeout: float = 5.0,
     clock: Callable[[], float] = time.monotonic,
     on_connect: Callable[[], None] = lambda: None,
+    bus: Any = NULL_BUS,
 ) -> FastAPI:
-    """on_connect runs on the event loop each time a robot is attached (CARL greets it)."""
+    """on_connect runs on the event loop each time a robot is attached (CARL greets it).
+    Connects and disconnects are published on `bus` for the dashboard."""
     app = FastAPI(title="Desk Buddy", docs_url=None, redoc_url=None, openapi_url=None)
     expected = token.encode()
     throttle = _AuthThrottle(clock)
@@ -181,6 +185,7 @@ def create_app(
                 log.info("New robot connection replaces the old one")
                 await old.close(CLOSE_REPLACED)
             log.info("Robot connected (firmware %r)", link.fw_version or "unknown")
+            bus.publish("robot", connected=True, fw_version=link.fw_version)
             await _receive_loop(ws, link, events, _ButtonLimiter(clock))
         finally:
             try:
@@ -190,6 +195,7 @@ def create_app(
                 sender.cancel()  # no-op if it finished; never leak it if we were cancelled
                 if switch.detach(link):
                     log.info("Robot disconnected")
+                    bus.publish("robot", connected=False, fw_version=link.fw_version)
                     events.put_nowait("reset")
 
     return app

@@ -110,6 +110,32 @@ def test_on_connect_runs_after_the_reset_is_queued():
     asyncio.run(run())
 
 
+def test_robot_connect_and_disconnect_are_published():
+    from desk_buddy.events import EventBus
+
+    bus = EventBus()
+
+    async def run():
+        switch = DeviceSwitch(NullMic(), NullPlayer())
+        events: asyncio.Queue[str] = asyncio.Queue()
+        app = create_app(
+            token=TOKEN, switch=switch, events=events, current_state=lambda: "idle", bus=bus
+        )
+        server = await start_server(app, "127.0.0.1", 0)
+        try:
+            robot = FakeRobot(f"ws://127.0.0.1:{server.port}/robot", TOKEN)
+            await robot.connect()
+            assert await next_event(events) == "reset"
+            await robot.close()
+            assert await next_event(events) == "reset"
+        finally:
+            await asyncio.wait_for(server.stop(), 5)
+
+    asyncio.run(run())
+    robot_events = [(e["connected"], e["fw_version"]) for e in bus.recent() if e["type"] == "robot"]
+    assert robot_events == [(True, "fake-robot"), (False, "fake-robot")]
+
+
 def test_bad_token_is_closed_4001_and_never_logged(caplog):
     caplog.set_level(logging.DEBUG)
 

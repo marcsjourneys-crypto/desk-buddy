@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from desk_buddy.tools.registry import ToolError
+from desk_buddy.tools.untrusted import shorten
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +26,15 @@ MAX_PER_MINUTE = 8
 WINDOW_SECONDS = 60.0
 LOG_PREVIEW = 120  # characters of a result in the log
 ARGS_PREVIEW = 200  # characters of the arguments in the log
+RESULT_PREVIEW = 500  # characters of a result on the dashboard
 
 OFF_MESSAGE = "Computer control is off. It can be turned on in the settings."
 LIMIT_MESSAGE = "That's enough actions for one go."
+
+
+def _bounded(text: str, limit: int) -> str:
+    """Cut to `limit` characters, keeping an untrusted block well formed."""
+    return shorten(text, limit)
 
 
 def _one_line(text: str, limit: int = LOG_PREVIEW) -> str:
@@ -45,8 +52,10 @@ class ActionGuard:
         per_question: int = MAX_PER_QUESTION,
         per_minute: int = MAX_PER_MINUTE,
         clock: Callable[[], float] = time.monotonic,
+        bus: Any = None,
     ) -> None:
         self.enabled = enabled
+        self._bus = bus  # events.EventBus: each action is shown on the dashboard
         self._per_question = per_question
         self._per_minute = per_minute
         self._clock = clock
@@ -64,9 +73,11 @@ class ActionGuard:
             shown = json.dumps(dict(args), ensure_ascii=False, sort_keys=True, default=str)
         except (TypeError, ValueError):  # e.g. keys that can't be sorted
             shown = repr(dict(args))
-        described = f"{name} {_one_line(shown, ARGS_PREVIEW)}"
+        shown = _one_line(shown, ARGS_PREVIEW)
+        described = f"{name} {shown}"
         if not self.enabled:
             log.info("Action: %s -> refused: off", described)
+            self._publish(name, shown, OFF_MESSAGE, "refused")
             raise ToolError(OFF_MESSAGE)
         with self._lock:
             now = self._clock()
@@ -74,16 +85,40 @@ class ActionGuard:
                 self._recent.popleft()
             if self._this_question >= self._per_question or len(self._recent) >= self._per_minute:
                 log.info("Action: %s -> refused: rate limit", described)
-                raise ToolError(LIMIT_MESSAGE)
-            self._this_question += 1
-            self._recent.append(now)
+                refused = True
+            else:
+                refused = False
+                self._this_question += 1
+                self._recent.append(now)
+        if refused:
+            self._publish(name, shown, LIMIT_MESSAGE, "refused")
+            raise ToolError(LIMIT_MESSAGE)
         try:
             result = fn()
         except ToolError as exc:
             log.info("Action: %s -> failed: %s", described, _one_line(str(exc)))
+            self._publish(name, shown, str(exc), "failed")
             raise
         except Exception as exc:
             log.warning("Action: %s -> crashed: %s", described, _one_line(repr(exc)))
+            self._publish(name, shown, "The tool failed unexpectedly.", "failed")
             raise
         log.info("Action: %s -> %s", described, _one_line(result))
+        self._publish(name, shown, result, "ok")
         return result
+
+    def _publish(self, tool: str, args: str, result: str, outcome: str) -> None:
+        """An action event for the dashboard (the result can hold untrusted text: the page
+        shows it as plain text). Never raises into the tool."""
+        if self._bus is None:
+            return
+        try:
+            self._bus.publish(
+                "action",
+                tool=tool,
+                args=args,
+                result=_bounded(str(result), RESULT_PREVIEW),
+                outcome=outcome,
+            )
+        except Exception:
+            log.debug("Dashboard action event failed", exc_info=True)

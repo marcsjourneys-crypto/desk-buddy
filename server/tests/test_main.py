@@ -370,6 +370,19 @@ def test_the_orchestrator_uses_the_device_switch(fakes, calls):
     assert isinstance(kwargs["speaker"], SwitchedPlayer)
 
 
+def test_one_event_bus_feeds_the_dashboard(monkeypatch, fakes, calls):
+    from desk_buddy.events import EventBus
+
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", robot_token=TOKEN)
+    )
+    entry.main()
+    bus = orchestrator_kwargs(calls)["bus"]
+    assert isinstance(bus, EventBus)
+    (app_kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "create_app"]
+    assert app_kwargs["bus"] is bus
+
+
 def orchestrator_kwargs(calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     return kwargs
