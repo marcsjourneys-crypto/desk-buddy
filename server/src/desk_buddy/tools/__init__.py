@@ -10,12 +10,19 @@ from desk_buddy.tools.notes import NoteVault, note_tools
 from desk_buddy.tools.registry import Tool, ToolRegistry
 
 if TYPE_CHECKING:
+    from desk_buddy.tools.launch import LaunchTools
     from desk_buddy.tools.spotify import MusicTools
 
 
-def build_tools(settings: Settings, *, music: MusicTools | None = None) -> ToolRegistry:
+def build_tools(
+    settings: Settings,
+    *,
+    music: MusicTools | None = None,
+    launch: LaunchTools | None = None,
+) -> ToolRegistry:
     """Every tool CARL has, given the settings. Note tools need a vault path; music tools
-    are passed in only when computer control is on and Spotify is logged in."""
+    are passed in only when computer control is on and Spotify is logged in; the app and
+    website tools only when computer control is on (each only if its list isn't empty)."""
     tools: list[Tool] = []
     if settings.obsidian_vault_path:
         vault = NoteVault(
@@ -26,4 +33,6 @@ def build_tools(settings: Settings, *, music: MusicTools | None = None) -> ToolR
         tools += note_tools(vault)
     if music is not None:
         tools += music.tools()
+    if launch is not None:
+        tools += launch.tools()
     return ToolRegistry(tools)

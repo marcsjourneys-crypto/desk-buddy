@@ -536,6 +536,9 @@ def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Pers
         notes=tools is not None and "take_note" in tools,
         music=tools is not None and "play_music" in tools,
         web=settings.web_search and not web_search_blocked(),
+        apps=tools is not None and "open_app" in tools,
+        websites=tools is not None and "open_website" in tools,
+        computer_control=settings.computer_control,
         character=personality.character,
         about=personality.about,
     )

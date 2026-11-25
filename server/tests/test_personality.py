@@ -94,6 +94,51 @@ def test_prompt_for_turns_the_web_rules_on_with_the_setting():
     assert "web_search" not in off and "can't look things up" in off
 
 
+def test_prompt_has_the_app_and_website_rules_only_when_offered():
+    both = system_prompt(2, apps=True, websites=True, computer_control=True)
+    for rule in ("open_app", "open_website", "only with a name from the tool's list"):
+        assert rule in both
+    assert "Never read out web addresses" in both
+    assert "three actions per question" in both
+    assert "No apps are set up" not in both and "No websites are set up" not in both
+    apps_only = system_prompt(2, apps=True, computer_control=True)
+    assert "open_app" in apps_only and "open_website" not in apps_only
+    assert "No websites are set up for you to open" in apps_only
+    sites_only = system_prompt(2, websites=True, computer_control=True)
+    assert "open_website" in sites_only and "open_app" not in sites_only
+    assert "No apps are set up for you to open" in sites_only
+
+
+def test_prompt_says_why_apps_and_websites_arent_offered():
+    none_chosen = system_prompt(2, computer_control=True)
+    assert "open_app" not in none_chosen and "open_website" not in none_chosen
+    assert "none have been chosen on the dashboard's Apps tab" in none_chosen
+    off = system_prompt(2)
+    assert "computer control isn't switched on" in off
+    assert "say that isn't switched on" in off
+
+
+def test_prompt_for_offers_apps_and_websites_from_the_tools():
+    from desk_buddy.apps_store import AppEntry, Bookmark
+    from desk_buddy.brain.personality import Personality
+    from desk_buddy.config import Settings
+    from desk_buddy.llm import prompt_for
+    from desk_buddy.tools import build_tools
+    from desk_buddy.tools.actions import ActionGuard
+    from desk_buddy.tools.launch import LaunchTools
+
+    settings = Settings(anthropic_api_key="k", computer_control=True)
+    launch = LaunchTools(
+        ActionGuard(True), [AppEntry("id", "Notepad", ("notepad",))], [Bookmark("a", "https://a.b")]
+    )
+    on = prompt_for(settings, build_tools(settings, launch=launch), Personality())
+    assert "open_app" in on and "open_website" in on
+    off = prompt_for(settings, build_tools(settings), Personality())
+    assert "none have been chosen" in off
+    off = prompt_for(Settings(anthropic_api_key="k"), None, Personality())
+    assert "computer control isn't switched on" in off
+
+
 def test_prompt_mentions_sentence_limit_and_spoken_style():
     prompt = system_prompt(max_sentences=3)
     assert "3 short sentences" in prompt

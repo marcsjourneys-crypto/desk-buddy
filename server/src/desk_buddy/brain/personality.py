@@ -4,7 +4,7 @@ The character paragraph, the signature lines and the About-you profile are edita
 the dashboard (personality_store); the rest of the prompt is locked here and always
 included: the
 spoken style, emotion tags, the interruption and action notes, the untrusted-data rule,
-and the notes, music and web search instructions.
+and the notes, music, web search and app/website instructions.
 """
 
 from __future__ import annotations
@@ -108,17 +108,56 @@ def system_prompt(
     notes: bool = False,
     music: bool = False,
     web: bool = False,
+    apps: bool = False,
+    websites: bool = False,
+    computer_control: bool = False,
     character: str = DEFAULT_CHARACTER,
     about: About | None = None,
 ) -> str:
     """The editable character, what the user said about themselves (if anything), then the
     locked rules. Joined, never formatted: nothing the user wrote is ever read as a
-    template."""
+    template. `apps`/`websites`: open_app/open_website are offered; `computer_control`
+    only changes why they aren't."""
     parts = [character.strip()]
     if about is not None and not about.is_blank():
         parts.append(_about_block(about))
     parts.append(_rules(max_sentences, today, notes, music, web))
+    parts.append(_opening_text(apps, websites, computer_control))
     return "\n\n".join(parts)
+
+
+def _opening_text(apps: bool, websites: bool, computer_control: bool) -> str:
+    """The rules for open_app and open_website, or why CARL can't open things."""
+    if not (apps or websites):
+        if not computer_control:
+            return (
+                "You can't open apps or websites: computer control isn't switched on. If "
+                "asked, say that isn't switched on; it can be turned on in the dashboard's "
+                "settings."
+            )
+        return (
+            "You can't open apps or websites yet: none have been chosen on the dashboard's "
+            "Apps tab. If asked, say so."
+        )
+    can = []
+    if apps:
+        can.append("open_app opens one of the apps the user chose")
+    if websites:
+        can.append("open_website opens one of their bookmarked websites in the browser")
+    text = (
+        "You can open things on the user's computer: "
+        + ", and ".join(can)
+        + ". Use them only when the user asks you to open something, and only with a name "
+        "from the tool's list; if they ask for one that isn't on it, say it isn't one you "
+        "may open, and that it can be added on the dashboard's Apps tab. Confirm in a few "
+        'words, like "Notepad\'s open." Never read out web addresses: name the site '
+        "plainly. Opening something counts towards your three actions per question."
+    )
+    if not apps:
+        text += " No apps are set up for you to open; if asked, say so."
+    if not websites:
+        text += " No websites are set up for you to open; if asked, say so."
+    return text
 
 
 def _about_block(about: About) -> str:

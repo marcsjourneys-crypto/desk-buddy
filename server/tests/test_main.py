@@ -527,6 +527,73 @@ def test_web_search_settings_rebuild_the_chat_at_the_next_question(
     assert len(chats) == 2 and chats[-1] is new
 
 
+def apps_run(monkeypatch, tmp_path, **settings):
+    """main() with a spy on the apps store and on every tool registry the chat gets."""
+    import json
+
+    (tmp_path / "desk-buddy").mkdir(exist_ok=True)
+    (tmp_path / "desk-buddy" / "bookmarks.json").write_text(
+        json.dumps([{"name": "weather", "url": "https://example.com/weather"}]), encoding="utf-8"
+    )
+    stores, registries = [], []
+
+    class SpyStore(entry.AppsStore):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            stores.append(self)
+
+    monkeypatch.setattr(entry, "AppsStore", SpyStore)
+    monkeypatch.setattr(entry, "load_settings", lambda: Settings(anthropic_api_key="k", **settings))
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None, **_: registries.append(tools) or object()
+    )
+    entry.main()
+    (store,) = stores
+    return store, registries
+
+
+def test_bookmarks_and_apps_become_tools_when_computer_control_is_on(
+    monkeypatch, fakes, calls, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO)
+    store, registries = apps_run(monkeypatch, tmp_path, computer_control=True)
+    assert store.apps_file == tmp_path / "desk-buddy" / "apps.json"  # never the real one
+    assert "open_website" in registries[0] and "open_app" not in registries[0]
+    assert "Apps and websites: on (0 apps, 1 websites)" in caplog.messages
+
+
+def test_apps_and_websites_are_off_without_computer_control(
+    monkeypatch, fakes, calls, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO)
+    store, registries = apps_run(monkeypatch, tmp_path)
+    assert "open_website" not in registries[0]
+    assert "Apps and websites: off (COMPUTER_CONTROL is off)" in caplog.messages
+    store.update_bookmarks([{"name": "news", "url": "https://news.example"}])
+    orchestrator_kwargs(calls)["on_question"]()
+    assert "open_website" not in registries[-1]
+
+
+def test_a_changed_list_rebuilds_the_tools_at_the_next_question_only(
+    monkeypatch, fakes, calls, tmp_path
+):
+    store, registries = apps_run(monkeypatch, tmp_path, computer_control=True)
+    on_question = orchestrator_kwargs(calls)["on_question"]
+    on_question()
+    assert len(registries) == 1  # nothing changed: no rebuild
+    assert store.update_bookmarks([{"name": "news", "url": "https://news.example"}]) == {}
+    assert len(registries) == 1  # not mid-question
+    on_question()
+    assert len(registries) == 2
+    schema = next(s for s in registries[-1].schemas() if s["name"] == "open_website")
+    assert schema["input_schema"]["properties"]["name"]["enum"] == ["news"]
+    on_question()
+    assert len(registries) == 2  # once per change
+    assert store.update_bookmarks([]) == {}
+    on_question()
+    assert "open_website" not in registries[-1]
+
+
 def orchestrator_kwargs(calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     return kwargs

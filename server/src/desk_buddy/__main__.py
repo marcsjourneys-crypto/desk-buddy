@@ -37,6 +37,7 @@ from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
 from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker
+from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
 
@@ -111,7 +112,14 @@ async def _run(settings: Settings) -> None:
         guard = ActionGuard(settings.computer_control, bus=bus)
         # Reads the Spotify login from disk: off the event loop.
         music = await asyncio.to_thread(_music_tools, settings, guard)
-        brain = Brain(settings, bus=bus, personality=personality.current, guard=guard, music=music)
+        brain = Brain(
+            settings,
+            bus=bus,
+            personality=personality.current,
+            guard=guard,
+            music=music,
+            apps=apps,
+        )
         stack.callback(brain.close)  # runs after the farewell, which restores the music
         conversation = Conversation(settings.history_turns)
         # A connected robot takes over the mic, speaker and button; else the PC's are used.
@@ -244,6 +252,8 @@ class Brain:
       replaced, so no handover can leave the music low.
     - Making them later (computer control turned on from the dashboard) reads the
       Spotify login on a worker thread; they join at the next question.
+    - The app and website tools are made from a snapshot of the Apps tab's lists at each
+      rebuild; a saved change to the lists rebuilds at the next question.
     """
 
     def __init__(
@@ -254,8 +264,11 @@ class Brain:
         personality: Callable[[], Personality] = Personality,
         guard: ActionGuard | None = None,
         music: tuple[MusicTools | None, MusicDucker | None] = (None, None),
+        apps: AppsStore | None = None,
     ) -> None:
         self.guard = guard or ActionGuard(settings.computer_control, bus=bus)
+        self._app_store = apps
+        self._apps_version: int | None = None  # the lists' version the tools were built from
         self._bus = bus  # each web search is shown on the dashboard
         self._personality = personality
         self._settings = settings
@@ -288,8 +301,12 @@ class Brain:
             self._rebuild()
 
     def before_question(self) -> None:
-        """Music tools made in the background since the last question join now."""
-        if self._rebuild_due:
+        """Music tools made in the background since the last question join now, and so
+        do changes to the apps and websites lists."""
+        lists_changed = (
+            self._app_store is not None and self._app_store.snapshot()[0] != self._apps_version
+        )
+        if self._rebuild_due or lists_changed:
             self._rebuild_due = False
             self._rebuild()
 
@@ -333,9 +350,26 @@ class Brain:
         self._switch_ducker()
         self._rebuild_due = True
 
+    def _launch_tools(self, settings: Settings) -> LaunchTools | None:
+        """open_app and open_website from the lists as they are now, only when computer
+        control is on and a list isn't empty. Otherwise CARL's prompt says why not."""
+        if self._app_store is None:
+            return None
+        version, apps, sites = self._app_store.snapshot()
+        self._apps_version = version
+        if not settings.computer_control:
+            reason = "COMPUTER_CONTROL is off"
+        elif not (apps or sites):
+            reason = "none chosen on the dashboard's Apps tab"
+        else:
+            log.info("Apps and websites: on (%d apps, %d websites)", len(apps), len(sites))
+            return LaunchTools(self.guard, apps, sites)
+        log.info("Apps and websites: off (%s)", reason)
+        return None
+
     def _rebuild(self) -> None:
         settings = self._settings
-        tools = build_tools(settings, music=self.music)
+        tools = build_tools(settings, music=self.music, launch=self._launch_tools(settings))
         chat = create_chat(settings, tools, personality=self._personality, bus=self._bus)
         log.info(
             "Note tools: %s",
