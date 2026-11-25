@@ -1,0 +1,13 @@
+{
+  "name": "microfrontend",
+  "version": "0.0.0+tflm.5d5a2e9",
+  "description": "TensorFlow Lite Micro's audio microfrontend (the C feature generator microWakeWord trains with), vendored. See README.md.",
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "includeDir": "src",
+    "srcFilter": ["+<*>", "-<third_party/>"],
+    "flags": ["-I src/third_party/kissfft"]
+  }
+}
