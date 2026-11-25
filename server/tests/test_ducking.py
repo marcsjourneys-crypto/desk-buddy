@@ -133,13 +133,118 @@ def test_a_volume_set_by_the_user_while_ducked_is_not_undone():
     ducker.close()
 
 
-def test_close_waits_for_a_pending_restore():
+def test_close_restores_even_without_an_idle_state():
+    # Shutdown mid-turn, or after a farewell that timed out: CARL never went idle.
     client = FakeSpotify(volume=40, delay=0.1)
     ducker = ducker_for(client)
-    ducker.on_state(State.LISTENING)
-    ducker.on_state(State.IDLE)
+    ducker.on_state(State.SPEAKING)
     ducker.close()
     assert client.volumes == [8, 40]
+    ducker.on_state(State.LISTENING)  # ignored once closed
+    ducker.close()  # twice is fine
+    assert client.volumes == [8, 40]
+
+
+def tools_for(client, ducker_control=None):
+    control = SpotifyControl(client, pc_name="pc")
+    ducker = MusicDucker(ducker_control or control)
+    return ToolRegistry(MusicTools(control, ActionGuard(True), ducker=ducker).tools()), ducker
+
+
+def test_a_failed_user_volume_change_keeps_the_restore():
+    client = FakeSpotify(volume=80)
+    tools, ducker = tools_for(client)
+    ducker.on_state(State.LISTENING)
+    settle(ducker)
+    good = client.volume
+
+    def broken(volume_percent, device_id=None):
+        raise SpotifyException(502, -1, "Bad gateway")
+
+    client.volume = broken
+    assert tools.run("music_volume", {"level": 30, "change": None}).is_error
+    client.volume = good
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volumes == [16, 80]  # the music still comes back
+    ducker.close()
+
+
+def test_a_duck_that_lands_but_times_out_is_still_restored():
+    import requests
+
+    client = FakeSpotify(volume=60)
+    good = client.volume
+
+    def lands_then_times_out(volume_percent, device_id=None):
+        good(volume_percent, device_id)
+        raise requests.exceptions.ReadTimeout("slow")
+
+    client.volume = lands_then_times_out
+    ducker = ducker_for(client)
+    ducker.on_state(State.LISTENING)
+    settle(ducker)
+    client.volume = good
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volumes == [12, 60]
+    ducker.close()
+
+
+def test_a_duck_spotify_refused_is_not_restored():
+    client = FakeSpotify(volume=60)
+    good = client.volume
+
+    def refused(volume_percent, device_id=None):
+        raise SpotifyException(403, -1, "VOLUME_CONTROL_DISALLOW", reason="UNKNOWN")
+
+    client.volume = refused
+    ducker = ducker_for(client)
+    ducker.on_state(State.LISTENING)
+    settle(ducker)
+    client.volume = good
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volumes == []  # nothing changed, so nothing to put back
+    ducker.close()
+
+
+def test_the_users_level_wins_over_a_duck_in_flight():
+    client = FakeSpotify(volume=80, delay=0.3)  # the duck is slow
+    tools, ducker = tools_for(client)
+    ducker.on_state(State.LISTENING)
+    time.sleep(0.1)  # the duck is now reading the playback state
+    assert not tools.run("music_volume", {"level": 50, "change": None}).is_error
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volumes == [16, 50]  # the user's 50 stays: no restore to 80
+    assert client.volume_percent == 50
+    ducker.close()
+
+
+def test_music_started_mid_turn_is_ducked_under_the_reply():
+    client = FakeSpotify(volume=70, is_playing=False)
+    control = SpotifyControl(client, pc_name="pc")
+    ducker = MusicDucker(control)
+    ducker.on_state(State.LISTENING)  # nothing playing yet: no duck
+    settle(ducker)
+    assert client.volumes == []
+    ducker.music_started()  # a tool just started the music (Spotify may lag on is_playing)
+    settle(ducker)
+    assert client.volumes == [14]
+    ducker.on_state(State.IDLE)
+    settle(ducker)
+    assert client.volumes == [14, 70]
+    ducker.close()
+
+
+def test_music_started_when_idle_does_nothing():
+    client = FakeSpotify(volume=70)
+    ducker = ducker_for(client)
+    ducker.music_started()
+    settle(ducker)
+    assert client.volumes == []
+    ducker.close()
 
 
 # --- through a real Orchestrator: every way a turn ends restores ---
@@ -199,32 +304,43 @@ def orchestrator(ducker, chat=None):
     )
 
 
-@pytest.mark.parametrize("ending", ["reply", "error", "reset", "interrupt"])
+@pytest.mark.parametrize("ending", ["reply", "error", "reset", "interrupt", "farewell", "shutdown"])
 def test_every_way_a_turn_ends_restores_the_music(ending):
     client = FakeSpotify(volume=70)
     ducker = ducker_for(client)
-    hold = asyncio.Event() if ending in ("reset", "interrupt") else None
+    hold = asyncio.Event() if ending not in ("reply", "error") else None
     chat = Chat(error=LLMError("boom") if ending == "error" else None, hold=hold)
     orch = orchestrator(ducker, chat)
 
     async def scenario():
         await orch.handle("down")
         await orch.handle("up")
+        if ending in ("reply", "error"):
+            await orch.wait_idle()
+            return
+        await asyncio.sleep(0.05)  # mid-turn: thinking, music ducked
         if ending == "reset":
-            await asyncio.sleep(0.05)
             await orch.handle("reset")
         elif ending == "interrupt":
-            await asyncio.sleep(0.05)
             await orch.handle("down")  # cut off: listening again, still ducked
             hold.set()
             await orch.handle("up")
-        await orch.wait_idle()
+            await orch.wait_idle()
+        elif ending == "farewell":
+            await orch.farewell(timeout=2)
+        else:  # Ctrl+C before the farewell: the turn is cancelled, CARL never goes idle
+            await orch.shutdown()
 
     asyncio.run(scenario())
-    assert orch.state is State.IDLE
-    settle(ducker)
-    assert client.volumes == [14, 70]
-    ducker.close()
+    if ending == "shutdown":
+        assert orch.state is not State.IDLE
+        ducker.close()  # what the exit stack does: it restores anyway
+    else:
+        assert orch.state is State.IDLE
+        settle(ducker)
+        ducker.close()
+    assert client.volumes[0] == 14
+    assert client.volumes[-1] == 70
 
 
 def test_a_failing_duck_never_breaks_the_turn():

@@ -79,10 +79,18 @@ def test_an_already_active_device_is_not_transferred():
     assert not [c for c in client.calls if c[0] == "transfer_playback"]
 
 
-def test_the_active_device_is_used_if_this_pc_has_none():
-    client = FakeSpotify([OTHER_PC, PHONE])
+def test_the_active_device_is_used_if_no_computer_runs_spotify():
+    client = FakeSpotify([PHONE])
     control, _, starts = make(client)
     assert control.ensure_device() == "phone"
+    assert starts == []
+
+
+def test_an_active_phone_never_steals_playback_from_an_open_pc_spotify():
+    client = FakeSpotify([PHONE, OTHER_PC])
+    control, _, starts = make(client)
+    assert control.ensure_device() == "other"
+    assert ("transfer_playback", "other", False) in client.calls
     assert starts == []
 
 

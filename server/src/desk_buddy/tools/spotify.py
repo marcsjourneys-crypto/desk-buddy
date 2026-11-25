@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import platform
+import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -173,15 +174,16 @@ class SpotifyControl:
             raise MusicError(NETWORK) from exc
 
     def ensure_device(self) -> str:
-        """The device to play on, made active: this PC's Spotify, else the active device,
-        else any computer running Spotify (its name can differ from the PC's), else start
-        Spotify here and wait up to START_WAIT_SECONDS for it. Devices without an id, or
-        restricted ones (they can't be controlled), are ignored."""
+        """The device to play on, made active: this PC's Spotify (by name), else any
+        computer running Spotify (its Spotify name can differ from the PC's), else the
+        active device (a phone, say), else start Spotify here and wait up to
+        START_WAIT_SECONDS for it. So an active phone never steals playback from the PC.
+        Devices without an id, or restricted ones (they can't be controlled), are ignored."""
         devices = self._devices()
         device = (
             self._this_pc(devices)
-            or next((d for d in devices if d.get("is_active")), None)
             or self._a_computer(devices)
+            or next((d for d in devices if d.get("is_active")), None)
         )
         if device is None:
             device = self._start_and_wait()
@@ -264,7 +266,7 @@ ACTIONS = ("pause", "resume", "next", "previous")
 MAX_QUERY = 200
 SEARCH_LIMIT = 5
 PLAYLIST_PAGE = 50
-PLAYLIST_PAGES = 4  # up to 200 of the user's own playlists
+PLAYLIST_PAGES = 4  # up to 200 of the user's playlists (made or followed)
 PLAYLIST_MATCH = 0.6  # difflib ratio for a fuzzy playlist-name match
 SOURCE = "spotify"
 
@@ -337,8 +339,8 @@ class MusicTools:
                 description=(
                     "Play music on Spotify. query is what to search for, in the user's words "
                     "(at most 200 characters). kind: track for a song, artist to play an "
-                    "artist, album for an album, playlist for a playlist (the user's own "
-                    "playlists are checked first)."
+                    "artist, album for an album, playlist for a playlist (the user's own and "
+                    "followed playlists are checked first)."
                 ),
                 input_schema={
                     "type": "object",
@@ -406,7 +408,12 @@ class MusicTools:
             self._control.call("start_playback", device_id=device, uris=[item["uri"]])
         else:
             self._control.call("start_playback", device_id=device, context_uri=item["uri"])
+        self._music_started()
         return "Started playing on Spotify: " + wrap(SOURCE, _describe(kind, item))
+
+    def _music_started(self) -> None:
+        if self._ducker is not None:
+            self._ducker.music_started()  # CARL is about to confirm: duck under the reply
 
     def _search(self, query: str, kind: str) -> dict[str, Any] | None:
         result = self._control.call("search", q=query, type=kind, limit=SEARCH_LIMIT) or {}
@@ -414,21 +421,26 @@ class MusicTools:
         return next((i for i in items if i and i.get("uri")), None)
 
     def _own_playlist(self, query: str) -> dict[str, Any] | None:
-        """The best match among the user's own playlists: an exact name, else a name that
-        contains the query (or is contained in it), else a close fuzzy match."""
-        wanted = query.casefold()
+        """The best match among the user's playlists (the ones they made and the ones they
+        follow, as Spotify's "your playlists" lists them): an exact name, else one that is
+        a whole-word part of the request or the other way round and most of it, else a
+        close fuzzy match. Filler like "my ... playlist" is ignored first, so a short name
+        such as "Mix" or "Love" doesn't capture "a jazz mix" or "love songs"."""
+        wanted = _playlist_words(query)
+        if not wanted:
+            return None
         best: tuple[tuple[bool, bool, float], dict[str, Any]] | None = None
         for page in range(PLAYLIST_PAGES):
             result = self._control.call(
                 "current_user_playlists", limit=PLAYLIST_PAGE, offset=page * PLAYLIST_PAGE
             )
             for item in (result or {}).get("items") or []:
-                name = str((item or {}).get("name") or "").casefold()
+                name = _playlist_words(str((item or {}).get("name") or ""))
                 if not name or not item.get("uri"):
                     continue
                 score = (
                     name == wanted,
-                    name in wanted or wanted in name,
+                    _mostly_contains(name, wanted) or _mostly_contains(wanted, name),
                     difflib.SequenceMatcher(None, wanted, name).ratio(),
                 )
                 if best is None or score > best[0]:
@@ -443,6 +455,7 @@ class MusicTools:
     def _do(self, action: str) -> str:
         if action == "resume":
             self._control.call("start_playback", device_id=self._control.ensure_device())
+            self._music_started()
         else:
             method = {"pause": "pause_playback", "next": "next_track"}.get(action, "previous_track")
             self._control.call(method)
@@ -453,14 +466,20 @@ class MusicTools:
         device = (playback or {}).get("device") or {}
         if not device.get("id"):
             raise MusicError(NO_DEVICE)
-        # While CARL talks the music is ducked: work from the level before ducking, and
-        # cancel the restore so the user's new level stays.
-        before_duck = self._ducker.take_saved() if self._ducker else None
-        if level is None:
-            current = before_duck if before_duck is not None else device.get("volume_percent")
-            level = max(0, min(100, int(current or 0) + int(change or 0)))
-        self._control.call("volume", level, device_id=device["id"])
-        return f"Spotify volume set to {level} percent."
+
+        def set_volume(before_duck: int | None) -> int:
+            # While CARL talks the music is ducked: work from the level before ducking.
+            new = level
+            if new is None:
+                current = before_duck if before_duck is not None else device.get("volume_percent")
+                new = max(0, min(100, int(current or 0) + int(change or 0)))
+            self._control.call("volume", new, device_id=device["id"])
+            return new
+
+        # Through the ducker: never interleaved with a duck, and the restore is dropped
+        # only once the user's level is set (it would undo it).
+        new_level = self._ducker.set_by_user(set_volume) if self._ducker else set_volume(None)
+        return f"Spotify volume set to {new_level} percent."
 
     def _now_playing(self) -> str:
         playback = self._control.call("current_playback")
@@ -473,6 +492,25 @@ class MusicTools:
             desc = _describe("track", item)
         state = "playing" if playback.get("is_playing") else "paused"
         return f"Spotify is {state}: " + wrap(SOURCE, desc)
+
+
+_PLAYLIST_FILLER = frozenset({"my", "the", "a", "an", "playlist", "playlists", "please"})
+MIN_CONTAINED = 3  # characters: a shorter name never counts as "contained"
+MIN_SHARE = 0.5  # a contained name must be at least half of the longer one
+
+
+def _playlist_words(text: str) -> str:
+    """Lowercase words, without punctuation and without filler like "my ... playlist"."""
+    words = re.sub(r"[^\w\s]", " ", text.casefold()).split()
+    return " ".join(w for w in words if w not in _PLAYLIST_FILLER)
+
+
+def _mostly_contains(longer: str, shorter: str) -> bool:
+    """`shorter` appears in `longer` as whole words, is at least MIN_CONTAINED characters,
+    and is at least MIN_SHARE of it."""
+    if len(shorter) < MIN_CONTAINED or len(shorter) < MIN_SHARE * len(longer):
+        return False
+    return re.search(rf"(?<!\w){re.escape(shorter)}(?!\w)", longer) is not None
 
 
 def _int_in(value: Any, low: int, high: int) -> bool:

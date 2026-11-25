@@ -147,6 +147,26 @@ def test_own_playlists_come_before_public_search(query, expected):
     assert expected in out.text
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("jazz mix for the evening", "spotify:playlist:public"),  # not my "Mix"
+        ("abba", "spotify:playlist:public"),  # not my "a"
+        ("love songs from the eighties", "spotify:playlist:public"),  # not my "Love"
+        ("my love playlist", "spotify:playlist:Love"),  # but asking for it by name works
+        ("Mix", "spotify:playlist:Mix"),
+    ],
+)
+def test_short_playlist_names_dont_capture_unrelated_requests(query, expected):
+    mine = [playlist("Mix"), playlist("a"), playlist("Love")]
+    client = FakeSpotify(
+        own_playlists=mine, search={"playlist": [playlist("x", uri="spotify:playlist:public")]}
+    )
+    tools, _ = make(client)
+    assert not tools.run("play_music", {"query": query, "kind": "playlist"}).is_error
+    assert names(client, "start_playback")[0]["context_uri"] == expected
+
+
 def test_own_playlists_are_read_across_pages():
     mine = [playlist(f"List {i}") for i in range(60)] + [playlist("Rainy Sunday")]
     client = FakeSpotify(own_playlists=mine)
@@ -211,6 +231,35 @@ def test_music_control_actions(action, call):
     out = tools.run("music_control", {"action": action})
     assert not out.is_error
     assert [c[0] for c in client.calls] == [call]
+
+
+class RecordingDucker:
+    def __init__(self):
+        self.started = 0
+
+    def music_started(self):
+        self.started += 1
+
+    def set_by_user(self, set_volume):
+        return set_volume(None)
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "ducked"),
+    [
+        ("play_music", {"query": "x", "kind": "track"}, 1),
+        ("music_control", {"action": "resume"}, 1),
+        ("music_control", {"action": "pause"}, 0),
+        ("music_control", {"action": "next"}, 0),
+    ],
+)
+def test_starting_the_music_mid_turn_asks_the_ducker_to_duck_it(tool, args, ducked):
+    client = FakeSpotify(search={"track": [track("x")]})
+    ducker = RecordingDucker()
+    music = MusicTools(SpotifyControl(client, pc_name="marc-laptop"), ActionGuard(True), ducker)
+    tools = ToolRegistry(music.tools())
+    assert not tools.run(tool, args).is_error
+    assert ducker.started == ducked
 
 
 def test_resume_plays_on_the_chosen_device():
