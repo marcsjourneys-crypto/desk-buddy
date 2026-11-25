@@ -3,8 +3,9 @@
     uv run python -m desk_buddy.fake_robot
 
 Run Buddy (`uv run python -m desk_buddy`, with ROBOT_TOKEN set) in one terminal and this in
-another. It uses the PC mic, speaker and push-to-talk key, but talks to Buddy over the robot
-link, exactly like the real robot will. Buddy ignores its own key while a robot is connected.
+another. It uses the PC mic and speaker, but talks to Buddy over the robot link, exactly like
+the real robot: it streams the mic while Buddy's state is `listening`. The talk key is read
+by Buddy itself, which drives whichever robot is connected.
 """
 
 from __future__ import annotations
@@ -23,11 +24,10 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from desk_buddy.audio import CHUNK_BYTES, AudioDeviceError, Microphone, Speaker
 from desk_buddy.config import ConfigError, Settings, load_settings
-from desk_buddy.ptt import KeyWatcher, parse_key
 
 log = logging.getLogger("desk_buddy.fake_robot")
 
-STREAM_SECONDS = 0.02  # send mic audio every 20 ms while the key is held
+STREAM_SECONDS = 0.02  # send mic audio every 20 ms while Buddy is listening
 
 # Close codes from the server (see server.py) and what to tell the user.
 _CLOSE_REASONS = {
@@ -182,40 +182,37 @@ class Playback:
 # --- The voice tool: wiring ---
 
 
-async def _stream_mic(robot: FakeRobot, mic: Microphone, done: asyncio.Event) -> None:
-    """Send the mic's audio every 20 ms until `done` is set. It always finishes the send
-    in progress, so no drained chunk is lost on release."""
-    while not done.is_set():
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(done.wait(), STREAM_SECONDS)
-        if pcm := mic.drain():
-            await robot.send_audio(pcm)
+class MicStreamer:
+    """Streams the mic to Buddy every 20 ms while Buddy's last state is `listening`, like
+    the real robot. on_state() is fed each state frame; run() is one long-lived task."""
 
+    def __init__(self, robot: Any, mic: Any) -> None:
+        self._robot, self._mic = robot, mic
+        self._listening = asyncio.Event()
 
-async def _handle_keys(keys: asyncio.Queue[str], robot: FakeRobot, mic: Microphone) -> None:
-    streaming: asyncio.Task[None] | None = None
-    done = asyncio.Event()
-    try:
+    def on_state(self, name: str | None) -> None:
+        if name == "listening":
+            self._listening.set()
+        else:
+            self._listening.clear()
+
+    async def run(self) -> None:
         while True:
-            event = await keys.get()
-            if event == "down" and streaming is None:
-                mic.start()
-                await robot.press()
-                done.clear()
-                streaming = asyncio.create_task(_stream_mic(robot, mic, done))
-            elif event == "up" and streaming is not None:
-                done.set()
-                task, streaming = streaming, None
-                await task  # finishes its last drain and send
-                await robot.send_audio(mic.stop())  # whatever the last drain missed
-                await robot.release()
-    finally:
-        if streaming is not None:
-            streaming.cancel()
+            await self._listening.wait()
+            self._mic.start()
+            try:
+                while True:
+                    await asyncio.sleep(STREAM_SECONDS)
+                    if not self._listening.is_set():
+                        break
+                    if pcm := self._mic.drain():
+                        await self._robot.send_audio(pcm)
+            finally:
+                self._mic.stop()
 
 
-def _watch_keys(task: asyncio.Task[None], robot: FakeRobot, failed: list[str]) -> None:
-    """Report a push-to-talk failure at once, and end the tool by closing the connection."""
+def _watch_stream(task: asyncio.Task[None], robot: FakeRobot, failed: list[str]) -> None:
+    """Report a mic streaming failure at once, and end the tool by closing the connection."""
     closing: set[asyncio.Task[None]] = set()  # keep a reference until it finishes
 
     def on_done(task: asyncio.Task[None]) -> None:
@@ -224,7 +221,7 @@ def _watch_keys(task: asyncio.Task[None], robot: FakeRobot, failed: list[str]) -
         exc = task.exception()
         if exc is None or isinstance(exc, ConnectionClosed):
             return  # a disconnect: the receive loop reports it
-        log.error("Push-to-talk failed: %s", exc, exc_info=exc)
+        log.error("Mic streaming failed: %s", exc, exc_info=exc)
         failed.append(str(exc))
         close = asyncio.ensure_future(robot.close())
         closing.add(close)
@@ -236,8 +233,6 @@ def _watch_keys(task: asyncio.Task[None], robot: FakeRobot, failed: list[str]) -
 async def run(settings: Settings) -> int:
     """Connect and act as the robot until Buddy closes the connection. Returns the exit code."""
     url = robot_url(settings)
-    loop = asyncio.get_running_loop()
-    keys: asyncio.Queue[str] = asyncio.Queue()
     async with contextlib.AsyncExitStack() as stack:
         mic = Microphone()
         stack.callback(mic.close)
@@ -253,22 +248,20 @@ async def run(settings: Settings) -> int:
             print("Is Buddy running, with the same ROBOT_TOKEN?", file=sys.stderr)
             return 1
         stack.push_async_callback(robot.close)
-        watcher = KeyWatcher(
-            parse_key(settings.ptt_key),
-            lambda event: loop.call_soon_threadsafe(keys.put_nowait, event),
-        )
-        watcher.start()
-        stack.callback(watcher.stop)
-        key_task = asyncio.create_task(_handle_keys(keys, robot, mic))
+        streamer = MicStreamer(robot, mic)
+        stream_task = asyncio.create_task(streamer.run())
         failed: list[str] = []
-        _watch_keys(key_task, robot, failed)
-        stack.push_async_callback(_cancel, key_task)
-        log.info("Connected to %s. Hold %s to talk, Ctrl+C to quit.", url, settings.ptt_key)
+        _watch_stream(stream_task, robot, failed)
+        stack.push_async_callback(_cancel, stream_task)
+        log.info("Connected to %s. Ctrl+C to quit.", url)
+        log.info("Hold %s in the Buddy window to talk", settings.ptt_key)
 
         while (frame := await robot.recv(timeout=None)) is not None:
             handle_frame(frame, playback)
+            if isinstance(frame, dict) and frame.get("type") == "state":
+                streamer.on_state(frame.get("name"))
         if failed:
-            log.error("Stopped: push-to-talk failed (%s)", failed[0])
+            log.error("Stopped: mic streaming failed (%s)", failed[0])
             return 1
         message, code = close_reason(robot.close_code)
         (log.info if code == 0 else log.error)(message)
@@ -277,7 +270,7 @@ async def run(settings: Settings) -> int:
 
 async def _cancel(task: asyncio.Task[Any]) -> None:
     task.cancel()
-    # Its failures were already reported by _watch_keys; don't raise them again on exit.
+    # Its failures were already reported by _watch_stream; don't raise them again on exit.
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await task
 

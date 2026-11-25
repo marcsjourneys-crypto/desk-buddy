@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 import sys
 from collections.abc import Callable
 
@@ -23,6 +24,7 @@ from desk_buddy.tts import SapiSynthesizer
 log = logging.getLogger("desk_buddy")
 
 RELEASE_DELAY = 0.25  # seconds the robot's mic stays open after the key is released
+WILDCARD_HOSTS = ("0.0.0.0", "::")  # listening on every interface: the robot needs the LAN IP
 
 
 class StartupError(Exception):
@@ -112,9 +114,18 @@ async def _run(settings: Settings) -> None:
             except ServerStartError as exc:
                 raise StartupError(str(exc)) from exc
             stack.push_async_callback(server.stop)
-            log.info(
-                "Robot link: on (ws://%s:%d/robot)", settings.server_host, settings.server_port
-            )
+            port = settings.server_port
+            ip = lan_ip() if settings.server_host in WILDCARD_HOSTS else None
+            if ip is not None:
+                log.info(
+                    "Robot link: on (ws://%s:%d/robot — set the robot with: server %s:%d)",
+                    ip,
+                    port,
+                    ip,
+                    port,
+                )
+            else:
+                log.info("Robot link: on (ws://%s:%d/robot)", settings.server_host, port)
         else:
             log.info("Robot link: off (no ROBOT_TOKEN)")
 
@@ -128,6 +139,17 @@ async def _run(settings: Settings) -> None:
         stack.callback(watcher.stop)
         log.info("Ready. Hold %s to talk, Ctrl+C to quit.", settings.ptt_key)
         await orchestrator.run(events)
+
+
+def lan_ip() -> str | None:
+    """This PC's address on the LAN: the interface a packet to the internet would leave by.
+    Connecting a UDP socket sends nothing; 192.0.2.1 is TEST-NET-1."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("192.0.2.1", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
 
 
 def key_handler(

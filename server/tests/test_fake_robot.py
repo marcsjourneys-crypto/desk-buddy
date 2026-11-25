@@ -2,6 +2,7 @@
 a real server on 127.0.0.1 with fake audio devices and a fake key."""
 
 import asyncio
+import contextlib
 import socket
 import threading
 import time
@@ -12,6 +13,7 @@ import desk_buddy.fake_robot as fake_robot
 from desk_buddy.config import Settings
 from desk_buddy.fake_robot import FakeRobot, Playback, close_reason, handle_frame, robot_url
 from desk_buddy.link.switch import DeviceSwitch
+from desk_buddy.loop import State
 from desk_buddy.server import CLOSE_BAD_TOKEN, CLOSE_REPLACED, create_app, start_server
 
 TOKEN = "t" * 20
@@ -155,55 +157,57 @@ def test_malformed_json_from_the_server_is_skipped(caplog):
     assert "Ignored a bad frame from Buddy" in caplog.text
 
 
-class SlowRobot:
-    """Records what the tool sends; each audio send takes a while (like a slow network)."""
+class AudioRobot:
+    """Records the audio the tool sends."""
 
     def __init__(self):
         self.sent = []
 
-    async def press(self):
-        self.sent.append("down")
-
-    async def release(self):
-        self.sent.append("up")
-
     async def send_audio(self, pcm):
-        await asyncio.sleep(0.05)
         self.sent.append(pcm)
 
 
 class CountingMic:
     def __init__(self):
-        self.drains = 0
+        self.drains, self.calls = 0, []
 
     def start(self):
-        pass
+        self.calls.append("start")
 
     def drain(self):
         self.drains += 1
         return b"d%d" % self.drains
 
     def stop(self):
+        self.calls.append("stop")
         return b"rest"
 
 
-def test_key_release_does_not_lose_a_chunk_being_sent():
-    robot, mic = SlowRobot(), CountingMic()
+def test_the_mic_streams_only_while_buddy_is_listening():
+    robot, mic = AudioRobot(), CountingMic()
 
     async def run():
-        keys: asyncio.Queue[str] = asyncio.Queue()
-        task = asyncio.create_task(fake_robot._handle_keys(keys, robot, mic))
-        keys.put_nowait("down")
-        await async_wait_until(lambda: mic.drains >= 1)  # a drain is being sent now
-        keys.put_nowait("up")
-        await async_wait_until(lambda: "up" in robot.sent)
+        streamer = fake_robot.MicStreamer(robot, mic)
+        task = asyncio.create_task(streamer.run())
+        streamer.on_state("idle")
+        await asyncio.sleep(0.1)
+        assert robot.sent == [] and mic.calls == []
+        streamer.on_state("listening")
+        await async_wait_until(lambda: len(robot.sent) >= 2)
+        streamer.on_state("thinking")
+        await async_wait_until(lambda: mic.calls == ["start", "stop"])
+        sent = len(robot.sent)
+        await asyncio.sleep(0.1)
+        assert len(robot.sent) == sent  # stopped streaming
+        streamer.on_state("listening")  # the next turn streams again
+        await async_wait_until(lambda: len(robot.sent) > sent)
         task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     asyncio.run(run())
-    assert robot.sent[0] == "down"
-    assert robot.sent[-2:] == [b"rest", "up"]
-    drained = [b"d%d" % n for n in range(1, mic.drains + 1)]
-    assert robot.sent[1:-2] == drained  # every drained chunk was sent, in order
+    assert robot.sent == [b"d%d" % n for n in range(1, len(robot.sent) + 1)]  # in order
+    assert mic.calls == ["start", "stop", "start", "stop"]  # cancelling stops the mic too
 
 
 class RecordingPlayback:
@@ -249,14 +253,16 @@ def test_main_cannot_connect_is_a_clear_error(monkeypatch, capsys):
     )
     monkeypatch.setattr(fake_robot, "Microphone", FakeMic)
     monkeypatch.setattr(fake_robot, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(fake_robot, "KeyWatcher", FakeWatcher)
     assert fake_robot.main() == 1
     assert "Can't connect" in capsys.readouterr().err
 
 
 class FakeMic:
+    last = None
+
     def __init__(self, *args, **kwargs):
         self.recording, self.closed = False, False
+        FakeMic.last = self
 
     def start(self):
         self.recording = True
@@ -272,25 +278,11 @@ class FakeMic:
         self.closed = True
 
 
-class FakeWatcher:
-    last = None
-
-    def __init__(self, vk, on_event):
-        self.on_event, self.stopped = on_event, False
-        FakeWatcher.last = self
-
-    def start(self):
-        pass
-
-    def stop(self):
-        self.stopped = True
-
-
-def test_a_run_against_a_real_server(monkeypatch):
-    """Connect, hold the key for a moment, then the server stops: exit code 0."""
+def test_a_run_against_a_real_server(monkeypatch, caplog):
+    """Connect, stream while Buddy is listening, then the server stops: exit code 0."""
+    caplog.set_level("INFO")
     monkeypatch.setattr(fake_robot, "Microphone", FakeMic)
     monkeypatch.setattr(fake_robot, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(fake_robot, "KeyWatcher", FakeWatcher)
 
     class Null:
         def start(self):
@@ -318,30 +310,30 @@ def test_a_run_against_a_real_server(monkeypatch):
             frames = []
             feed = link.mic.feed
             link.mic.feed = lambda data: (frames.append(data), feed(data))
-            FakeWatcher.last.on_event("down")
-            assert await asyncio.wait_for(events.get(), 10) == "down"
+            await asyncio.sleep(0.1)
+            assert frames == []  # idle: nothing streams
+            link.mic.begin()  # what the PC key does on the server
+            switch.send_state(State.LISTENING)
             await async_wait_until(lambda: frames)  # at least one streamed frame arrived
-            FakeWatcher.last.on_event("up")
-            assert await asyncio.wait_for(events.get(), 10) == "up"
-            pcm = switch.mic.stop()
-            assert pcm.endswith(b"\x02\x00" * 10)  # the final stop() is sent too
-            assert b"\x01\x00" * 160 in pcm  # streamed while held
+            switch.send_state(State.THINKING)
+            await async_wait_until(lambda: not FakeMic.last.recording)
+            link.mic.end()
+            assert b"\x01\x00" * 160 in switch.mic.stop()  # streamed while listening
         finally:
             await asyncio.wait_for(server.stop(), 10)
         return await asyncio.wait_for(tool, 5)
 
     assert asyncio.run(run()) == 0
-    assert FakeWatcher.last.stopped
+    assert "Hold right_ctrl in the Buddy window to talk" in caplog.text
 
 
-def test_a_push_to_talk_failure_ends_the_tool_with_a_clear_message(monkeypatch, caplog):
+def test_a_mic_failure_ends_the_tool_with_a_clear_message(monkeypatch, caplog):
     class BrokenMic(FakeMic):
         def start(self):
             raise OSError("mic unplugged")
 
     monkeypatch.setattr(fake_robot, "Microphone", BrokenMic)
     monkeypatch.setattr(fake_robot, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(fake_robot, "KeyWatcher", FakeWatcher)
 
     async def run():
         switch = DeviceSwitch(NullDevice(), NullDevice())
@@ -352,13 +344,13 @@ def test_a_push_to_talk_failure_ends_the_tool_with_a_clear_message(monkeypatch, 
         tool = asyncio.create_task(fake_robot.run(settings))
         try:
             assert await asyncio.wait_for(events.get(), 10) == "reset"
-            FakeWatcher.last.on_event("down")
+            switch.send_state(State.LISTENING)
             return await asyncio.wait_for(tool, 10)  # ends by itself, server still up
         finally:
             await asyncio.wait_for(server.stop(), 10)
 
     assert asyncio.run(run()) == 1
-    assert "Push-to-talk failed: mic unplugged" in caplog.text
+    assert "Mic streaming failed: mic unplugged" in caplog.text
 
 
 class NullDevice:

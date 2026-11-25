@@ -189,6 +189,69 @@ def test_robot_link_on_with_token(monkeypatch, fakes, calls, caplog):
     assert TOKEN not in caplog.text
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_a_wildcard_host_logs_the_lan_address(monkeypatch, fakes, calls, caplog, host):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        entry,
+        "load_settings",
+        lambda: Settings(anthropic_api_key="k", robot_token=TOKEN, server_host=host),
+    )
+    monkeypatch.setattr(entry, "lan_ip", lambda: "192.168.1.20")
+
+    assert entry.main() == 0
+
+    assert (
+        "Robot link: on (ws://192.168.1.20:8765/robot — set the robot with: "
+        "server 192.168.1.20:8765)" in caplog.text
+    )
+    assert TOKEN not in caplog.text
+
+
+def test_a_wildcard_host_without_a_lan_address_logs_the_host(monkeypatch, fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(
+        entry,
+        "load_settings",
+        lambda: Settings(anthropic_api_key="k", robot_token=TOKEN, server_host="0.0.0.0"),
+    )
+    monkeypatch.setattr(entry, "lan_ip", lambda: None)
+
+    assert entry.main() == 0
+
+    assert "Robot link: on (ws://0.0.0.0:8765/robot)" in caplog.text
+
+
+def test_lan_ip_reads_the_outgoing_interface(monkeypatch):
+    class FakeSocket:
+        def __init__(self, family, kind):
+            assert kind == entry.socket.SOCK_DGRAM
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def connect(self, address):
+            assert address == ("192.0.2.1", 80)
+
+        def getsockname(self):
+            return ("192.168.1.20", 50000)
+
+    monkeypatch.setattr(entry.socket, "socket", FakeSocket)
+    assert entry.lan_ip() == "192.168.1.20"
+
+
+def test_lan_ip_is_none_without_a_network(monkeypatch):
+    class NoNetwork:
+        def __init__(self, family, kind):
+            raise OSError("network unreachable")
+
+    monkeypatch.setattr(entry.socket, "socket", NoNetwork)
+    assert entry.lan_ip() is None
+
+
 def test_the_orchestrator_uses_the_device_switch(fakes, calls):
     entry.main()
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
