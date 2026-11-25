@@ -16,7 +16,9 @@ from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
 from desk_buddy.brain.memory import Conversation, is_forget_command
 from desk_buddy.brain.personality import (
     ERROR_LINE,
+    FAREWELL,
     FORGET_LINE,
+    GREETING,
     REFUSAL_LINE,
     Line,
 )
@@ -27,6 +29,7 @@ from desk_buddy.tts import Synthesizer
 log = logging.getLogger(__name__)
 
 MIN_CLIP_SECONDS = 0.3
+GREET_GAP = 60.0  # seconds: a "greet" this soon after the last greeting is skipped
 
 
 class State(StrEnum):
@@ -72,6 +75,7 @@ class Orchestrator:
         conversation: Conversation | None = None,
         on_state: Callable[[State], None] = lambda state: None,
         on_emotion: Callable[[str], None] = lambda emotion: None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -84,11 +88,13 @@ class Orchestrator:
         self._on_emotion = on_emotion
         self._turn: asyncio.Task[None] | None = None
         self._t0 = 0.0
+        self._clock = clock
+        self._greeted_at: float | None = None
 
     # --- events ---
 
     async def run(self, events: asyncio.Queue[str]) -> None:
-        """Handle events from the queue forever: "down", "up" and "reset"."""
+        """Handle events from the queue forever: "down", "up", "reset" and "greet"."""
         while True:
             event = await events.get()
             try:
@@ -98,7 +104,9 @@ class Orchestrator:
 
     async def handle(self, event: str) -> None:
         """Events: "down" and "up" are the talk button; "reset" (a robot attached or
-        detached) interrupts any turn, stops the mic if it was listening, and goes idle."""
+        detached) interrupts any turn, stops the mic if it was listening, and goes idle;
+        "greet" (startup, or a robot connected) says GREETING unless it was said in the
+        last GREET_GAP seconds."""
         if event == "down":
             await self._interrupt()
             self.mic.start()
@@ -121,6 +129,8 @@ class Orchestrator:
                     self.mic.stop()
             finally:
                 self._set_state(State.IDLE)
+        elif event == "greet":
+            self._greet()
 
     async def wait_idle(self) -> None:
         if self._turn:
@@ -128,6 +138,45 @@ class Orchestrator:
 
     async def shutdown(self) -> None:
         await self._interrupt()
+
+    def say(self, line: Line) -> bool:
+        """Start speaking a canned line through the active device, with its emotion. It
+        runs as a turn, so a key press interrupts it, and it is never remembered. Only
+        when idle: returns False (and says nothing) otherwise. Doesn't wait for the end."""
+        if self.state is not State.IDLE or (self._turn and not self._turn.done()):
+            log.debug("Skipped %r: busy", line.text)
+            return False
+        self._t0 = time.perf_counter()
+        self._turn = asyncio.create_task(self._say_turn(line))
+        return True
+
+    async def farewell(self, timeout: float) -> None:
+        """Drop whatever is happening and say FAREWELL, waiting at most `timeout` seconds
+        (then it is cut off). Never raises: shutdown must go on."""
+        try:
+            await self.handle("reset")
+            if self.say(FAREWELL) and self._turn is not None:
+                await asyncio.wait([self._turn], timeout=timeout)
+            await self._interrupt()  # cut it off if it timed out
+        except Exception:
+            log.warning("Couldn't say farewell", exc_info=True)
+
+    def _greet(self) -> None:
+        now = self._clock()
+        if self._greeted_at is not None and now - self._greeted_at < GREET_GAP:
+            log.debug("Skipped greeting: greeted %.0f s ago", now - self._greeted_at)
+            return
+        if self.say(GREETING):
+            self._greeted_at = now
+
+    async def _say_turn(self, line: Line) -> None:
+        try:
+            await self._say(line, self.speaker.current_token())
+        except Exception:
+            log.exception("Couldn't say %r", line.text)
+        finally:
+            if not asyncio.current_task().cancelling():
+                self._set_state(State.IDLE)
 
     # --- internals ---
 

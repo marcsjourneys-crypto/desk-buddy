@@ -1,12 +1,19 @@
 import asyncio
 import logging
 import threading
+import time
 
 import pytest
 
 from desk_buddy.audio import BYTES_PER_SECOND
 from desk_buddy.brain.memory import INTERRUPTED_NOTE, Conversation
-from desk_buddy.brain.personality import ERROR_LINE, FORGET_LINE, REFUSAL_LINE
+from desk_buddy.brain.personality import (
+    ERROR_LINE,
+    FAREWELL,
+    FORGET_LINE,
+    GREETING,
+    REFUSAL_LINE,
+)
 from desk_buddy.llm import LLMError, LLMRefusal
 from desk_buddy.loop import Orchestrator, State
 
@@ -465,3 +472,140 @@ def test_a_fresh_turn_after_reset_works_with_a_new_token():
     assert speaker.tokens == [1, 1]
     assert orch.state is State.IDLE
     assert states[-4:] == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]
+
+
+# --- Signature lines: greeting and farewell ---
+
+
+class FakeClock:
+    def __init__(self, now: float = 0.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_say_speaks_a_canned_line_with_its_emotion_and_does_not_remember_it():
+    orch, parts, states = make()
+
+    async def scenario():
+        assert orch.say(GREETING)
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["speaker"].played == [GREETING.text]
+    assert parts["emotions"] == [GREETING.emotion]
+    assert states == [State.SPEAKING, State.IDLE]
+    assert len(orch.conversation) == 0
+
+
+def test_say_is_skipped_unless_idle():
+    orch, parts, _ = make()
+
+    async def scenario():
+        await orch.handle("down")
+        assert not orch.say(GREETING)
+
+    asyncio.run(scenario())
+    assert parts["speaker"].played == []
+
+
+def test_a_key_press_interrupts_a_canned_line():
+    speaker = FakeSpeaker(block=True)
+    orch, _, states = make(speaker=speaker)
+
+    async def scenario():
+        orch.say(GREETING)
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")
+
+    asyncio.run(scenario())
+    assert speaker.stops == 1
+    assert orch.state is State.LISTENING
+
+
+def test_greet_event_greets_at_start_then_dedupes_within_a_minute():
+    clock = FakeClock(0.0)
+    orch, parts, _ = make(clock=clock)
+
+    async def greet_at(t):
+        clock.now = t
+        await orch.handle("greet")
+        await orch.wait_idle()
+
+    async def scenario():
+        await greet_at(0.0)  # startup
+        await greet_at(10.0)  # a robot connects right after: no double greeting
+        assert parts["speaker"].played == [GREETING.text]
+        await greet_at(70.0)  # a robot connects later: greeted
+        assert parts["speaker"].played == [GREETING.text, GREETING.text]
+
+    asyncio.run(scenario())
+
+
+def test_a_skipped_greeting_does_not_count():
+    clock = FakeClock(0.0)
+    orch, parts, _ = make(clock=clock)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("greet")  # busy listening: skipped
+        await orch.handle("reset")
+        clock.now = 5.0
+        await orch.handle("greet")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["speaker"].played == [GREETING.text]
+
+
+def test_farewell_interrupts_a_turn_and_says_goodbye():
+    speaker = FakeSpeaker(block=True)
+    orch, _, states = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        speaker.block = False
+        await orch.farewell(timeout=2)
+
+    asyncio.run(scenario())
+    assert speaker.played[-1] == FAREWELL.text
+    assert orch.state is State.IDLE
+
+
+def test_farewell_while_listening_stops_the_mic_first():
+    orch, parts, _ = make()
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.farewell(timeout=2)
+
+    asyncio.run(scenario())
+    assert parts["mic"].stops == 1
+    assert parts["speaker"].played == [FAREWELL.text]
+
+
+def test_farewell_is_bounded_and_stops_the_speaker_on_timeout():
+    speaker = FakeSpeaker(block=True)  # plays until stopped
+    orch, _, _ = make(speaker=speaker)
+
+    async def scenario():
+        started = time.monotonic()
+        await orch.farewell(timeout=0.1)
+        return time.monotonic() - started
+
+    assert asyncio.run(scenario()) < 1
+    assert speaker.played == [FAREWELL.text]
+    assert speaker.stops == 1  # cut off, not left playing into shutdown
+
+
+def test_farewell_never_raises_if_speaking_fails():
+    class BrokenSynth:
+        def synthesize(self, text):
+            raise OSError("no voice")
+
+    orch, _, _ = make(synthesizer=BrokenSynth())
+    asyncio.run(orch.farewell(timeout=1))
+    assert orch.state is State.IDLE

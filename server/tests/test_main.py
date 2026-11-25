@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 import pytest
 
@@ -51,7 +52,12 @@ def fakes(monkeypatch, calls):
             calls.append(("orchestrator kwargs", kwargs))
 
         async def run(self, events):
+            calls.append(("events at run", list(events._queue), events))
             raise KeyboardInterrupt  # what Ctrl+C looks like inside the loop
+
+        async def farewell(self, timeout):
+            calls.append(("farewell timeout", timeout))
+            calls.append("farewell")
 
         async def shutdown(self):
             calls.append("orchestrator shutdown")
@@ -148,7 +154,44 @@ def test_ctrl_c_shuts_down_in_reverse_creation_order(fakes, calls):
         "mic created",
         "speaker created",
         "watcher started",
+        "farewell",
         "watcher stopped",
+        "orchestrator shutdown",
+        "speaker closed",
+        "mic closed",
+        "synthesizer closed",
+    ]
+
+
+def test_ready_queues_the_startup_greeting(fakes, calls):
+    entry.main()
+    ((_, queued, _),) = [c for c in calls if isinstance(c, tuple) and c[0] == "events at run"]
+    assert queued == ["greet"]
+
+
+def test_farewell_is_bounded_to_four_seconds_and_replaces_bye(fakes, calls, caplog):
+    caplog.set_level(logging.INFO)
+    entry.main()
+    assert ("farewell timeout", 4.0) in calls
+    assert "Bye" not in caplog.messages
+
+
+@pytest.mark.parametrize("failure", ["hang", "raise"])
+def test_a_failed_farewell_does_not_block_shutdown(monkeypatch, fakes, calls, failure):
+    monkeypatch.setattr(entry, "FAREWELL_TIMEOUT", 0.05)
+    orchestrator_class = entry.Orchestrator
+
+    class BadFarewell(orchestrator_class):
+        async def farewell(self, timeout):
+            if failure == "hang":
+                await asyncio.sleep(60)  # ignores its own timeout
+            raise RuntimeError("no voice")
+
+    monkeypatch.setattr(entry, "Orchestrator", BadFarewell)
+    started = time.monotonic()
+    assert entry.main() == 0
+    assert time.monotonic() - started < 5
+    assert steps(calls)[-4:] == [
         "orchestrator shutdown",
         "speaker closed",
         "mic closed",
@@ -180,11 +223,16 @@ def test_robot_link_on_with_token(monkeypatch, fakes, calls, caplog):
     assert names.index("orchestrator kwargs") < names.index("start_server")
     assert names.index("start_server") < names.index("watcher started")
     shutdown = steps(calls)
-    assert shutdown[shutdown.index("watcher stopped") :][:3] == [
+    assert shutdown[shutdown.index("farewell") :][:4] == [
+        "farewell",  # before the server and the devices close
         "watcher stopped",
         "server stopped",
         "orchestrator shutdown",
     ]
+    # A robot connecting asks for a greeting, after its reset.
+    ((_, _, events),) = [c for c in calls if isinstance(c, tuple) and c[0] == "events at run"]
+    app_kwargs["on_connect"]()
+    assert list(events._queue)[-1] == "greet"
     assert "Robot link: on (ws://127.0.0.1:8765/robot)" in caplog.text
     assert TOKEN not in caplog.text
 

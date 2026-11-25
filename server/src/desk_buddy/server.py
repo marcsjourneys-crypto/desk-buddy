@@ -115,7 +115,9 @@ def create_app(
     current_state: Callable[[], str],
     hello_timeout: float = 5.0,
     clock: Callable[[], float] = time.monotonic,
+    on_connect: Callable[[], None] = lambda: None,
 ) -> FastAPI:
+    """on_connect runs on the event loop each time a robot is attached (CARL greets it)."""
     app = FastAPI(title="Desk Buddy", docs_url=None, redoc_url=None, openapi_url=None)
     expected = token.encode()
     throttle = _AuthThrottle(clock)
@@ -170,6 +172,10 @@ def create_app(
         sender = asyncio.create_task(link.run_sender())
         old = switch.attach(link)
         events.put_nowait("reset")
+        try:
+            on_connect()  # after the reset, so whatever it queues comes after it
+        except Exception:
+            log.exception("Robot connect hook failed")
         try:
             if old is not None:
                 log.info("New robot connection replaces the old one")

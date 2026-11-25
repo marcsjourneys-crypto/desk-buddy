@@ -83,6 +83,33 @@ def test_good_hello_gets_welcome_and_state():
     asyncio.run(run())
 
 
+def test_on_connect_runs_after_the_reset_is_queued():
+    async def run():
+        switch = DeviceSwitch(NullMic(), NullPlayer())
+        events: asyncio.Queue[str] = asyncio.Queue()
+        app = create_app(
+            token=TOKEN,
+            switch=switch,
+            events=events,
+            current_state=lambda: "idle",
+            on_connect=lambda: events.put_nowait("greet"),
+        )
+        server = await start_server(app, "127.0.0.1", 0)
+        try:
+            robot = FakeRobot(f"ws://127.0.0.1:{server.port}/robot", TOKEN)
+            await robot.connect()
+            assert await next_event(events) == "reset"
+            assert await next_event(events) == "greet"
+            await robot.close()
+            assert await next_event(events) == "reset"  # a disconnect doesn't greet
+            await asyncio.sleep(0.1)
+            assert events.empty()
+        finally:
+            await asyncio.wait_for(server.stop(), 5)
+
+    asyncio.run(run())
+
+
 def test_bad_token_is_closed_4001_and_never_logged(caplog):
     caplog.set_level(logging.DEBUG)
 

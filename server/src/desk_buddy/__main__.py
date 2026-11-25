@@ -23,6 +23,7 @@ from desk_buddy.tts import SapiSynthesizer
 
 log = logging.getLogger("desk_buddy")
 
+FAREWELL_TIMEOUT = 4.0  # seconds the farewell may delay shutdown
 RELEASE_DELAY = 0.25  # seconds the robot's mic stays open after the key is released
 WILDCARD_HOSTS = ("", "0.0.0.0", "::")  # listening on every interface: the robot needs the LAN IP
 
@@ -46,8 +47,7 @@ def main() -> int:
         print(f"Can't start: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        pass
-    log.info("Bye")
+        pass  # CARL already said its farewell
     return 0
 
 
@@ -108,6 +108,8 @@ async def _run(settings: Settings) -> None:
                 switch=switch,
                 events=events,
                 current_state=lambda: orchestrator.state.value,
+                # Queued after the connect's "reset", so the greeting follows it.
+                on_connect=lambda: events.put_nowait("greet"),
             )
             try:
                 server = await start_server(app, settings.server_host, settings.server_port)
@@ -137,8 +139,22 @@ async def _run(settings: Settings) -> None:
         )
         watcher.start()
         stack.callback(watcher.stop)
+        # Last in, so first out: the farewell plays before the server and devices close.
+        stack.push_async_callback(_say_farewell, orchestrator)
         log.info("Ready. Hold %s to talk, Ctrl+C to quit.", settings.ptt_key)
+        events.put_nowait("greet")
         await orchestrator.run(events)
+
+
+async def _say_farewell(orchestrator: Orchestrator) -> None:
+    """Bounded twice: farewell() cuts itself off after FAREWELL_TIMEOUT, and this gives up
+    a second later in any case. Any failure is logged; shutdown carries on."""
+    try:
+        await asyncio.wait_for(
+            orchestrator.farewell(timeout=FAREWELL_TIMEOUT), FAREWELL_TIMEOUT + 1
+        )
+    except Exception:
+        log.warning("Couldn't say farewell", exc_info=True)
 
 
 def lan_ip() -> str | None:
