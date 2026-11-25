@@ -12,13 +12,19 @@ from typing import Any
 
 from fastapi import WebSocketDisconnect
 
-from desk_buddy.audio import BYTES_PER_SECOND, CHUNK_BYTES, PcmBuffer
+from desk_buddy.audio import BYTES_PER_SECOND, PcmBuffer
 from desk_buddy.link import protocol
 
 log = logging.getLogger(__name__)
 
 MAX_RECORD_SECONDS = 30.0
 MAX_SLEEP = 0.02  # so stop() takes effect within one chunk
+# Speech goes to the robot in 100 ms frames (3200 bytes), not 20 ms ones. The ESP32's TCP
+# stack queues at most 6 received segments per socket (CONFIG_LWIP_TCP_RECVMBOX_SIZE) and
+# retries a full queue on a 250 ms timer, so 640-byte frames (one small segment each)
+# capped it at ~31 frames/s, below real time. Full-size segments hit the receive window
+# first instead. Measured on the first robot voice check, 2026-11-24.
+ROBOT_CHUNK_BYTES = BYTES_PER_SECOND // 10
 CLOSE_TIMEOUT = 2.0  # seconds close() waits for the socket to close
 MAX_OUTBOX = 128  # about 2.5 s of 20 ms audio chunks; more means the robot isn't reading
 
@@ -74,8 +80,10 @@ class RobotPlayer:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         lead: float = 0.2,
+        chunk_bytes: int = ROBOT_CHUNK_BYTES,
     ) -> None:
         self._send = send
+        self._chunk = chunk_bytes
         self._clock = clock
         self._sleep = sleep
         self._lead = lead
@@ -97,8 +105,8 @@ class RobotPlayer:
             self._send(protocol.audio_start())
         start = self._clock()
         sent = 0.0
-        for i in range(0, len(pcm), CHUNK_BYTES):
-            chunk = pcm[i : i + CHUNK_BYTES]
+        for i in range(0, len(pcm), self._chunk):
+            chunk = pcm[i : i + self._chunk]
             with self._lock:
                 if not self._live(token):
                     return

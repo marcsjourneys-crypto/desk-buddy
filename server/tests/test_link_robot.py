@@ -5,7 +5,7 @@ import threading
 from fastapi import WebSocketDisconnect
 
 from desk_buddy.audio import BYTES_PER_SECOND, CHUNK_BYTES
-from desk_buddy.link.robot import RobotLink, RobotMic, RobotPlayer
+from desk_buddy.link.robot import ROBOT_CHUNK_BYTES, RobotLink, RobotMic, RobotPlayer
 
 
 class FakeWebSocket:
@@ -93,13 +93,13 @@ def test_mic_is_capped():
 
 def test_play_sends_start_chunks_end():
     player, sent, _ = make_player()
-    pcm = b"\x01\x00" * (CHUNK_BYTES // 2) * 3  # 60 ms
+    pcm = b"\x01\x00" * (ROBOT_CHUNK_BYTES // 2) * 3  # 300 ms
     player.play(pcm, player.current_token())
     assert sent[0] == {"type": "audio_start", "rate": 16000}
     assert sent[1:4] == [
-        pcm[:CHUNK_BYTES],
-        pcm[CHUNK_BYTES : 2 * CHUNK_BYTES],
-        pcm[2 * CHUNK_BYTES :],
+        pcm[:ROBOT_CHUNK_BYTES],
+        pcm[ROBOT_CHUNK_BYTES : 2 * ROBOT_CHUNK_BYTES],
+        pcm[2 * ROBOT_CHUNK_BYTES :],
     ]
     assert sent[4] == {"type": "audio_end"}
     assert len(sent) == 5
@@ -134,7 +134,12 @@ def test_play_never_runs_more_than_lead_ahead():
     player = RobotPlayer(send, clock=clock.clock, sleep=clock.sleep, lead=0.2)
     player.play(b"\x00" * BYTES_PER_SECOND, player.current_token())
     # A chunk is sent once the previous one is within `lead`, so at most lead + one chunk.
-    assert max(ahead) <= 0.2 + CHUNK_BYTES / BYTES_PER_SECOND + 1e-9
+    assert max(ahead) <= 0.2 + ROBOT_CHUNK_BYTES / BYTES_PER_SECOND + 1e-9
+
+
+def test_robot_frames_are_100_ms():
+    # Full-size TCP segments: the ESP32 only queues 6 segments per socket (see robot.py).
+    assert ROBOT_CHUNK_BYTES == BYTES_PER_SECOND // 10
 
 
 def test_stale_token_sends_nothing():
