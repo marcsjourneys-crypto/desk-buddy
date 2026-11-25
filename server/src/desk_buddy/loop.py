@@ -231,7 +231,7 @@ class Orchestrator:
             turn.failed = True
             self._emit_emotion(ERROR_LINE.emotion)
             await speak([ERROR_LINE.text])
-        log.info("Buddy [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
+        log.info("CARL [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
         await queue.put(None)
 
     def _note_emotion(self, turn: _Turn, emotion: str | None) -> None:
@@ -245,7 +245,7 @@ class Orchestrator:
     async def _say(self, line: Line, token: int) -> None:
         """Speak one canned line (no Claude, nothing remembered)."""
         self._emit_emotion(line.emotion)
-        log.info("Buddy [%s]: %s", line.emotion, line.text)
+        log.info("CARL [%s]: %s", line.emotion, line.text)
         queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
         await self._enqueue(line.text, queue)
         await queue.put(None)

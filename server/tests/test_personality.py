@@ -4,10 +4,42 @@ from desk_buddy.brain.emotion import EMOTIONS
 from desk_buddy.brain.memory import INTERRUPTED_NOTE
 from desk_buddy.brain.personality import (
     ERROR_LINE,
+    FAREWELL,
     FORGET_LINE,
+    GREETING,
+    PONDERING,
     REFUSAL_LINE,
+    TASK_DONE,
     system_prompt,
 )
+
+
+def test_prompt_introduces_carl_42():
+    prompt = system_prompt(2)
+    assert prompt.startswith("You are CARL-42, CARL for short")
+    assert "the Cognitive Assistant Robot for Life" in prompt
+    assert "Buddy" not in prompt
+
+
+def test_prompt_has_the_42_rule_and_the_aside_limits():
+    prompt = system_prompt(2)
+    assert "at most once in a conversation you may add that the answer might be 42" in prompt
+    assert "roughly one reply in four" in prompt
+    assert "never more than one aside per reply" in prompt
+    assert "don't imitate characters from books or films" in prompt
+
+
+def test_signature_lines():
+    assert GREETING == ("happy", "Don't panic. CARL is online.")
+    assert FAREWELL == ("happy", "So long, and thanks for all the fish.")
+    assert PONDERING == ("thinking", "Contemplating life, the universe, and everything.")
+    assert TASK_DONE == ("happy", "Another mystery of the universe solved.")
+
+
+def test_error_line_is_on_the_other_side_of_the_galaxy():
+    assert (
+        ERROR_LINE.text == "Sorry, my brain seems to be on the other side of the galaxy right now."
+    )
 
 
 def test_prompt_mentions_sentence_limit_and_spoken_style():
@@ -27,7 +59,7 @@ def test_prompt_explains_interrupted_marker():
 
 
 def test_canned_lines_use_known_emotions_and_have_text():
-    for line in (ERROR_LINE, REFUSAL_LINE, FORGET_LINE):
+    for line in (ERROR_LINE, REFUSAL_LINE, FORGET_LINE, GREETING, FAREWELL, PONDERING, TASK_DONE):
         assert line.emotion in EMOTIONS
         assert line.text.strip()
 

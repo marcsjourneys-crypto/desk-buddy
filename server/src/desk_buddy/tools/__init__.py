@@ -10,7 +10,7 @@ from desk_buddy.tools.registry import Tool, ToolRegistry
 
 
 def build_tools(settings: Settings) -> ToolRegistry:
-    """Every tool Buddy has, given the settings. Note tools need a vault path."""
+    """Every tool CARL has, given the settings. Note tools need a vault path."""
     tools: list[Tool] = []
     if settings.obsidian_vault_path:
         vault = NoteVault(

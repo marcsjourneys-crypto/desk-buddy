@@ -1,4 +1,4 @@
-"""Buddy's Obsidian vault: dated notes and ideas. Only appends and creates, never edits."""
+"""CARL's Obsidian vault: dated notes and ideas. Only appends and creates, never edits."""
 
 from __future__ import annotations
 

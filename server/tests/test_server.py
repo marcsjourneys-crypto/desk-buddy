@@ -652,7 +652,7 @@ async def recv_until_frame(robot, wanted, timeout=5.0):
 
 
 async def start_a_reply(robot):
-    """Connect, talk for 0.5 s, and return once Buddy is speaking and audio is arriving."""
+    """Connect, talk for 0.5 s, and return once CARL is speaking and audio is arriving."""
     await robot.connect()
     await robot.recv_until("state")
     await robot.press()
@@ -755,7 +755,7 @@ def test_a_new_robot_mid_reply_closes_the_old_one_and_goes_idle():
                     pass
             assert old.close_code == CLOSE_REPLACED
             assert old_link.closed
-            # The new robot sees Buddy go idle (the reply is interrupted, not moved over).
+            # The new robot sees CARL go idle (the reply is interrupted, not moved over).
             await recv_until_frame(new, IDLE)
             await wait_for(lambda: orch.state is State.IDLE)
             assert switch.robot is not None and switch.robot is not old_link

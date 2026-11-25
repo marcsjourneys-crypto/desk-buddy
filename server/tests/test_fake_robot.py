@@ -154,7 +154,7 @@ def test_malformed_json_from_the_server_is_skipped(caplog):
     robot = FakeRobot("ws://unused", TOKEN)
     robot.ws = FakeConnection(["{not json", '{"type": "welcome"}'])
     assert asyncio.run(robot.recv()) == {"type": "welcome"}
-    assert "Ignored a bad frame from Buddy" in caplog.text
+    assert "Ignored a bad frame from CARL" in caplog.text
 
 
 class AudioRobot:
@@ -279,7 +279,7 @@ class FakeMic:
 
 
 def test_a_run_against_a_real_server(monkeypatch, caplog):
-    """Connect, stream while Buddy is listening, then the server stops: exit code 0."""
+    """Connect, stream while CARL is listening, then the server stops: exit code 0."""
     caplog.set_level("INFO")
     monkeypatch.setattr(fake_robot, "Microphone", FakeMic)
     monkeypatch.setattr(fake_robot, "Speaker", FakeSpeaker)
@@ -324,7 +324,7 @@ def test_a_run_against_a_real_server(monkeypatch, caplog):
         return await asyncio.wait_for(tool, 5)
 
     assert asyncio.run(run()) == 0
-    assert "Hold right_ctrl in the Buddy window to talk" in caplog.text
+    assert "Hold right_ctrl in the CARL window to talk" in caplog.text
 
 
 def test_a_mic_failure_ends_the_tool_with_a_clear_message(monkeypatch, caplog):

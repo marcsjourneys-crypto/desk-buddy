@@ -282,7 +282,14 @@ def test_reply_log_includes_canned_line(caplog):
     caplog.set_level(logging.INFO, logger="desk_buddy.loop")
     orch, _, _ = make(chat=FakeChat(deltas=("First. ",), error=LLMError("boom")))
     asyncio.run(talk(orch))
-    assert f"Buddy [neutral]: First. {ERROR_LINE.text}" in caplog.messages
+    assert f"CARL [neutral]: First. {ERROR_LINE.text}" in caplog.messages
+
+
+def test_canned_line_log_format(caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.loop")
+    orch, _, _ = make(transcriber=FakeTranscriber(text="Forget that."))
+    asyncio.run(talk(orch))
+    assert f"CARL [{FORGET_LINE.emotion}]: {FORGET_LINE.text}" in caplog.messages
 
 
 def test_second_turn_sees_first_turn_in_history():
@@ -324,7 +331,7 @@ def test_interrupt_remembers_only_what_started_playing():
     asyncio.run(scenario())
     conversation = parts["conversation"]
     assert len(conversation) == 2
-    # Buddy's stored reply stays clean (Claude copies markers it sees in its own replies)...
+    # CARL's stored reply stays clean (Claude copies markers it sees in its own replies)...
     assert conversation.messages()[1]["content"] == "[neutral] Hello there."
     # ...and the next user message carries the note instead.
     assert parts["chat"].prompts[1] == f"{INTERRUPTED_NOTE} hi buddy"

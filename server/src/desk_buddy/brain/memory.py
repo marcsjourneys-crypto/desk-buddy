@@ -19,20 +19,20 @@ FORGET_PHRASES = frozenset(
         "change the subject",
     }
 )
-# Put at the start of the user's next message when they cut Buddy's reply off.
+# Put at the start of the user's next message when they cut CARL's reply off.
 INTERRUPTED_NOTE = "(I interrupted you, so I only heard your reply up to that point.)"
 
-_LEADING_FILLERS = frozenset({"hey", "buddy", "okay", "ok", "please", "so", "um", "uh"})
-_TRAILING_FILLERS = frozenset({"buddy", "please"})
+_LEADING_FILLERS = frozenset({"hey", "carl", "buddy", "okay", "ok", "please", "so", "um", "uh"})
+_TRAILING_FILLERS = frozenset({"carl", "buddy", "please"})
 
 
 class Conversation:
-    """The last max_turns exchanges of (user text, Buddy's reply), oldest first."""
+    """The last max_turns exchanges of (user text, CARL's reply), oldest first."""
 
     def __init__(self, max_turns: int = 20) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be >= 1")
-        # (user text, Buddy's reply as heard, whether the user cut that reply off)
+        # (user text, CARL's reply as heard, whether the user cut that reply off)
         self._turns: deque[tuple[str, str, bool]] = deque(maxlen=max_turns)
 
     def add(self, user: str, reply: str, *, interrupted: bool = False) -> None:
