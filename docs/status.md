@@ -2,7 +2,7 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
-## 2026-11-25 — Web search and About you built (check pending)
+## 2026-11-25 — Web search and About you done
 
 - **Built:**
   - **About you:** a card at the top of the Personality tab (name, town, region, ISO country code, a short note; all optional), saved in `personality.json`. It becomes an "About the user" block in the prompt, and the card says what goes to Anthropic and the search provider.
@@ -10,13 +10,13 @@ Where the project stands, so work can resume after a break. Update this when a m
   - Review fixes: no sentence breaks inside cited answers, a narrower "search is off" check, searches reported as soon as their results arrive, and stricter About-you checks.
 - **Plan:** `docs/plans/2026-11-25-web-search-about-you.md`.
 - **Tests:** 909 server tests pass (17 integration tests deselected, including the new live web search test, not yet run).
-- **Check by the user (pending):**
+- **Check by the user (passed 2026-11-25):**
   1. Fill in About you (name, town, country, a note). Ask "what's my name?" and check that CARL knows.
   2. "What's the weather tomorrow?": CARL searches, answers for your town, and the dashboard shows the search with its sources.
   3. "Who won <a recent match>?" gets a current answer without reading out web addresses.
   4. Set `WEB_SEARCH` off on the dashboard, ask again, and check that CARL says it can't look things up.
   5. Ask "where did you find that?" after a search: CARL knows it searched.
-- **Next:** the user check, then `uv run pytest -m integration tests/integration/test_web_search_live.py` (it needs web search enabled for the organisation in the Anthropic Console), the servo check, then in-page controls or the rest of M7.
+- **Next:** optionally `uv run pytest -m integration tests/integration/test_web_search_live.py` (it needs web search enabled for the organisation in the Anthropic Console), local skills (allowlisted scripts by name, spoken yes for powerful ones), a write-only Keys section and first-run setup, the servo check, then in-page controls or the rest of M7.
 
 ## 2026-11-25 — M8 dashboard done
 

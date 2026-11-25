@@ -165,6 +165,6 @@ Anyone (or any TV) near the robot can talk to it.
   - the vault path and other non-secret settings, which move from `.env` to a settings file the UI edits (secrets stay in `.env`);
   - personality editing (the prompt and canned lines move to an editable file).
   (Done 2026-11-25: `docs/plans/2026-11-25-m8-dashboard.md`; the user's browser check passed. In-page controls such as push-to-talk, stop, forget and music buttons come later.)
-- **Web search and About you** (after M8). An About you profile on the dashboard and Anthropic's web search, using the profile's location. (Built 2026-11-25: `docs/plans/2026-11-25-web-search-about-you.md`; the user's check is pending.)
+- **Web search and About you** (after M8). An About you profile on the dashboard and Anthropic's web search, using the profile's location. (Done 2026-11-25: `docs/plans/2026-11-25-web-search-about-you.md`; the user's check passed.)
 - **M9 – Expression library** (after M6). Design and preview eye expressions in the browser and map them to emotions.
 - **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.
