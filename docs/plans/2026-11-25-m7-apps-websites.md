@@ -61,9 +61,11 @@ Media keys and PC volume are left for later.
 - **Which tools need it:** a tool goes through `ActionGuard.run_after_yes` instead of `run`; today only `open_search_result`.
 - **Proposing:**
   - **Nothing runs yet:** when such a tool is called, `ActionGuard` counts and logs the attempt, then hands the checked action to `Confirmations`, which holds **one** pending action (tool, args, a short description such as "the page on bbc.co.uk", and the question it was proposed in). A new one replaces the old (shown as `cancelled`).
-  - **What CARL is told:** the tool result says it isn't done yet and waits for the user's yes; the robot will ask after the reply, so CARL must not ask itself or say it's open, just say briefly which page it is. It isn't counted as a success (no `TASK_DONE`). The prompt tells CARL to call the tool straight away when asked to open a page, never to offer or to tell the user to say yes.
+  - **The turn ends at the call** (revised after the second user check: with another API round after the waiting result, CARL still asked "Shall I open it?" itself and repeated itself, the user cut that off to answer, and the robot's question never played). When a tool returns the waiting result, the chat makes **no further API round**; any text CARL already said in that round stands.
+  - **What CARL is told:** the tool result says it isn't done yet and the robot is asking; it must never say it's open unless a system note says so. It isn't counted as a success (no `TASK_DONE`). The prompt tells CARL to call the tool immediately, with no text before it (or at most a few words), and never to ask, mention a confirmation, or tell the user to say yes.
   - **What the Live tab shows:** an action event with `outcome: "waiting"`.
-- **Asking: the server asks, never the model.** When a turn ends with an action proposed in that turn, the loop speaks a canned line after CARL's reply: "Shall I open <description>?" (emotion curious; not remembered; interruptible). The action is **armed** only once that line has played to the end. If the line is interrupted or fails, or the reply failed, the action is cancelled.
+- **Asking: the server asks, never the model.** When a turn ends with an action proposed in that turn, the loop speaks a canned line: "Shall I open <description>?" (emotion curious; interruptible). The action is **armed as soon as that line starts playing**, so the user may cut it off to answer. If the reply was cut off or failed before the question started, the action is cancelled (the user wasn't asked).
+- **Memory:** the turn is stored with its tool round (the `tool_use` and the waiting `tool_result`), and its reply is any text CARL said in that round plus the question, exactly as spoken (it was heard). A question cut off is stored like any interrupted reply. The next question's messages are then: assistant `tool_use` → user `tool_result` → assistant text → user.
 - **Confirming:** at the start of the **very next question with speech**, **before** Claude, within **60 s** of the question, the loop checks the transcript (and only the transcript).
   - **It's a yes only if all of these hold** (after lowercasing, curly apostrophes made straight, and punctuation removed):
     - it has at most 6 words;
@@ -78,12 +80,13 @@ Media keys and PC volume are left for later.
     - the action is dropped;
     - the Live tab shows `cancelled`;
     - the user's message gets "(System note: the pending action, opening <description>, was cancelled; the user didn't say yes.)", and the turn goes on as usual.
-- **Expiry:** 60 s after the question (shown as `expired`, with a note), on a forget command, when computer control is turned off, and on restart. A tool thread that proposes late (after its turn was cut off) is stamped with its own question and can never be asked about or answered.
+- **Expiry:** 60 s after the question started (shown as `expired`, with a note), on a forget command, when computer control is turned off, and on restart. A tool thread that proposes late (after its turn was cut off) is stamped with its own question and can never be asked about or answered.
+- **Claude is always told when nothing happened.** Any cancellation or expiry Claude wasn't told about (cancelled before the user was asked, replaced by a newer request, dropped by forget or by computer control going off) gets a note on the next user message, once: "(System note: the request to open <description> <cause>; nothing was opened.)". A bare yes (the strict check) with nothing waiting gets "(System note: nothing was waiting for a yes, so nothing was opened.)". The prompt says never to say it's opening or opened anything unless a system note says it was opened.
 - **Which pages:** `open_search_result` also refuses pages on this computer or the local network (loopback, private, link-local and similar IP addresses, `localhost`, `.local`/`.localhost` and single-label names).
 - **Only the user's voice can confirm:**
   - there's no confirm tool;
   - tool results, web text and notes can't approve an action.
-- **Memory:** the system notes go on the user's side only, like the search note.
+- **Memory of the notes:** the system notes go on the user's side only, like the search note.
 
 ## Tasks
 

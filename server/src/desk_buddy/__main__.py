@@ -295,7 +295,10 @@ class Brain:
         """At once, from the dashboard: turning computer control off can't wait."""
         if not new.computer_control:
             self.guard.enabled = False
-            self.confirmations.expire("Computer control was turned off.")
+            self.confirmations.expire(
+                "Computer control was turned off.",
+                "was dropped because computer control was turned off",
+            )
             if self.ducker is not None:
                 self.ducker.set_enabled(False, self._state)
 

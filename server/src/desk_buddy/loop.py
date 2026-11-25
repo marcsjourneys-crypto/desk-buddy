@@ -65,6 +65,7 @@ class _Turn:
     first_token_ms: int | None = None  # from key release, for the dashboard
     first_audio_ms: int | None = None
     note: str | None = None  # a system note sent after the user's words (a pending yes)
+    asked: str | None = None  # the server's "Shall I open …?", once it started playing
 
 
 class Orchestrator:
@@ -272,7 +273,10 @@ class Orchestrator:
                 self._search_results.new_question()
             if is_forget_command(text):
                 if self._confirmations is not None:
-                    self._confirmations.expire("Forgotten (a fresh start).")
+                    self._confirmations.expire(
+                        "Forgotten (a fresh start).",
+                        "was dropped when the user asked for a fresh start",
+                    )
                 if self._search_results is not None:
                     self._search_results.clear()
                 self.conversation.forget()
@@ -295,7 +299,7 @@ class Orchestrator:
                 tg.create_task(self._produce(turn, queue))
                 tg.create_task(self._consume_reply(turn, queue, token))
             turn.complete = True
-            asked = not turn.failed and await self._ask_pending(question, token)
+            asked = not turn.failed and await self._ask_pending(turn, question, token)
             if (
                 not turn.failed
                 and not asked
@@ -334,10 +338,12 @@ class Orchestrator:
         don't count toward TASK_DONE: that stays tied to our own tools."""
         rounds = list(getattr(self.chat, "last_tool_rounds", None) or [])
         searches = [s.query for s in getattr(self.chat, "searches", None) or []]
-        heard = turn.spoken and not turn.failed
+        said = [*turn.spoken, *([turn.asked] if turn.asked else [])]  # the question too
+        heard = said and not turn.failed
         if not heard and not rounds and not turn.note:
             return
-        reply = f"[{turn.emotion or DEFAULT_EMOTION}] " + " ".join(turn.spoken) if heard else None
+        emotion = turn.emotion or ("curious" if turn.asked else DEFAULT_EMOTION)
+        reply = f"[{emotion}] " + " ".join(said) if heard else None
         self.conversation.add(
             turn.user,
             reply,
@@ -360,23 +366,33 @@ class Orchestrator:
             log.exception("Couldn't answer the pending action")
             return None
 
-    async def _ask_pending(self, question: int, token: int) -> bool:
+    async def _ask_pending(self, turn: _Turn, question: int, token: int) -> bool:
         """If this turn proposed an action that needs a yes, the server (never the
         model) asks about it after the reply: "Shall I open the page on bbc.co.uk?". The
-        action is armed only once the question has played to the end; if it fails, the
-        action is cancelled (an interrupt cancels it in _run_turn). True if it asked."""
+        action is armed as the question starts playing, so the user may cut it off to
+        answer. If it can't be said, the action is cancelled (an interrupt before it
+        starts cancels it in _run_turn). The question is part of the reply in memory: it
+        was heard. True if it asked."""
         if self._confirmations is None:
             return False
         action = self._confirmations.to_ask(question)
         if action is None:
             return False
+        line = Line("curious", action.ask)
         try:
-            await self._say(Line("curious", action.ask), token)
+            pcm = await asyncio.to_thread(self.synthesizer.synthesize, line.text)
         except Exception as exc:
-            log.warning("Couldn't ask %r: %s", action.ask, exc)
+            log.warning("Couldn't ask %r: %s", line.text, exc)
             self._confirmations.cancel_unarmed("The question couldn't be asked.")
             return True
-        self._confirmations.arm(action, question)
+        self._emit_emotion(line.emotion)
+        log.info("CARL [%s]: %s", line.emotion, line.text)
+        self._publish("line", text=line.text, emotion=line.emotion)
+        self._confirmations.arm(action, question)  # from the moment it starts
+        turn.asked = line.text
+        turn.complete = False  # until the question has played to the end
+        await self._play((line.text, pcm), token, [])
+        turn.complete = True
         return True
 
     async def _produce(self, turn: _Turn, queue: asyncio.Queue[tuple[str, bytes] | None]) -> None:

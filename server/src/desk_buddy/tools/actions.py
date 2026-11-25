@@ -126,10 +126,11 @@ class ActionGuard:
         confirmations.propose(PendingAction(name, shown, public, description, confirmed))
         log.info("Action: %s %s -> waiting for a yes", name, shown)
         self._publish(name, public, f"Waiting for the user to say yes to {description}.", "waiting")
+        # The chat ends the turn on this result; the robot then asks the question.
         return NotDone(
-            f"Not done yet: opening {description} waits for the user's yes. After your "
-            "reply I will ask them myself, so don't ask and never say it's open; just say "
-            "briefly which page it is."
+            f"Not done yet: the robot is now asking the user whether to open {description}; "
+            "it opens only if their next words are a yes. Never say it's open unless a "
+            "system note says it was opened."
         )
 
     def refuse(

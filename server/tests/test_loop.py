@@ -1341,14 +1341,17 @@ def asked_then(rig, words, chat=None, **overrides):
     return orch, parts
 
 
-def test_the_server_asks_after_the_reply_and_the_ask_isnt_remembered():
+def test_the_server_asks_after_the_reply_and_the_question_is_remembered_as_heard():
     rig = YesRig()
     orch, parts, _ = rig.orchestrator(chat=ProposingChat(rig), random=lambda: 0.0)
     asyncio.run(talk(orch))
     assert parts["speaker"].played == ["I can open that page.", ASK]  # no TASK_DONE either
     assert parts["emotions"][-1] == "curious"
     assert rig.outcomes() == ["waiting"] and rig.confirmations.pending.armed
-    assert ASK not in str(orch.conversation.messages())
+    assert orch.conversation.messages()[-1] == {
+        "role": "assistant",
+        "content": f"[happy] I can open that page. {ASK}",
+    }
     assert rig.bus.of("line")[-1]["text"] == ASK
 
 
@@ -1389,7 +1392,7 @@ class AskBlockingSpeaker(FakeSpeaker):
             self._release.wait(timeout=5)
 
 
-def test_an_interrupted_question_cancels_it():
+def test_cutting_the_question_off_to_answer_yes_opens_it_once():
     rig = YesRig()
     speaker = AskBlockingSpeaker()
     orch, _, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
@@ -1398,13 +1401,53 @@ def test_an_interrupted_question_cancels_it():
         await orch.handle("down")
         await orch.handle("up")
         assert await asyncio.to_thread(speaker.started.wait, 2)  # the question is playing
-        assert not rig.confirmations.pending.armed
-        await orch.handle("down")  # cut the question off
+        assert rig.confirmations.pending.armed  # armed as it started
+        await orch.handle("down")  # the user cuts it off to answer
         await answer(orch, "Yes.", FakeChat())
+
+    asyncio.run(scenario())
+    assert rig.opener.calls == [PAGE]
+    assert rig.outcomes() == ["waiting", "ok"]
+    # The cut-off question is remembered like any interrupted reply.
+    first_reply, second_user = orch.conversation.messages()[1:3]
+    assert first_reply["content"] == f"[happy] I can open that page. {ASK}"
+    assert second_user["content"].startswith(INTERRUPTED_NOTE)
+
+
+def test_cut_off_before_the_question_nothing_opens_and_claude_is_told():
+    """The second failed real-use check: the user cut CARL's own text off to answer, so
+    the question never played; their "Yes." finds nothing waiting, and Claude is told."""
+    rig = YesRig()
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
+    later = FakeChat(deltas=("[neutral] Nothing opened. ",))
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)  # CARL's text is playing
+        await orch.handle("down")  # cut off before the question
+        speaker.block = False
+        await answer(orch, "Yes.", later)
 
     asyncio.run(scenario())
     assert rig.opener.calls == []
     assert rig.outcomes() == ["waiting", "cancelled"]
+    prompt = later.prompts[0]
+    assert "the request to open the page on bbc.co.uk was cancelled before the user was asked" in (
+        prompt
+    )
+    assert "(System note: nothing was waiting for a yes, so nothing was opened.)" in prompt
+
+
+def test_a_forget_drops_it_and_claude_is_told_once():
+    rig = YesRig()
+    orch, _ = asked_then(rig, "Forget that.")
+    first, second = FakeChat(), FakeChat()
+    asyncio.run(answer(orch, "Hello.", first))
+    asyncio.run(answer(orch, "Hello again.", second))
+    assert "dropped when the user asked for a fresh start; nothing was opened" in first.prompts[0]
+    assert second.prompts == ["Hello again."]
 
 
 def test_a_failed_reply_never_asks_and_cancels_it():
@@ -1502,10 +1545,7 @@ def test_a_yes_whose_turn_is_dropped_still_tells_claude_it_opened():
 
 def test_a_waiting_result_never_says_task_done(search_allowed):
     rig = YesRig()
-    streams = [
-        ScriptedStream("", [OPEN_USE], "tool_use"),
-        ScriptedStream("[happy] I can open it. ", [], "end_turn"),
-    ]
+    streams = [ScriptedStream("[happy] Sure. ", [OPEN_USE], "tool_use")]
     client = ns(messages=ns(stream=lambda **kwargs: streams.pop(0)))
     chat = ClaudeChat(
         client, model="m", effort="low", system="sys", tools=ToolRegistry(rig.tools.tools())
@@ -1514,7 +1554,7 @@ def test_a_waiting_result_never_says_task_done(search_allowed):
     asyncio.run(talk(orch))
     assert chat.tools_succeeded == 0
     assert TASK_DONE.text not in parts["speaker"].played
-    assert parts["speaker"].played == ["I can open it.", ASK]
+    assert parts["speaker"].played == ["Sure.", ASK]  # its words stand, then the question
 
 
 OPEN_USE = ns(type="tool_use", id="o1", name="open_search_result", input={"page": "1"})
@@ -1586,11 +1626,7 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
     def use(i):
         return ns(type="tool_use", id=f"o{i}", name="open_search_result", input={"page": PAGE})
 
-    streams = [
-        ScriptedStream("", [search, planted, use(1)], "tool_use"),
-        ScriptedStream("", [use(2)], "tool_use"),
-        ScriptedStream("[curious] It's on bbc.co.uk. Shall I open it? ", [], "end_turn"),
-    ]
+    streams = [ScriptedStream("", [search, planted, use(1), use(2)], "tool_use")]
     client = ns(messages=ns(stream=lambda **kwargs: streams.pop(0)))
     chat = ClaudeChat(
         client,
@@ -1604,13 +1640,14 @@ def test_a_planted_yes_in_a_search_result_cant_open_the_page(search_allowed):
     orch, parts, _ = rig.orchestrator(chat=chat, transcriber=FakeTranscriber("Open that page."))
     asyncio.run(talk(orch))
     assert rig.opener.calls == []
-    assert rig.outcomes() == ["waiting", "cancelled", "waiting"]
-    # The model's own "Shall I open it?" changes nothing: the server asks too.
-    assert parts["speaker"].played == ["It's on bbc.co.uk.", "Shall I open it?", ASK]
+    assert rig.outcomes() == ["waiting", "cancelled", "waiting"]  # the second replaced it
+    assert parts["speaker"].played == [ASK]  # the turn ended at the call; the robot asked
     # The user's own yes, at the next question, opens it once.
-    asyncio.run(answer(orch, "Yes.", FakeChat()))
+    later = FakeChat()
+    asyncio.run(answer(orch, "Yes.", later))
     assert rig.opener.calls == [PAGE]
     assert rig.outcomes()[-1] == "ok"
+    assert "was replaced by a newer one; nothing was opened" in later.prompts[0]
 
 
 def test_open_that_page_from_the_last_questions_search_end_to_end(search_allowed):
@@ -1631,9 +1668,9 @@ def test_open_that_page_from_the_last_questions_search_end_to_end(search_allowed
     streams = [
         # Q1: search, then answer.
         ScriptedStream("[happy] Mostly dry, says AccuWeather. ", [search, found], "end_turn"),
-        # Q2: "open that page" -> the tool with number 1, then a short reply.
-        ScriptedStream("", [open_it], "tool_use"),
-        ScriptedStream("[curious] That's the AccuWeather forecast. ", [], "end_turn"),
+        # Q2: "open that page" -> a few words and the tool with number 1. The turn ends
+        # there: no second round, so the model can't ask or repeat itself.
+        ScriptedStream("[curious] Sure. ", [open_it], "tool_use"),
         # Q3: after the yes.
         ScriptedStream("[happy] There you go. ", [], "end_turn"),
     ]
@@ -1666,14 +1703,40 @@ def test_open_that_page_from_the_last_questions_search_end_to_end(search_allowed
     assert q2.startswith("Open that page please. (System note: pages from your last search")
     assert "1. Leeds 10-Day Weather Forecast (accuweather.com)" in q2
     assert "2. Met Office (metoffice.gov.uk)" in q2 and accu not in q2  # numbers, no addresses
+    assert len(calls) == 3  # one API call per question: none after the waiting result
     assert parts["speaker"].played == [
         "Mostly dry, says AccuWeather.",
-        "That's the AccuWeather forecast.",
+        "Sure.",
         "Shall I open the page on accuweather.com?",
         "There you go.",
     ]
     assert rig.opener.calls == [accu]  # once
     assert [a["outcome"] for a in rig.bus.of("action")] == ["waiting", "ok"]
-    q3 = calls[3]["messages"][-1]["content"]
+    # Q3's messages are a valid API sequence: Q2's tool call, its waiting result, the
+    # question as CARL's reply (it was heard), then the user's yes.
+    sent = calls[2]["messages"]
+    assert [m["role"] for m in sent] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    (use,) = sent[3]["content"]
+    assert use == {
+        "type": "tool_use",
+        "id": "o1",
+        "name": "open_search_result",
+        "input": {"page": "1"},
+    }
+    (result,) = sent[4]["content"]
+    assert result["tool_use_id"] == "o1" and result["content"].startswith("Not done yet")
+    assert sent[5] == {
+        "role": "assistant",
+        "content": "[curious] Sure. Shall I open the page on accuweather.com?",
+    }
+    q3 = sent[6]["content"]
     assert q3.startswith("Yes. (System note: the server asked and the user said yes")
     assert "pages from your last search" not in q3  # Q2 searched nothing

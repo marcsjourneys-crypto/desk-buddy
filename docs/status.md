@@ -7,11 +7,12 @@ Where the project stands, so work can resume after a break. Update this when a m
 - **Built:**
   - **The Apps tab:** Find apps (Windows' own Start-app list), a filter, ticking apps with 1–3 spoken names each, and bookmarks. Saved in `apps.json` and `bookmarks.json` (`apps_store.py`).
   - **`open_app` and `open_website`** (`tools/launch.py`): names from an enum only, apps started as `explorer.exe shell:AppsFolder\<id>` by full path, bookmarks opened in the default browser. Both need `COMPUTER_CONTROL=on` and go through the guard.
-  - **`open_search_result` after a spoken "yes"** (`tools/confirm.py`): a page from the last question's search by its number (CARL sees a numbered list of titles and sites on the user's message), or an exact address from this question's search, never a local one. After CARL's reply the robot asks "Shall I open the page on <site>?", and only a strict, short yes at the very next question, within a minute, opens it.
+  - **`open_search_result` after a spoken "yes"** (`tools/confirm.py`): a page from the last question's search by its number (CARL sees a numbered list of titles and sites on the user's message), or an exact address from this question's search, never a local one. The turn ends at the tool call and the robot asks "Shall I open the page on <site>?" (the user may cut it off to answer); only a strict, short yes at the very next question, within a minute, opens it.
   - Review fixes: the server asks instead of the model, a strict yes vocabulary, the next question only, refusals counted through the guard, no local pages, UTF-8 app listing, full exe paths.
   - **First user check (failed, fixed):** "open that page" in the question after a search got "I don't have the exact address", and a second try made CARL offer instead of calling the tool. Now the last search's pages are numbered for CARL, and the prompt says to call the tool straight away and leave the asking to the robot.
+  - **Second user check (failed, fixed):** after calling the tool, CARL still asked and repeated itself in another API round. The user cut that off to answer, so the robot never asked, and "Yes." found nothing waiting while CARL claimed it was opening the page. Now the turn ends at the tool call and the robot asks straight away. The question arms the action as soon as it starts, so cutting it off to answer works, and it's remembered as heard. Whenever nothing opened, Claude gets a note saying so.
 - **Plan:** `docs/plans/2026-11-25-m7-apps-websites.md`.
-- **Tests:** 1169 server tests pass (17 integration tests deselected).
+- **Tests:** 1176 server tests pass (17 integration tests deselected).
 - **Check by the user (pending):**
   1. On the Apps tab, find apps, tick Notepad and your browser, and give the browser the name "browser". "Open notepad" opens it.
   2. Add a bookmark ("weather" → a forecast page). "Open the weather" opens it.

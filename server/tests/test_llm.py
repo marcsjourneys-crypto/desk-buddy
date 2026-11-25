@@ -376,6 +376,21 @@ def test_tool_error_is_sent_back_flagged():
     }
 
 
+def test_a_waiting_result_ends_the_reply_without_another_round():
+    from desk_buddy.tools.registry import NotDone
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, lambda text: NotDone("Not done yet"))])
+    first = FakeStream(["Sure."], stop_reason="tool_use", content=[tool_use()])
+    chat, client = make_chat(
+        first, FakeStream(["Shall I open it? Shall I open it?"]), tools=registry
+    )
+    assert collect(chat, "open it") == ["Sure."]
+    assert len(client.calls) == 1  # no second API round: the robot asks instead
+    ((uses, results),) = chat.last_tool_rounds
+    assert results[0]["content"] == "Not done yet" and "is_error" not in results[0]
+    assert chat.tools_succeeded == 0
+
+
 def test_last_round_forbids_tools():
     calls = []
     looping = [

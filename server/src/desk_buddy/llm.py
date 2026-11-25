@@ -344,8 +344,16 @@ class ClaudeChat:
                     results,
                 )
             )
+            waiting = False
             for i, block in enumerate(uses):
-                results[i] = await self._run_tool(block)
+                results[i], done = await self._run_tool(block)
+                waiting = waiting or not done
+            if waiting:
+                # An action waits for the user's spoken yes: the turn ends here, and the
+                # robot asks the question itself. No more rounds, so the model can't ask
+                # (or claim anything) on top of it.
+                log.info("Ending the reply: an action waits for the user's yes")
+                return
             # New list each round: the content goes back unchanged (thinking and search
             # blocks too), joined to a paused round's content if there was one.
             messages = merge_consecutive(
@@ -422,7 +430,8 @@ class ClaudeChat:
             except Exception:
                 log.debug("Search report failed", exc_info=True)
 
-    async def _run_tool(self, block: Any) -> dict[str, Any]:
+    async def _run_tool(self, block: Any) -> tuple[dict[str, Any], bool]:
+        """The tool_result block, and False if the action only waits for a yes."""
         # If the turn is cancelled here the thread still finishes (a note may be saved),
         # but the cancel propagates at once and the reply ends.
         outcome = await asyncio.to_thread(self._tools.run, block.name, block.input)
@@ -431,11 +440,12 @@ class ClaudeChat:
             "tool_use_id": block.id,
             "content": outcome.text,
         }
+        done = getattr(outcome, "done", True)
         if outcome.is_error:
             result["is_error"] = True
-        elif getattr(outcome, "done", True):  # waiting for a yes isn't a success yet
+        elif done:  # waiting for a yes isn't a success yet
             self.tools_succeeded += 1
-        return result
+        return result, outcome.is_error or done
 
 
 def _field(obj: Any, name: str) -> Any:

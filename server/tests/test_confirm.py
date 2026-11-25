@@ -155,8 +155,12 @@ def test_a_yes_phrase_alone_is_yes_but_fillers_alone_are_not():
 # --- Confirmations on their own ---
 
 
-def test_nothing_waiting_means_no_note():
-    assert Confirmations().answer("yes", 2) is None
+NOTHING_WAITING = "(System note: nothing was waiting for a yes, so nothing was opened.)"
+
+
+def test_nothing_waiting_means_no_note_unless_it_was_a_bare_yes():
+    assert Confirmations().answer("What's the time?", 2) is None
+    assert Confirmations().answer("Yes.", 2) == NOTHING_WAITING
 
 
 def test_a_yes_at_the_next_question_runs_it_once_with_a_note_event_and_log_line(caplog):
@@ -173,7 +177,7 @@ def test_a_yes_at_the_next_question_runs_it_once_with_a_note_event_and_log_line(
     assert runs == [1]
     assert bus.events[-1]["outcome"] == "ok" and bus.events[-1]["args"] == '{"site": "bbc.co.uk"}'
     assert 'Action: open_search_result {"url": "x"} -> ok: Opened the page' in caplog.text
-    assert confirmations.answer("yes", 3) is None  # gone: never runs twice
+    assert confirmations.answer("yes", 3) == NOTHING_WAITING  # gone: never runs twice
     assert runs == [1]
 
 
@@ -181,7 +185,10 @@ def test_never_asked_means_it_can_never_be_answered():
     bus, runs = RecordingBus(), []
     confirmations = Confirmations(bus=bus)
     propose(confirmations, run=lambda: runs.append(1) or "ok")
-    assert confirmations.answer("yes", 2) is None
+    assert confirmations.answer("yes", 2) == (
+        "(System note: the request to open the page on bbc.co.uk was cancelled before the "
+        "user was asked; nothing was opened.)"
+    )
     assert runs == [] and bus.outcomes() == ["cancelled"]
 
 
@@ -266,9 +273,38 @@ def test_expire_drops_it_with_an_event():
     confirmations.expire("nothing waits")  # nothing to do
     propose(confirmations, run=lambda: runs.append(1) or "ok")
     asked(confirmations)
-    confirmations.expire("Computer control was turned off.")
-    assert confirmations.answer("yes", 2) is None
+    confirmations.expire(
+        "Computer control was turned off.", "was dropped because computer control was turned off"
+    )
+    dropped = (
+        "(System note: the request to open the page on bbc.co.uk was dropped because "
+        "computer control was turned off; nothing was opened.)"
+    )
+    assert confirmations.answer("Okay.", 2) == f"{dropped} {NOTHING_WAITING}"
+    assert confirmations.answer("What now?", 3) is None  # told once
     assert runs == [] and bus.outcomes() == ["expired"]
+
+
+@pytest.mark.parametrize(
+    ("end", "note"),
+    [
+        (lambda c: c.cancel_unarmed("cut off"), "was cancelled before the user was asked"),
+        (lambda c: c.to_ask(2), "was cancelled before the user was asked"),
+        (lambda c: propose(c), "was replaced by a newer one"),
+        (
+            lambda c: c.expire("Forgotten.", "was dropped when the user asked for a fresh start"),
+            "was dropped when the user asked for a fresh start",
+        ),
+    ],
+)
+def test_every_unreported_end_reaches_claude_once(end, note):
+    confirmations = Confirmations()
+    propose(confirmations)
+    end(confirmations)
+    first = confirmations.answer("Tell me a joke.", 2)
+    assert first.startswith(f"(System note: the request to open the page on bbc.co.uk {note}")
+    assert first.endswith("nothing was opened.)")
+    assert confirmations.answer("Another one.", 3) is None
 
 
 def test_a_new_request_replaces_the_old_one():
@@ -305,7 +341,8 @@ def test_the_guard_counts_a_proposal_once_and_never_the_confirmed_run():
     tools, confirmations, _, opener, bus, _, guard = make(per_question=1)
     result = tools.open_search_result(PAGE)
     assert isinstance(result, NotDone)
-    assert "don't ask and never say it's open" in result
+    assert "the robot is now asking the user" in result
+    assert "Never say it's open unless a system note says it was opened" in result
     assert opener.calls == []  # nothing runs yet
     assert bus.outcomes() == ["waiting"]
     asked(confirmations)
