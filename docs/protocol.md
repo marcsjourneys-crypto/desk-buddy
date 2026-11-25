@@ -11,7 +11,7 @@ Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-2
 - **Binary frames** are audio: 16 kHz, 16-bit signed little-endian mono PCM.
 - **The server is the source of truth.** It decides the state; the robot only shows it, sends audio (and button presses, if it has a button), and plays what it is sent.
 - **One robot at a time.** While a robot is connected, the server uses the robot's mic and speaker. When it disconnects, the PC mic and speaker take over again. Conversation memory survives reconnects.
-- **The talk button is the PC key** (Right Ctrl by default, `PTT_KEY`), held in the Buddy window. It drives a connected robot as well as the PC. A robot button, touch pad or wake word is optional and can send `button` later.
+- **The talk button is the PC key** (Right Ctrl by default, `PTT_KEY`), held in the CARL window (the server's). It drives a connected robot as well as the PC. A robot button, touch pad or wake word is optional and can send `button` later.
 
 ## Connecting
 
@@ -51,7 +51,7 @@ If `ROBOT_TOKEN` is blank, the server doesn't listen at all and logs `Robot link
 | Message | Example | Notes |
 |---|---|---|
 | `hello` | `{"type": "hello", "token": "…", "fw_version": "0.2.0-m6"}` | First frame only. A later `hello` is logged and ignored. |
-| `button` | `{"type": "button", "action": "down"}` / `{"type": "button", "action": "up"}` | **Optional** push-to-talk on the robot (the M6 robot has none; the PC key does this). Down starts a recording; up ends it and starts the turn. Down while Buddy is thinking or speaking interrupts it. Rate-limited (see [Hardening](#hardening)). |
+| `button` | `{"type": "button", "action": "down"}` / `{"type": "button", "action": "up"}` | **Optional** push-to-talk on the robot (the M6 robot has none; the PC key does this). Down starts a recording; up ends it and starts the turn. Down while CARL is thinking or speaking interrupts it. Rate-limited (see [Hardening](#hardening)). |
 | `touch` | `{"type": "touch"}` | The head touch pad. Logged only (not used yet). |
 | `stats` | `{"type": "stats", "data": {"rssi": -58, "heap": 123456}}` | Free-form diagnostics. `data` must be an object; it is logged at debug level. |
 | `wake` | `{"type": "wake"}` | **Reserved** for an on-robot wake word (later). Accepted and logged, not used yet. |

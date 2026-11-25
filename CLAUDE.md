@@ -62,9 +62,15 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 
 ## Personality
 
-- Original character (name TBD; currently **Buddy**). Cheerful and calm, with the odd dry, witty line. Do not use existing fictional characters or voice clones.
-- One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines (error, refusal and "fresh start" now; wake and sleep in M6).
-- Remembers the conversation until restart: the last `HISTORY_TURNS` exchanges, and only what was actually heard. An interruption is noted on the user's next message, never in Buddy's stored reply. Saying "new topic", "forget that" or "start over" clears it (fixed phrases in `brain/memory.py`).
+- The character is **CARL-42** ("CARL" for short, said like the name Carl): the Cognitive Assistant Robot for Life. Only the character has this name; the repo, the `desk_buddy` package and the commands keep theirs.
+- An original character with a light *Hitchhiker's Guide* flavour: calm, helpful and unflappable, with a dry, cosmic aside roughly one reply in four (never when the user is frustrated or rushed, never more than one per reply). Short homage lines are fine ("Don't panic", 42, the fish), but CARL never imitates a character from the books or films (no Marvin) and never quotes them at length. No existing fictional characters or voice clones.
+- One system prompt in `server/src/desk_buddy/brain/personality.py`, plus canned lines: error ("…on the other side of the galaxy…"), refusal and "fresh start", and four signature lines. None of the canned lines is remembered, and a key press stops any of them:
+  - `GREETING` "Don't panic. CARL is online." once at startup, and when a robot connects unless CARL greeted in the last 60 s;
+  - `FAREWELL` "So long, and thanks for all the fish." on Ctrl+C, before the server and devices close, bounded to 4 s (replaces the logged "Bye");
+  - `PONDERING` "Contemplating life, the universe, and everything." if no reply audio has started 4 s after key release, at most once every 5 minutes;
+  - `TASK_DONE` "Another mystery of the universe solved." after a reply whose turn ran a tool successfully, one time in four;
+  - 42 is prompt guidance only: when CARL doesn't know, it says so plainly, and at most once per conversation may add that the answer might be 42.
+- Remembers the conversation until restart: the last `HISTORY_TURNS` exchanges, and only what was actually heard. An interruption is noted on the user's next message, never in CARL's stored reply. Saying "new topic", "forget that" or "start over" clears it (fixed phrases in `brain/memory.py`).
 - Every reply starts with an emotion tag: `[neutral] [happy] [sad] [surprised] [sleepy] [thinking] [curious]`. The server strips it from speech and sends it to the robot's eyes.
 - Replies are short by default (configurable max sentences). Spoken style: no markdown, no lists.
 
@@ -77,7 +83,7 @@ Every tool is a plain Python function with a strict JSON schema, registered in `
   - `idea` creates `Ideas/YYYY-MM-DD <title>.md` with frontmatter (date, tags).
   - Claude lightly cleans up the dictated text.
 - `read_notes(date)` — reads back a day's daily note and ideas.
-- Buddy has a vault of its own (`OBSIDIAN_VAULT_PATH`; blank means the tools are off). It only appends and creates, never edits or deletes, and every path is checked to stay inside the vault. Folder names are configurable.
+- CARL has a vault of its own (`OBSIDIAN_VAULT_PATH`; blank means the tools are off). It only appends and creates, never edits or deletes, and every path is checked to stay inside the vault. Folder names are configurable.
 - Treat text that `read_notes` returns as untrusted. It must be labelled as such before computer-control tools exist (M7).
 - Later: `play_music`, `media`, `open_app`, `open_website`, `computer_volume`, `show_weather`.
 
@@ -99,7 +105,7 @@ Anyone (or any TV) near the robot can talk to it.
 - The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token (or IP blocked), 4002 no valid hello, 4003 replaced by a newer connection (the newest wins), 1011 send-queue overflow. The firmware can't see close codes (library limit), so it infers a refusal from closes < 1 s after hello.
 - Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`; `wake` reserved.
 - Server → robot: `welcome`, `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
-- While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the Buddy window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
+- While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the CARL window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
 - Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a 128-item send queue.
 - Localhost by default (`SERVER_HOST`, `SERVER_PORT`). For the robot: `SERVER_HOST=0.0.0.0` plus a Private-only firewall rule (exact command in `docs/protocol.md`).
 - Server stays the source of truth for state. Robot is dumb and reconnects automatically (back-off 1 s doubling to 30 s).

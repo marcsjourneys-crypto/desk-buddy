@@ -2,6 +2,17 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-25 — CARL-42 personality done (voice check pending)
+
+- **Built:**
+  - The character is renamed Buddy → **CARL-42** (CARL), with a light *Hitchhiker's* prompt: a dry, cosmic aside about one reply in four, and the 42 rule. Logs read `CARL [happy]: …`. Package and commands keep the `desk_buddy` name.
+  - Signature lines (`brain/personality.py`), none remembered, all interruptible: `GREETING` at startup and on robot connect (deduped within 60 s), `FAREWELL` on Ctrl+C (bounded to 4 s, replaces "Bye"), `PONDERING` when no reply audio 4 s after key release (at most every 5 min), `TASK_DONE` after a successful tool call one time in four.
+  - New error line: "Sorry, my brain seems to be on the other side of the galaxy right now."
+- **Plan:** `docs/plans/2026-11-25-carl-personality.md`.
+- **Tests:** 432 server tests pass (13 integration tests deselected).
+- **Voice check by the user (pending):** the greeting at startup; dry asides now and then, not every time; an unknowable question (maybe 42); a slow question gets the pondering line; a note sometimes gets "Another mystery of the universe solved."; Ctrl+C says the farewell; a robot linking later is greeted, one linking right after startup isn't.
+- **Next:** the Piper voice audition, the servo check, then M7 (PC computer control). Before M7, mark `read_notes` output as untrusted.
+
 ## 2026-11-24 — M6 robot joins the link done
 
 - **Built (server):**
