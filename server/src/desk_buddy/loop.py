@@ -15,16 +15,7 @@ from typing import Any, Protocol
 from desk_buddy.audio import duration_seconds
 from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
 from desk_buddy.brain.memory import Conversation, is_forget_command
-from desk_buddy.brain.personality import (
-    ERROR_LINE,
-    FAREWELL,
-    FORGET_LINE,
-    GREETING,
-    PONDERING,
-    REFUSAL_LINE,
-    TASK_DONE,
-    Line,
-)
+from desk_buddy.brain.personality import Line, Personality
 from desk_buddy.events import NULL_BUS
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
@@ -91,6 +82,7 @@ class Orchestrator:
         random: Callable[[], float] = random_module.random,
         on_question: Callable[[], None] = lambda: None,
         bus: Any = NULL_BUS,
+        personality: Callable[[], Personality] = Personality,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -109,6 +101,7 @@ class Orchestrator:
         self._greeted_at: float | None = None
         self._pondered_at: float | None = None
         self._bus = bus  # live events for the dashboard (events.EventBus)
+        self._personality = personality  # the current one: lines are read when spoken
 
     # --- events ---
 
@@ -176,7 +169,7 @@ class Orchestrator:
         (then it is cut off). Never raises: shutdown must go on."""
         try:
             await self.handle("reset")
-            if self.say(FAREWELL) and self._turn is not None:
+            if self.say(self._line("farewell")) and self._turn is not None:
                 await asyncio.wait([self._turn], timeout=timeout)
             await self._interrupt()  # cut it off if it timed out
         except Exception:
@@ -188,7 +181,7 @@ class Orchestrator:
             log.debug("Skipped greeting: greeted %.0f s ago", now - self._greeted_at)
             return
         # Counted only once it has played: an interrupted or failed greeting doesn't count.
-        self.say(GREETING, on_done=self._greeted)
+        self.say(self._line("greeting"), on_done=self._greeted)
 
     def _greeted(self) -> None:
         self._greeted_at = self._clock()
@@ -212,6 +205,14 @@ class Orchestrator:
             log.debug("state -> %s", state)
             self._publish("state", name=state.value)
             self._on_state(state)
+
+    def _line(self, name: str) -> Line:
+        """A signature line as it is now (edited on the dashboard, or the default)."""
+        try:
+            return self._personality().line(name)
+        except Exception:
+            log.warning("Couldn't read the %s line; using the default", name, exc_info=True)
+            return Personality().line(name)
 
     def _publish(self, type_: str, **fields: Any) -> None:
         """An event for the dashboard. Never raises into the loop."""
@@ -253,7 +254,7 @@ class Orchestrator:
             if is_forget_command(text):
                 self.conversation.forget()
                 log.info("Memory cleared")
-                await self._say(FORGET_LINE, token)
+                await self._say(self._line("forget"), token)
                 return
             turn = _Turn(user=text, thinking_since=time.perf_counter())
             tools_before = _tools_succeeded(self.chat)
@@ -269,7 +270,7 @@ class Orchestrator:
                 and _tools_succeeded(self.chat) > tools_before
                 and self._random() < TASK_DONE_CHANCE
             ):
-                await self._say_extra(TASK_DONE, token)
+                await self._say_extra(self._line("task_done"), token)
         except Exception:
             # A TaskGroup failure arrives as an ExceptionGroup, which is an Exception.
             log.exception("Turn failed")
@@ -336,13 +337,15 @@ class Orchestrator:
         except LLMRefusal:
             log.warning("Claude refused")
             turn.failed = True
-            self._show(turn, REFUSAL_LINE.emotion)
-            await speak([REFUSAL_LINE.text])
+            refusal = self._line("refusal")
+            self._show(turn, refusal.emotion)
+            await speak([refusal.text])
         except LLMError as exc:
             log.warning("LLM error: %s", exc)
             turn.failed = True
-            self._show(turn, ERROR_LINE.emotion)
-            await speak([ERROR_LINE.text])
+            error = self._line("error")
+            self._show(turn, error.emotion)
+            await speak([error.text])
         log.info("CARL [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
         await queue.put(None)
 
@@ -409,7 +412,7 @@ class Orchestrator:
         self._pondered_at = now
         turn.pondering = True
         try:
-            await self._say_extra(PONDERING, token)
+            await self._say_extra(self._line("pondering"), token)
         finally:
             turn.pondering = False
         if turn.shown:  # the reply's emotion, held back (or covered) by the line

@@ -192,6 +192,16 @@ def test_create_chat_builds_claude_for_anthropic_provider():
     assert isinstance(create_chat(Settings(anthropic_api_key="k")), ClaudeChat)
 
 
+def test_create_chat_reads_the_current_character_on_every_request():
+    from desk_buddy.brain.personality import Personality
+
+    current = {"p": Personality(character="You are grumpy.")}
+    chat = create_chat(Settings(anthropic_api_key="k"), personality=lambda: current["p"])
+    assert chat._system().startswith("You are grumpy.")
+    current["p"] = Personality(character="You are cheerful.")
+    assert chat._system().startswith("You are cheerful.")
+
+
 def _tool(name):
     return Tool(name, "d", SCHEMA, lambda text: "ok")
 

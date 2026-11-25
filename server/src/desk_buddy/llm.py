@@ -11,7 +11,7 @@ from typing import Any, Protocol
 import anthropic
 
 from desk_buddy.brain.memory import merge_consecutive
-from desk_buddy.brain.personality import system_prompt
+from desk_buddy.brain.personality import Personality, system_prompt
 from desk_buddy.config import Settings
 from desk_buddy.tools.registry import ToolRegistry
 
@@ -247,18 +247,29 @@ class ClaudeChat:
         return result
 
 
-def create_chat(settings: Settings, tools: ToolRegistry | None = None) -> Chat:
-    """Build the chat client for settings.llm_provider. Add new providers here."""
+def create_chat(
+    settings: Settings,
+    tools: ToolRegistry | None = None,
+    personality: Callable[[], Personality] = Personality,
+) -> Chat:
+    """Build the chat client for settings.llm_provider. Add new providers here. The
+    system prompt is rebuilt for every request, with the personality as it is then."""
     if settings.llm_provider == "anthropic":
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
             model=settings.llm_model,
             effort=settings.llm_effort,
-            system=lambda: system_prompt(
-                settings.max_sentences,
-                notes=tools is not None and "take_note" in tools,
-                music=tools is not None and "play_music" in tools,
-            ),
+            system=lambda: prompt_for(settings, tools, personality()),
             tools=tools,
         )
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")
+
+
+def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Personality) -> str:
+    """The full system prompt CARL gets (also the dashboard's read-only preview)."""
+    return system_prompt(
+        settings.max_sentences,
+        notes=tools is not None and "take_note" in tools,
+        music=tools is not None and "play_music" in tools,
+        character=personality.character,
+    )

@@ -13,11 +13,13 @@ from typing import Any
 
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
+from desk_buddy.brain.personality import Personality
 from desk_buddy.config import ConfigError, Settings, load_settings
 from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
 from desk_buddy.llm import create_chat
 from desk_buddy.loop import Orchestrator, State
+from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.settings_store import LiveSettings
@@ -87,7 +89,8 @@ async def _run(settings: Settings) -> None:
         speaker = Speaker()
         stack.callback(speaker.close)
         bus = EventBus()  # live events for the dashboard; never blocks the voice loop
-        brain = Brain(settings, bus=bus)
+        personality = PersonalityStore()  # edited on the dashboard; defaults otherwise
+        brain = Brain(settings, bus=bus, personality=personality.current)
         stack.callback(brain.close)  # runs after the farewell, which restores the music
         conversation = Conversation(settings.history_turns)
         # A connected robot takes over the mic, speaker and button; else the PC's are used.
@@ -113,6 +116,7 @@ async def _run(settings: Settings) -> None:
             on_emotion=switch.send_emotion,
             on_question=on_question,
             bus=bus,
+            personality=personality.current,
         )
         stack.push_async_callback(orchestrator.shutdown)
         live.on_question(brain.on_settings)
@@ -185,8 +189,15 @@ class Brain:
     and their ducker, the tool registry and the chat. Rebuilt between turns (from
     LiveSettings.apply at the start of a question), never during one."""
 
-    def __init__(self, settings: Settings, *, bus: EventBus) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        bus: EventBus,
+        personality: Callable[[], Personality] = Personality,
+    ) -> None:
         self.guard = ActionGuard(settings.computer_control, bus=bus)
+        self._personality = personality
         self.music: MusicTools | None = None
         self.ducker: MusicDucker | None = None
         self._build(settings, music=True)
@@ -219,7 +230,7 @@ class Brain:
             if "take_note" in self.tools
             else "off (no OBSIDIAN_VAULT_PATH)",
         )
-        self.chat = create_chat(settings, self.tools)
+        self.chat = create_chat(settings, self.tools, personality=self._personality)
 
 
 def _set_speed(synthesizer: Any, speed: float) -> None:

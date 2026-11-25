@@ -877,6 +877,45 @@ def test_a_chat_without_a_tool_count_never_says_task_done():
     assert parts["speaker"].played == ["Hello there.", "How are you?"]
 
 
+# --- An edited personality ---
+
+
+def edited(**lines):
+    from desk_buddy.brain.personality import DEFAULT_LINES, Line, Personality
+
+    return Personality(lines={**DEFAULT_LINES, **{k: Line(*v) for k, v in lines.items()}})
+
+
+def test_the_greeting_and_farewell_are_read_when_spoken():
+    current = {"p": edited(greeting=("sleepy", "Oh. You again."))}
+    orch, parts, _ = make(personality=lambda: current["p"])
+
+    async def scenario():
+        await orch.handle("greet")
+        await orch.wait_idle()
+        current["p"] = edited(farewell=("sad", "Off I go, then."))
+        await orch.farewell(timeout=2)
+
+    asyncio.run(scenario())
+    assert parts["speaker"].played == ["Oh. You again.", "Off I go, then."]
+    assert parts["emotions"] == ["sleepy", "sad"]
+
+
+def test_edited_error_and_forget_lines_are_used():
+    orch, parts, _ = make(
+        chat=FakeChat(deltas=(), error=LLMError("boom")),
+        personality=lambda: edited(error=("sad", "Brain fog.")),
+    )
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Brain fog."]
+    orch, parts, _ = make(
+        transcriber=FakeTranscriber(text="Forget that."),
+        personality=lambda: edited(forget=("happy", "Clean slate.")),
+    )
+    asyncio.run(talk(orch))
+    assert parts["speaker"].played == ["Clean slate."]
+
+
 # --- Events for the dashboard ---
 
 

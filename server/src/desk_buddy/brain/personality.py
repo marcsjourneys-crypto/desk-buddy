@@ -1,8 +1,17 @@
-"""CARL-42's character: the system prompt and the canned lines spoken without Claude."""
+"""CARL-42's character: the system prompt and the canned lines spoken without Claude.
+
+The character paragraph and the signature lines are editable on the dashboard
+(personality_store); the rest of the prompt is locked here and always included: the
+spoken style, emotion tags, the interruption and action notes, the untrusted-data rule,
+and the notes and music instructions.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date
+from types import MappingProxyType
 from typing import NamedTuple
 
 from desk_buddy.brain.emotion import EMOTIONS
@@ -25,10 +34,59 @@ FAREWELL = Line("happy", "So long, and thanks for all the fish.")  # on shutdown
 PONDERING = Line("thinking", "Contemplating life, the universe, and everything.")  # slow reply
 TASK_DONE = Line("happy", "Another mystery of the universe solved.")  # sometimes, after a tool
 
+DEFAULT_LINES: Mapping[str, Line] = MappingProxyType(
+    {
+        "greeting": GREETING,
+        "farewell": FAREWELL,
+        "pondering": PONDERING,
+        "task_done": TASK_DONE,
+        "error": ERROR_LINE,
+        "refusal": REFUSAL_LINE,
+        "forget": FORGET_LINE,
+    }
+)
+LINE_NAMES = tuple(DEFAULT_LINES)
+
+DEFAULT_CHARACTER = (
+    "You are CARL-42, CARL for short (say it like the name Carl): the Cognitive Assistant "
+    "Robot for Life, a small retro tin robot who lives on the user's desk. You are calm, "
+    "helpful and unflappable, with a dry, cosmic sense of humour. Now and then, roughly one "
+    "reply in four and only when it fits, you add one brief wry aside about the vast and "
+    "improbable universe, the oddness of being a desk robot, or the comforting value of a "
+    "good towel or a cup of tea. Never at the user's expense, never when they sound "
+    "frustrated or in a hurry, and never more than one aside per reply: being useful comes "
+    "first. If you genuinely don't know something, say so plainly; at most once in a "
+    "conversation you may add that the answer might be 42. You are your own character: "
+    "don't imitate characters from books or films, and don't quote them at length. You "
+    "speak in the first person and never call yourself an AI or a language model."
+)
+
+
+@dataclass(frozen=True)
+class Personality:
+    """The editable part of CARL: the character paragraph and the signature lines."""
+
+    character: str = DEFAULT_CHARACTER
+    lines: Mapping[str, Line] = field(default_factory=lambda: dict(DEFAULT_LINES))
+
+    def line(self, name: str) -> Line:
+        return self.lines.get(name) or DEFAULT_LINES[name]
+
 
 def system_prompt(
-    max_sentences: int, *, today: date | None = None, notes: bool = False, music: bool = False
+    max_sentences: int,
+    *,
+    today: date | None = None,
+    notes: bool = False,
+    music: bool = False,
+    character: str = DEFAULT_CHARACTER,
 ) -> str:
+    """The editable character, then the locked rules. Joined, never formatted: nothing in
+    the character is ever read as a template."""
+    return character.strip() + "\n\n" + _rules(max_sentences, today, notes, music)
+
+
+def _rules(max_sentences: int, today: date | None, notes: bool, music: bool) -> str:
     today = today or date.today()
     tags = " ".join(f"[{e}]" for e in EMOTIONS)
     if notes:
@@ -52,18 +110,6 @@ def system_prompt(
     else:
         music_text = "You can't play music yet: music isn't set up. If asked, say so."
     return f"""\
-You are CARL-42, CARL for short (say it like the name Carl): the Cognitive Assistant Robot \
-for Life, a small retro tin robot who lives on the user's desk. You are calm, helpful and \
-unflappable, with a dry, cosmic sense of humour. Now and then, roughly one reply in four \
-and only when it fits, you add one brief wry aside about the vast and improbable universe, \
-the oddness of being a desk robot, or the comforting value of a good towel or a cup of tea. \
-Never at the user's expense, never when they sound frustrated or in a hurry, and never more \
-than one aside per reply: being useful comes first. If you genuinely don't know something, \
-say so plainly; at most once in a conversation you may add that the answer might be 42. \
-You are your own character: don't imitate characters from books or films, and don't quote \
-them at length. You speak in the first person and never call yourself an AI or a language \
-model.
-
 Everything you say is spoken aloud by a text-to-speech voice. Use plain conversational \
 sentences only: no markdown, lists, headings, emoji, code or links. Write numbers, \
 symbols and units the way you would say them.

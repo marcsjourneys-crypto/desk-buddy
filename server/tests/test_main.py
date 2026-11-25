@@ -91,7 +91,7 @@ def fakes(monkeypatch, calls, tmp_path):
     monkeypatch.setattr(entry, "load_piper", fake_load_piper)
     monkeypatch.setattr(entry, "Microphone", FakeMicrophone)
     monkeypatch.setattr(entry, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(entry, "create_chat", lambda settings, tools=None: object())
+    monkeypatch.setattr(entry, "create_chat", lambda settings, tools=None, **_: object())
     monkeypatch.setattr(entry, "Orchestrator", FakeOrchestrator)
     monkeypatch.setattr(entry, "KeyWatcher", FakeWatcher)
 
@@ -402,7 +402,9 @@ def test_dashboard_settings_apply_live_at_the_next_question(monkeypatch, fakes, 
 
     monkeypatch.setattr(entry, "LiveSettings", SpyLive)
     monkeypatch.setattr(entry, "ActionGuard", SpyGuard)
-    monkeypatch.setattr(entry, "create_chat", lambda s, tools=None: chats.append(s) or object())
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None, **_: chats.append(s) or object()
+    )
     entry.main()
     (live,) = lives
     (guard,) = guards
@@ -431,7 +433,9 @@ def test_a_settings_change_that_doesnt_touch_the_chat_doesnt_rebuild_it(monkeypa
             lives.append(self)
 
     monkeypatch.setattr(entry, "LiveSettings", SpyLive)
-    monkeypatch.setattr(entry, "create_chat", lambda s, tools=None: chats.append(s) or object())
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None, **_: chats.append(s) or object()
+    )
     entry.main()
     lives[0].propose(Settings(anthropic_api_key="k", history_turns=3))
     orchestrator_kwargs(calls)["on_question"]()
@@ -455,10 +459,29 @@ def music_run(monkeypatch, calls, caplog, control, **settings):
     monkeypatch.setattr(entry, "create_control", fake_create_control)
     tools_seen = []
     monkeypatch.setattr(
-        entry, "create_chat", lambda s, tools=None: tools_seen.append(tools) or object()
+        entry, "create_chat", lambda s, tools=None, **_: tools_seen.append(tools) or object()
     )
     assert entry.main() == 0
     return made, tools_seen[0]
+
+
+def test_the_personality_file_feeds_the_chat_and_the_loop(monkeypatch, fakes, calls, tmp_path):
+    import json
+
+    (tmp_path / "desk-buddy").mkdir(exist_ok=True)
+    (tmp_path / "desk-buddy" / "personality.json").write_text(
+        json.dumps({"character": "You are grumpy.", "lines": {"greeting": {"text": "Hmph."}}}),
+        encoding="utf-8",
+    )
+    providers = []
+    monkeypatch.setattr(
+        entry,
+        "create_chat",
+        lambda s, tools=None, personality=None: providers.append(personality) or object(),
+    )
+    entry.main()
+    assert providers[0]().character == "You are grumpy."
+    assert orchestrator_kwargs(calls)["personality"]().line("greeting").text == "Hmph."
 
 
 @pytest.mark.parametrize(
