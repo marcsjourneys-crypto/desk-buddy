@@ -295,52 +295,115 @@ def test_a_good_token_clears_earlier_failures():
     asyncio.run(run())
 
 
-def test_too_many_connections_waiting_for_hello_are_refused_4002():
+async def refused_at_once(url):
+    """Connect without a hello and expect an immediate 4002 (not the 5 s hello timeout)."""
+    extra = FakeRobot(url, TOKEN)
+    await extra.connect(hello=False)
+    with contextlib.suppress(Exception):  # it may already be closed
+        await extra.send({"type": "hello", "token": TOKEN, "fw_version": ""})
+    started = time.monotonic()
+    assert await extra.recv(timeout=2) is None
+    assert time.monotonic() - started < 1
+    assert extra.close_code == CLOSE_NO_HELLO
+
+
+async def check_a_robot_gets_in(url):
+    robot = FakeRobot(url, TOKEN)
+    await robot.connect()
+    assert await robot.recv() == {"type": "welcome"}
+    await robot.close()
+
+
+def test_too_many_connections_waiting_for_hello_are_refused_4002(monkeypatch, caplog):
+    # Every test client comes from 127.0.0.1, so lift the per-IP cap to reach the global one.
+    monkeypatch.setattr(server_module, "MAX_PENDING_PER_IP", 100)
+    caplog.set_level(logging.INFO)
+
     async def run():
         async with running(hello_timeout=5.0) as (url, _, _):
             waiting = [FakeRobot(url, TOKEN) for _ in range(server_module.MAX_PENDING_HELLOS)]
             for robot in waiting:
                 await robot.connect(hello=False)
-            extra = FakeRobot(url, TOKEN)
-            await extra.connect(hello=False)
-            with contextlib.suppress(Exception):  # it may already be closed
-                await extra.send({"type": "hello", "token": TOKEN, "fw_version": ""})
-            started = time.monotonic()
-            assert await extra.recv(timeout=2) is None
-            assert time.monotonic() - started < 1  # at once, not after the hello timeout
-            assert extra.close_code == CLOSE_NO_HELLO
+            await refused_at_once(url)
             for robot in waiting:
                 await robot.close()
-            # Once they are gone, a new robot gets in.
-            robot = FakeRobot(url, TOKEN)
-            await robot.connect()
-            assert await robot.recv() == {"type": "welcome"}
-            await robot.close()
+            await check_a_robot_gets_in(url)  # once they are gone
+
+    asyncio.run(run())
+    assert "Robot refused: too many pending connections from 127.0.0.1" in caplog.messages
+
+
+def test_too_many_connections_from_one_ip_waiting_for_hello_are_refused_4002(caplog):
+    caplog.set_level(logging.INFO)
+
+    async def run():
+        async with running(hello_timeout=5.0) as (url, _, _):
+            waiting = [FakeRobot(url, TOKEN) for _ in range(server_module.MAX_PENDING_PER_IP)]
+            for robot in waiting:
+                await robot.connect(hello=False)
+            await refused_at_once(url)
+            for robot in waiting:
+                await robot.close()
+            await check_a_robot_gets_in(url)
+
+    assert server_module.MAX_PENDING_PER_IP < server_module.MAX_PENDING_HELLOS
+    asyncio.run(run())
+    assert "Robot refused: too many pending connections from 127.0.0.1" in caplog.messages
+
+
+@pytest.mark.parametrize("first", [None, "junk"])
+def test_missing_or_bad_hellos_count_as_auth_failures(first):
+    clock = FakeClock()
+
+    async def run():
+        async with running(hello_timeout=0.1, clock=clock) as (url, switch, _):
+            for _ in range(server_module.MAX_AUTH_FAILURES):
+                silent = FakeRobot(url, TOKEN)
+                await silent.connect(hello=False)
+                if first is not None:
+                    await silent.ws.send(first)
+                assert await silent.recv() is None
+                assert silent.close_code == CLOSE_NO_HELLO
+            blocked = FakeRobot(url, TOKEN)
+            await blocked.connect(hello=False)
+            assert await blocked.recv() is None
+            assert blocked.close_code == CLOSE_BAD_TOKEN
+            assert switch.robot is None
 
     asyncio.run(run())
 
 
-def test_a_button_flood_is_dropped_and_logged_once(caplog):
+async def poll(condition, timeout=2.0):
+    """Poll until `condition()` is true, or fail after `timeout` seconds."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.005)
+
+
+def test_a_button_flood_drops_downs_only_and_is_logged_once(caplog):
     caplog.set_level(logging.INFO)
     clock = FakeClock()  # frozen: the bucket never refills
 
     async def run():
-        async with running(clock=clock) as (url, _, events):
+        async with running(clock=clock) as (url, switch, events):
             robot = FakeRobot(url, TOKEN)
             await robot.connect()
             await robot.recv_until("state")
             assert await next_event(events) == "reset"
-            for i in range(30):
+            for i in range(30):  # 15 downs and 15 ups, ending with an up
                 await (robot.press() if i % 2 == 0 else robot.release())
-            await asyncio.sleep(0.3)
+            await poll(lambda: events.qsize() >= 25)
             got = []
             while not events.empty():
                 got.append(events.get_nowait())
+            recording = switch.robot.mic._recording
             await robot.close()
-            return got
+            return got, recording
 
-    got = asyncio.run(run())
-    assert got == ["down", "up"] * 5
+    got, recording = asyncio.run(run())
+    # The first BUTTON_BURST downs get through; every up does, so the press always ends.
+    assert got == ["down", "up"] * server_module.BUTTON_BURST + ["up"] * 5
+    assert not recording  # the robot's mic was ended
     assert caplog.messages.count("Robot button flood: dropping") == 1
 
 

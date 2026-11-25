@@ -24,7 +24,7 @@ from desk_buddy.tts import SapiSynthesizer
 log = logging.getLogger("desk_buddy")
 
 RELEASE_DELAY = 0.25  # seconds the robot's mic stays open after the key is released
-WILDCARD_HOSTS = ("0.0.0.0", "::")  # listening on every interface: the robot needs the LAN IP
+WILDCARD_HOSTS = ("", "0.0.0.0", "::")  # listening on every interface: the robot needs the LAN IP
 
 
 class StartupError(Exception):
@@ -157,7 +157,13 @@ def key_handler(
 ) -> Callable[[str], None]:
     """The push-to-talk key's handler (runs on the event loop). While a robot is connected
     the key drives it: down begins the robot's mic, and up ends it `delay` seconds later so
-    audio still in flight over Wi-Fi isn't lost."""
+    audio still in flight over Wi-Fi isn't lost.
+
+    A re-press while a release is still pending fires that release at once (end, up),
+    then begins again. The robot mic's begin() clears its buffer before the orchestrator
+    takes the first clip on that "up", so a double press within `delay` deliberately drops
+    the first clip: the orchestrator sees it as an ignored tap, and the second press is
+    the turn."""
     pending: list[tuple[asyncio.TimerHandle, Robot]] = []  # at most one delayed release
 
     def release(robot: Robot) -> None:

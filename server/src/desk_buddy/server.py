@@ -32,8 +32,9 @@ SHUTDOWN_SECONDS = 5  # bound on uvicorn's graceful shutdown
 MAX_AUTH_FAILURES = 5  # bad tokens from one IP within AUTH_WINDOW...
 AUTH_WINDOW = 60.0
 BLOCK_SECONDS = 60.0  # ...block that IP for this long
-MAX_PENDING_HELLOS = 4  # connections waiting for their hello at once
-BUTTON_RATE = 10.0  # button messages per second, with a burst of BUTTON_BURST
+MAX_PENDING_HELLOS = 4  # connections waiting for their hello at once, in all
+MAX_PENDING_PER_IP = 2  # ...and from one IP, so one host can't take every slot
+BUTTON_RATE = 10.0  # button downs per second, with a burst of BUTTON_BURST (ups are free)
 BUTTON_BURST = 10
 BUTTON_QUIET_SECONDS = 1.0  # a flood is logged again after this long without drops
 
@@ -84,7 +85,7 @@ class _AuthThrottle:
 
 
 class _ButtonLimiter:
-    """A token bucket for button messages: BUTTON_RATE per second, bursts of BUTTON_BURST.
+    """A token bucket for button downs: BUTTON_RATE per second, bursts of BUTTON_BURST.
     Logs once per flood, and again only after BUTTON_QUIET_SECONDS without drops."""
 
     def __init__(self, clock: Callable[[], float]) -> None:
@@ -118,38 +119,47 @@ def create_app(
     app = FastAPI(title="Desk Buddy", docs_url=None, redoc_url=None, openapi_url=None)
     expected = token.encode()
     throttle = _AuthThrottle(clock)
-    pending_hellos = 0
+    pending: dict[str, int] = {}  # connections waiting for their hello, per client IP
+
+    def failed(ip: str) -> None:
+        if throttle.failed(ip):
+            log.warning("Robot refused: %s blocked after repeated bad tokens", ip)
 
     @app.websocket("/robot")
     async def robot(ws: WebSocket) -> None:
-        nonlocal pending_hellos
         ip = ws.client.host if ws.client else "unknown"
         if throttle.blocked(ip):
             await ws.accept()
             await _close(ws, CLOSE_BAD_TOKEN)
             return
-        if pending_hellos >= MAX_PENDING_HELLOS:
+        if sum(pending.values()) >= MAX_PENDING_HELLOS or pending.get(ip, 0) >= (
+            MAX_PENDING_PER_IP
+        ):
             await ws.accept()
             await _close(ws, CLOSE_NO_HELLO)
-            log.warning("Robot refused: too many connections waiting for their hello")
+            log.warning("Robot refused: too many pending connections from %s", ip)
             return
         # Counted from before accept(), so a client that sees the handshake is counted.
-        pending_hellos += 1
+        pending[ip] = pending.get(ip, 0) + 1
         try:
             await ws.accept()
             hello = await _read_hello(ws, hello_timeout)
         finally:
-            pending_hellos -= 1
+            pending[ip] -= 1
+            if not pending[ip]:
+                del pending[ip]
         if hello is None:
+            # A missing or malformed hello counts as a failure too, so a host that keeps
+            # sockets open without authenticating gets blocked.
             await _close(ws, CLOSE_NO_HELLO)
             log.warning("Robot refused: no hello within %.0f s", hello_timeout)
+            failed(ip)
             return
         # Bytes, so a non-ASCII token can't make compare_digest raise TypeError.
         if not expected or not hmac.compare_digest(hello.data["token"].encode(), expected):
             await _close(ws, CLOSE_BAD_TOKEN)
             log.warning("Robot refused: bad token")
-            if throttle.failed(ip):
-                log.warning("Robot refused: %s blocked after repeated bad tokens", ip)
+            failed(ip)
             return
         throttle.succeeded(ip)
         link = RobotLink(ws, asyncio.get_running_loop(), hello.data["fw_version"])
@@ -223,9 +233,10 @@ async def _receive_loop(
             log.warning("Ignored bad message from robot: %s", exc)
             continue
         if msg.type == "button":
-            # Dropping a down while its up gets through is harmless: the orchestrator
-            # ignores an up when it isn't listening.
-            if not buttons.allow():
+            # Only downs are rate-limited. An up always gets through (and costs nothing),
+            # so a flood can never leave the mic recording or the orchestrator listening;
+            # an up whose down was dropped is ignored, as the orchestrator isn't listening.
+            if msg.data["action"] == "down" and not buttons.allow():
                 continue
             if msg.data["action"] == "down":
                 link.mic.begin()

@@ -189,7 +189,7 @@ def test_robot_link_on_with_token(monkeypatch, fakes, calls, caplog):
     assert TOKEN not in caplog.text
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", ""])
 def test_a_wildcard_host_logs_the_lan_address(monkeypatch, fakes, calls, caplog, host):
     caplog.set_level(logging.INFO)
     monkeypatch.setattr(
@@ -344,6 +344,13 @@ def key_setup(log):
     return switch, events, entry.key_handler(switch, events, delay=DELAY)
 
 
+async def until(condition, timeout=2.0):
+    """Poll until `condition()` is true, or fail after `timeout` seconds."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.005)
+
+
 def test_the_key_goes_straight_to_the_events_without_a_robot():
     async def run():
         switch = DeviceSwitch(Device(), Device())
@@ -377,7 +384,7 @@ def test_key_up_with_a_robot_ends_its_mic_after_the_delay():
         press("down")
         press("up")
         assert log == ["begin", "down"]  # nothing yet: in-flight audio may still arrive
-        await asyncio.sleep(DELAY * 3)
+        await until(lambda: "up" in log)
         assert drain(events) == ["down", "up"]
 
     asyncio.run(run())
@@ -393,10 +400,52 @@ def test_a_re_press_during_the_delay_releases_first():
         press("down")
         press("up")
         press("down")
-        await asyncio.sleep(DELAY * 3)  # the cancelled release must not fire again
+        assert log == ["begin", "down", "end", "up", "begin", "down"]
+        # Release again and wait for that release. Had the cancelled first release also
+        # fired (it was due earlier), an extra "up" would show up before this one.
+        press("up")
+        await until(lambda: log.count("up") >= 2)
 
     asyncio.run(run())
-    assert log == ["begin", "down", "end", "up", "begin", "down"]
+    assert log == ["begin", "down", "end", "up", "begin", "down", "end", "up"]
+
+
+def test_a_double_press_within_the_delay_drops_the_first_clip():
+    """Deliberate: a re-press within the delay ends and discards clip 1 (the robot mic's
+    begin() clears its buffer before the orchestrator takes it), so it counts as a tap."""
+    from desk_buddy.link.robot import RobotMic
+
+    class Robot:
+        def __init__(self):
+            self.mic = RobotMic()
+            self.player = None
+
+        def send(self, item):
+            pass
+
+    robot = Robot()
+
+    async def run():
+        switch = DeviceSwitch(Device(), Device())
+        events: asyncio.Queue[str] = asyncio.Queue()
+        on_key = entry.key_handler(switch, events, delay=DELAY)
+        switch.attach(robot)
+        on_key("down")
+        robot.mic.feed(b"\x01\x00" * 100)  # clip 1
+        on_key("up")
+        on_key("down")  # within the delay
+        # The orchestrator handles the queued events (it runs on the same loop).
+        assert drain(events) == ["down", "up", "down"]
+        first = robot.mic.stop()  # its stop() on that "up"
+        robot.mic.feed(b"\x02\x00" * 100)  # clip 2
+        on_key("up")
+        await until(lambda: not events.empty())
+        assert drain(events) == ["up"]
+        return first, robot.mic.stop()
+
+    first, second = asyncio.run(run())
+    assert first == b""  # clip 1 was cleared by the re-press: an ignored tap
+    assert second == b"\x02\x00" * 100
 
 
 def test_a_robot_detaching_during_the_delay_still_queues_up():
@@ -409,7 +458,7 @@ def test_a_robot_detaching_during_the_delay_still_queues_up():
         press("down")
         press("up")
         switch.detach(robot)
-        await asyncio.sleep(DELAY * 3)
+        await until(lambda: "up" in log)
 
     asyncio.run(run())
     assert log == ["begin", "down", "up"]  # no end() on the old robot
@@ -423,7 +472,7 @@ def test_the_key_with_a_robot_attached_mid_press():
         press("down")  # no robot yet: straight through
         switch.attach(KeyRobot(log))
         press("up")
-        await asyncio.sleep(DELAY * 3)
+        await until(lambda: "up" in log)
 
     asyncio.run(run())
     assert log == ["down", "end", "up"]

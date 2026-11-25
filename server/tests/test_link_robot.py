@@ -272,6 +272,23 @@ def test_a_full_outbox_closes_the_link_1011(caplog):
     assert len(warnings) == 1
 
 
+def test_close_does_not_hang_on_a_stalled_peer(monkeypatch):
+    import desk_buddy.link.robot as robot_module
+
+    monkeypatch.setattr(robot_module, "CLOSE_TIMEOUT", 0.1)
+
+    class StalledWebSocket(FakeWebSocket):
+        async def close(self, code=1000):
+            await asyncio.sleep(60)
+
+    async def run():
+        link = RobotLink(StalledWebSocket(), asyncio.get_running_loop())
+        await asyncio.wait_for(link.close(1011), 2)
+        return link
+
+    assert asyncio.run(run()).closed
+
+
 def test_a_send_to_a_disconnected_robot_is_not_a_warning(caplog):
     ws = FakeWebSocket(fail_after=0, error=WebSocketDisconnect(1001))
 

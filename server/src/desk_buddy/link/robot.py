@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 MAX_RECORD_SECONDS = 30.0
 MAX_SLEEP = 0.02  # so stop() takes effect within one chunk
+CLOSE_TIMEOUT = 2.0  # seconds close() waits for the socket to close
 MAX_OUTBOX = 128  # about 2.5 s of 20 ms audio chunks; more means the robot isn't reading
 
 Send = Callable[[Any], None]  # thread-safe; takes a protocol dict or PCM bytes
@@ -200,5 +201,5 @@ class RobotLink:
         self.closed = True
         self.player.close()
         self._outbox.put_nowait(None)
-        with contextlib.suppress(Exception):
-            await self._ws.close(code=code)
+        with contextlib.suppress(Exception):  # TimeoutError too: a stalled peer can't hold us
+            await asyncio.wait_for(self._ws.close(code=code), CLOSE_TIMEOUT)
