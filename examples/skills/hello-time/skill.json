@@ -1,0 +1,16 @@
+{
+  "name": "Hello time",
+  "spoken_names": ["hello time"],
+  "description": "Tells the current local time on this PC. Use it when the user asks for the time with hello time, or asks to run hello time.",
+  "inputs": {
+    "choices": {
+      "format": {
+        "options": ["short", "long"],
+        "description": "short: hours and minutes; long: the weekday, the date and the time with seconds.",
+        "default": "short"
+      }
+    }
+  },
+  "needs_yes": false,
+  "timeout_seconds": 10
+}

@@ -1,0 +1,13 @@
+{
+  "name": "Send note email",
+  "spoken_names": ["send note email", "note email"],
+  "description": "Emails a short message to the user's team. Use it only when the user asks to email or tell the team something, e.g. \"email the team that I'm running late\". The text is the message itself, in the user's own words.",
+  "inputs": {
+    "text": {
+      "description": "the message to send",
+      "max_length": 200,
+      "required": true
+    }
+  },
+  "needs_yes": true
+}
