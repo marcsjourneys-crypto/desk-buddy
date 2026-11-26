@@ -73,6 +73,21 @@ def _has_control(text: str) -> bool:
     return False
 
 
+# Characters that show or sound like nothing: private use (Co), unassigned (Cn), and the
+# Hangul fillers and blank Braille pattern.
+INVISIBLE = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
+def _unheard(text: str) -> bool:
+    """Characters a needs_yes skill can't take, because the read-back wouldn't say them."""
+    return any(ch in INVISIBLE or unicodedata.category(ch) in ("Co", "Cn") for ch in text)
+
+
+def _said(text: str) -> str:
+    """The text as the question reads it: without a trailing ?, . or !."""
+    return text.rstrip("?.!").rstrip()
+
+
 def text_limit(manifest: Manifest) -> int:
     """The most text the skill takes: its max_length, and for a needs_yes skill at most
     SPOKEN_TEXT, so the question reads all of it back."""
@@ -84,8 +99,7 @@ def text_limit(manifest: Manifest) -> int:
 def description_for(manifest: Manifest, text: str | None) -> str:
     """What the yes question names: "<name>" or "<name> with: <text>", without a
     trailing ?, . or ! (the question adds its own "?")."""
-    said = spoken_text(text) if text else ""
-    said = said.rstrip("?.!").rstrip() or said
+    said = _said(spoken_text(text)) if text else ""
     return f"{manifest.name} with: {said}" if said else manifest.name
 
 
@@ -276,7 +290,11 @@ class SkillTools:
         if _has_control(text):
             self._guard.refuse(name, args, CONTROL_TEXT)
         if manifest.needs_yes:
+            if _unheard(text):
+                self._guard.refuse(name, args, CONTROL_TEXT)
             text = spoken_text(text)  # exactly what the robot reads back
+            if text and not _said(text):  # only "?", "." or "!": nothing to read back
+                self._guard.refuse(name, args, MISSING_TEXT)
         if not text and manifest.text.required:
             self._guard.refuse(name, args, MISSING_TEXT)
         limit = text_limit(manifest)

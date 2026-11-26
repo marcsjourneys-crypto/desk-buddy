@@ -466,7 +466,7 @@ def test_the_spoken_text_is_one_line_and_the_question_has_one_question_mark():
     assert description_for(m, "\n") == "Send"
     assert description_for(m, "two\nlines") == "Send with: two lines"
     assert description_for(m, "are you free?") == "Send with: are you free"
-    assert description_for(m, "?!") == "Send with: ?!"
+    assert description_for(m, "?!") == "Send"
 
 
 def test_the_payload_is_exactly_the_text_read_back(rig):
@@ -827,7 +827,7 @@ def test_a_yes_while_a_confirmed_skill_still_runs_runs_nothing_new(rig):
         "(System note: Send note email is still running from the user's last yes; nothing "
         "new was run.)"
     )
-    assert rig.confirmations.answer("What's the time?", 4) is None
+    assert "still running" in rig.confirmations.answer("What's the time?", 4)
     gate.set()
     worker.join(5)
     assert len(rig.runner.calls) == 1 and "it ran Send note email" in notes[0]
@@ -958,3 +958,66 @@ def test_every_tool_kind_and_20_skills_stay_within_the_strict_limits(tmp_path):
     assert loose and all(n.startswith("skill_") for n in loose)
     with pytest.raises(ToolError):
         registry._tools[loose[0]].func(choice_a="zzz", choice_b="a", choice_c="a", choice_d="a")
+
+
+# --- Follow-ups: still running, unheard characters, punctuation-only text ---
+
+
+def test_any_words_while_a_confirmed_skill_runs_are_told_it_is_still_running(rig):
+    gate = threading.Event()
+    rig.runner.gate = gate
+    rig.call("skill_send_note_email", text=LATE)
+    asked(rig.confirmations)
+    worker = threading.Thread(target=lambda: rig.confirmations.answer("Yes.", 2))
+    worker.start()
+    for _ in range(500):
+        if rig.confirmations.running is not None:
+            break
+        threading.Event().wait(0.01)
+    still = (
+        "(System note: Send note email is still running from the user's last yes; nothing "
+        "new was run.)"
+    )
+    assert rig.confirmations.answer("What's the time?", 3) == still  # once per question
+    assert rig.confirmations.answer("Yes.", 4) == still
+    gate.set()
+    worker.join(5)
+    assert rig.confirmations.answer("What's the time?", 5) is None
+    assert len(rig.runner.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "char", ["", "\U000f0000", "͸", "ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀"]
+)  # private use, unassigned, Hangul fillers, blank Braille
+def test_a_needs_yes_skill_refuses_characters_the_read_back_cant_say(tmp_path, char):
+    rig = Rig(tmp_path)
+    rig.add(
+        "plain-note",
+        {
+            "name": "Plain note",
+            "spoken_names": ["plain note"],
+            "description": "d",
+            "inputs": {"text": {"description": "Words."}},
+        },
+    )
+    rig.build()
+    with pytest.raises(ToolError, match=CONTROL_TEXT):
+        rig.call("skill_send_note_email", text=f"late{char}ly")
+    assert rig.confirmations.pending is None and rig.outcomes() == ["refused"]
+    rig.call("skill_plain_note", text=f"late{char}ly")  # no read-back: allowed
+    assert rig.runner.calls == [("plain-note", {"text": f"late{char}ly"})]
+
+
+@pytest.mark.parametrize("text", ["?", " ?! ", "...", "!"])
+def test_punctuation_only_text_is_refused_as_empty(tmp_path, text):
+    rig = Rig(tmp_path)
+    rig.add(
+        "maybe-email",
+        {**EMAIL, "name": "Maybe email", "spoken_names": ["maybe email"]}
+        | {"inputs": {"text": {"description": "Words."}}},
+    )
+    rig.build()
+    for name in ("skill_send_note_email", "skill_maybe_email"):
+        with pytest.raises(ToolError, match="needs its text"):
+            rig.call(name, text=text)
+    assert rig.confirmations.pending is None and rig.runner.calls == []

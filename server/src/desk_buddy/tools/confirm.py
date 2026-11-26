@@ -242,7 +242,7 @@ class Confirmations:
     def _answer(self, action: PendingAction | None, text: str, question: int) -> str | None:
         if action is None:
             running = self.running
-            if running is not None and is_yes(text):
+            if running is not None:  # any words: Claude must not think it's done yet
                 return (
                     f"(System note: {running.title or running.description} is still "
                     f"{running.verb.doing} from the user's last yes; nothing new was "
