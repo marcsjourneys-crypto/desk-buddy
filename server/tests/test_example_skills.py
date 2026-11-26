@@ -466,6 +466,12 @@ def test_load_config_refuses_bad_values(brief, change):
         brief.load_config_dict({**config(), **change})
 
 
+def test_a_place_typed_as_the_key_is_refused_with_a_hint(brief):
+    # A real mistake from the user's check: {"Seattle": ""} instead of {"name": "Seattle"}.
+    with pytest.raises(ValueError, match=r"unknown key 'Seattle'.*\"name\""):
+        brief.load_config_dict({**config(), "place": {"Seattle": "", "latitude": None}})
+
+
 def test_clean_title_strips_tags_before_unescaping(brief):
     assert brief.clean_title("5 &lt; 6 and 7 &gt; 3, <b>bold</b>") == "5 < 6 and 7 > 3, bold"
 

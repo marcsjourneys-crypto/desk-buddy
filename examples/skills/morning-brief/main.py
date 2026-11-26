@@ -440,6 +440,12 @@ def load_config_dict(raw):
     place = raw.get("place") or {}
     if not isinstance(place, dict):
         raise ValueError('"place" must be an object')
+    unknown = sorted(set(place) - {"name", "latitude", "longitude"})
+    if unknown:
+        raise ValueError(
+            f'"place" has an unknown key {unknown[0]!r}: use "name" (e.g. "name": "Seattle"),'
+            ' "latitude" and "longitude"'
+        )
     name = place.get("name") or ""
     lat, lon = place.get("latitude"), place.get("longitude")
     if not isinstance(name, str):
