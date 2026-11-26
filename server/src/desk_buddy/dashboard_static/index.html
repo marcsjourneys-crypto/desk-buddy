@@ -123,6 +123,19 @@
         <button type="button" id="bookmarks-save">Save websites</button>
       </div>
     </div>
+    <div class="panel">
+      <h2>Skills</h2>
+      <p class="hint">Your own Python scripts, one folder each in the skills folder (SKILLS_DIR), with a skill.json and a main.py. Tick a skill to let CARL run it when computer control is on; a skill with a pyproject.toml gets its packages set up first. A skill marked “asks first” only runs after you say yes.</p>
+      <p class="hint privacy">A skill runs your own script on this PC. Only tick skills you wrote or trust. Editing a skill switches it off until you tick it again.</p>
+      <p id="skills-note" class="hint skills-note" hidden></p>
+      <div class="row">
+        <button type="button" id="skills-refresh" class="secondary">Refresh</button>
+        <span id="skills-count" class="count"></span>
+        <span id="skills-msg" class="msg"></span>
+      </div>
+      <ul id="skills" class="app-list" aria-label="Your skills"></ul>
+      <p id="skills-empty" class="empty">No skills found.</p>
+    </div>
   </section>
 </main>
 </body>

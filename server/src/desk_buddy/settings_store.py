@@ -262,6 +262,13 @@ class LiveSettings:
     def current(self) -> Settings:
         return self._current
 
+    @property
+    def latest(self) -> Settings:
+        """The newest settings, including a change still waiting for the next question
+        (for the dashboard, which shows what was just saved)."""
+        with self._lock:
+            return self._pending or self._current
+
     def on_now(self, hook: Hook) -> None:
         self._now_hooks.append(hook)
 

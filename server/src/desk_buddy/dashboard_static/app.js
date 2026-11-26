@@ -596,6 +596,7 @@
     } catch (error) {
       setBanner("apps", `Couldn't load the apps: ${error.message}`);
     }
+    if (skills.busy === null) loadSkills();
   }
 
   function setChosen(view) {
@@ -825,6 +826,146 @@
         errors.bookmarks || (error.data && error.data.errors ? "Not saved: see above." : error.message);
       message.className = "msg error";
     }
+  });
+
+  // ---------------------------------------------------------------- skills
+
+  // The user's own scripts in SKILLS_DIR. Names, descriptions, errors and a failed
+  // setup's output are shown as text only.
+  const SKILL_STATUS = {
+    available: "available",
+    approved: "on",
+    changed: "changed: re-approve",
+    invalid: "invalid",
+  };
+  const skills = { view: null, busy: null, results: new Map() };
+
+  async function loadSkills() {
+    const message = $("skills-msg");
+    try {
+      renderSkills(await api("GET", "/api/skills"));
+      if (message.classList.contains("error")) {
+        message.textContent = "";
+        message.className = "msg";
+      }
+    } catch (error) {
+      message.textContent = `Couldn't load the skills: ${error.message}`;
+      message.className = "msg error";
+    }
+  }
+
+  function renderSkills(view) {
+    skills.view = view;
+    setBanner("skills", view.error);
+    const note = $("skills-note");
+    note.textContent = !view.enabled
+      ? "Skills are off. Set SKILLS_DIR on the Settings tab."
+      : !view.uv_found
+        ? "uv wasn't found on PATH, so skills can't be set up or run. Install uv and restart CARL."
+        : "";
+    note.hidden = !note.textContent;
+    const list = $("skills");
+    list.replaceChildren(...view.skills.map((skill) => skillRow(skill, view)));
+    $("skills-empty").hidden = view.skills.length > 0 || !view.enabled;
+    const on = view.skills.filter((s) => s.status === "approved").length;
+    $("skills-count").textContent = view.enabled ? `${on} on / at most ${view.limits.approved}` : "";
+  }
+
+  function skillInputs(skill) {
+    const parts = skill.choices.map(
+      (c) => `${c.name}: ${c.options.join(" | ")}${c.default === null ? " (required)" : ` (default ${c.default})`}`,
+    );
+    if (skill.text) {
+      parts.push(
+        `text: ${skill.text.description} (up to ${skill.text.max_length} characters${skill.text.required ? ", required" : ""})`,
+      );
+    }
+    return parts.join(" · ");
+  }
+
+  function skillRow(skill, view) {
+    const canSetUp = view.enabled && view.uv_found && skill.status !== "invalid";
+    const busy = skills.busy === skill.slug;
+    const box = el("input", {
+      type: "checkbox",
+      checked: skill.status === "approved",
+      disabled: !canSetUp || skills.busy !== null,
+      "aria-label": `Let CARL run ${skill.name || skill.slug}`,
+    });
+    const result = skills.results.get(skill.slug) || { message: "", error: false, output: "" };
+    const message = el("span", {
+      class: result.error ? "msg error" : "msg",
+      text: busy ? "Setting up…" : result.message,
+    });
+    const output = el("pre", { class: "preview skill-output", text: result.output, hidden: !result.output });
+    box.addEventListener("change", () => (box.checked ? approveSkill(skill) : disableSkill(skill)));
+    const off = el("button", {
+      type: "button",
+      class: "secondary",
+      text: "Turn off",
+      hidden: skill.status !== "changed",
+      disabled: skills.busy !== null,
+    });
+    off.addEventListener("click", () => disableSkill(skill));
+    const head = el(
+      "div",
+      { class: "skill-head" },
+      box,
+      el("span", { class: "label", text: skill.name || skill.slug }),
+      el("code", { class: "slug", text: skill.slug }),
+      el("span", { class: `badge ${skill.status}`, text: SKILL_STATUS[skill.status] || skill.status }),
+      skill.needs_yes ? el("span", { class: "badge asks", text: "asks first" }) : null,
+      off,
+    );
+    const details = el("div", { class: "skill-details" });
+    if (skill.description) details.append(el("p", { class: "skill-description", text: skill.description }));
+    if (skill.spoken_names.length) {
+      details.append(el("p", { class: "skill-meta", text: `Spoken names: ${skill.spoken_names.join(", ")}` }));
+    }
+    const inputs = skillInputs(skill);
+    if (inputs) details.append(el("p", { class: "skill-meta", text: `Inputs: ${inputs}` }));
+    if (skill.errors.length) {
+      details.append(
+        el("ul", { class: "skill-errors" }, ...skill.errors.map((e) => el("li", { text: `${e.field}: ${e.reason}` }))),
+      );
+    }
+    return el("li", { class: `skill ${skill.status}` }, head, details, message, output);
+  }
+
+  async function approveSkill(skill) {
+    skills.busy = skill.slug;
+    skills.results.delete(skill.slug);
+    renderSkills(skills.view);
+    try {
+      const view = await api("POST", `/api/skills/${encodeURIComponent(skill.slug)}/approve`, {});
+      skills.results.set(skill.slug, { message: "on: CARL can use it from the next question", error: false, output: "" });
+      skills.busy = null;
+      renderSkills(view);
+    } catch (error) {
+      const output = (error.data && error.data.output) || "";
+      skills.results.set(skill.slug, { message: error.message, error: true, output });
+      skills.busy = null;
+      await loadSkills();
+    }
+  }
+
+  async function disableSkill(skill) {
+    skills.results.delete(skill.slug);
+    try {
+      const view = await api("POST", `/api/skills/${encodeURIComponent(skill.slug)}/disable`, {});
+      skills.results.set(skill.slug, { message: "turned off", error: false, output: "" });
+      renderSkills(view);
+    } catch (error) {
+      skills.results.set(skill.slug, { message: error.message, error: true, output: "" });
+      await loadSkills();
+    }
+  }
+
+  $("skills-refresh").addEventListener("click", () => {
+    skills.results.clear();
+    $("skills-msg").textContent = "";
+    $("skills-msg").className = "msg";
+    loadSkills();
   });
 
   // ---------------------------------------------------------------- start

@@ -658,6 +658,85 @@ def test_a_changed_list_rebuilds_the_tools_at_the_next_question_only(
     assert "open_website" not in registries[-1]
 
 
+def test_an_approval_change_rebuilds_the_tools_at_the_next_question_only(monkeypatch, tmp_path):
+    from desk_buddy.skills_store import SkillsStore
+
+    built = []
+    monkeypatch.setattr(entry, "create_chat", lambda *a, **k: built.append(1) or object())
+    store = SkillsStore(tmp_path / "skills.json")
+    brain = entry.Brain(Settings(anthropic_api_key="k"), bus=entry.EventBus(), skills=store)
+    assert brain.skills is store and brain.skill_runner is None
+    brain.before_question()
+    assert len(built) == 1  # nothing changed
+    store.approve("hello-time", "a" * 64)
+    assert len(built) == 1  # not mid-question
+    brain.before_question()
+    assert len(built) == 2
+    brain.before_question()
+    assert len(built) == 2  # once per change
+    store.disable("hello-time")
+    brain.before_question()
+    assert len(built) == 3
+
+
+def test_the_brain_and_the_dashboard_share_one_skills_store_and_runner(
+    monkeypatch, fakes, calls, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO)
+    uv = tmp_path / "bin" / "uv.exe"
+    uv.parent.mkdir()
+    uv.write_bytes(b"")
+    monkeypatch.setenv("PATH", str(uv.parent))
+    made = {}
+    real = entry.create_dashboard
+
+    def spy_dashboard(**kwargs):
+        made.update(kwargs)
+        return real(**kwargs)
+
+    brains = []
+
+    class SpyBrain(entry.Brain):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            brains.append(self)
+
+    monkeypatch.setattr(entry, "create_dashboard", spy_dashboard)
+    monkeypatch.setattr(entry, "Brain", SpyBrain)
+    monkeypatch.setattr(entry, "load_settings", lambda: Settings(anthropic_api_key="k"))
+    entry.main()
+    (brain,) = brains
+    assert made["skills"] is brain.skills is not None
+    assert made["skill_runner"] is brain.skill_runner is not None
+    assert brain.skill_runner.uv == str(uv)
+    assert brain.skill_runner.app_dir == tmp_path / "desk-buddy"  # never the real one
+    assert brain.skills.approvals_file == tmp_path / "desk-buddy" / "skills.json"
+
+
+def test_without_uv_skills_are_off_with_a_warning(monkeypatch, fakes, calls, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("PATH", "")
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    brains = []
+
+    class SpyBrain(entry.Brain):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            brains.append(self)
+
+    monkeypatch.setattr(entry, "Brain", SpyBrain)
+    monkeypatch.setattr(
+        entry,
+        "load_settings",
+        lambda: Settings(anthropic_api_key="k", skills_dir=str(skills_dir)),
+    )
+    entry.main()
+    assert brains[0].skill_runner is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings.count("Skills: off (uv.exe wasn't found on PATH)") == 1
+
+
 def orchestrator_kwargs(calls):
     (kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "orchestrator kwargs"]
     return kwargs

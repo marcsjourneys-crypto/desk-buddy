@@ -607,3 +607,51 @@ def test_real_uv_timeout_kills_the_tree(tmp_path):
 
 def test_default_python_is_carls_base_interpreter():
     assert skills.default_python() == os.path.join(sys.base_prefix, "python.exe")
+
+
+# --- uv sync on approval ---
+
+
+class FakeRun:
+    def __init__(self, code=0, out=b"", error=None):
+        self.code, self.out, self.error = code, out, error
+        self.calls = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.error is not None:
+            raise self.error
+        return subprocess.CompletedProcess(args, self.code, self.out, None)
+
+
+def test_run_sync_runs_uv_sync_in_the_folder_with_no_shell_or_window(tmp_path):
+    run = FakeRun()
+    env = clean_env("hello-time", tmp_path / "appdata", environ={"PATH": r"C:\x"})
+    result = skills.run_sync(UV, tmp_path, env, run=run)
+    assert result == skills.SyncResult(True)
+    [(args, kwargs)] = run.calls
+    assert args == [UV, "sync", "--no-config", "--no-editable"]
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["env"] == env
+    assert kwargs.get("shell", False) is False
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.STDOUT
+    assert kwargs["creationflags"] == NO_WINDOW
+    assert kwargs["timeout"] == skills.SYNC_TIMEOUT_S == 300
+
+
+def test_run_sync_failures_keep_only_the_tail_of_the_output(tmp_path):
+    out = ("a" * 2000 + "\r\nerror: no solution found ☕").encode()
+    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(code=2, out=out))
+    assert not result.ok
+    assert result.error == "The setup (uv sync) failed (exit 2)."
+    assert len(result.output) <= skills.SYNC_OUTPUT_LIMIT
+    assert result.output.endswith("error: no solution found ☕") and "\r" not in result.output
+
+    timed_out = subprocess.TimeoutExpired("uv", 300, output=b"Resolving...")
+    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(error=timed_out))
+    assert not result.ok and "took over 300 s" in result.error
+    assert result.output == "Resolving..."
+
+    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(error=FileNotFoundError("uv")))
+    assert result == skills.SyncResult(False, "uv couldn't be started (FileNotFoundError).")

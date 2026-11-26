@@ -102,3 +102,28 @@ def test_saving_one_about_field_keeps_unsaved_edits_in_the_others():
     assert JS.count("renderPersonality(await api(") >= 2
     assert "{ about: { [name]: input.value } }), name)" in JS
     assert "about.${name}`)}`), name)" in JS
+
+
+def test_the_apps_tab_has_a_skills_section_with_its_safety_line():
+    tab = HTML[HTML.index('id="tab-apps"') :]
+    assert tab.index("Websites") < tab.index("Skills")
+    for part in ('id="skills"', 'id="skills-refresh"', 'id="skills-note"', 'id="skills-empty"'):
+        assert part in tab
+    assert (
+        "A skill runs your own script on this PC. Only tick skills you wrote or trust. "
+        "Editing a skill switches it off until you tick it again."
+    ) in tab
+    for call in (
+        'api("GET", "/api/skills")',
+        "/approve`",
+        "/disable`",
+        "encodeURIComponent(skill.slug)",
+        "Set SKILLS_DIR on the Settings tab",
+        '"asks first"',
+        "Setting up…",
+        'changed: "changed: re-approve"',
+        '"pre"',  # a failed setup's output, as text
+        "${e.field}: ${e.reason}",
+    ):
+        assert call in JS
+    assert "loadSkills()" in JS[JS.index("async function loadApps") :]

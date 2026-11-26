@@ -74,6 +74,8 @@ STDERR_LOG_LIMIT = 500  # last characters of stderr logged on a failure
 REAP_TIMEOUT_S = 5.0
 KILL_TIMEOUT_S = 10.0
 SYNC_TIMEOUT_S = 300.0
+SYNC_OUTPUT_LIMIT = 1000  # last characters of a failed `uv sync` shown on the page
+LOCK_FILE = "uv.lock"
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
@@ -204,6 +206,58 @@ def _without_prefix(path: str, prefix: str) -> str:
                 continue
         kept.append(entry)
     return os.pathsep.join(kept)
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    """`uv sync` for a skill: whether it worked, and (on a failure) the last
+    SYNC_OUTPUT_LIMIT characters of its output for the page."""
+
+    ok: bool
+    error: str = ""
+    output: str = ""
+
+
+def run_sync(
+    uv: str,
+    folder: Path,
+    env: Mapping[str, str],
+    *,
+    run: Callable[..., Any] = subprocess.run,
+    timeout: float = SYNC_TIMEOUT_S,
+) -> SyncResult:
+    """`uv sync` (sync_command) in the skill's folder with its clean environment, no
+    window and no shell. Blocking: call it off the event loop, and only from the
+    dashboard (never during a turn). `run` is subprocess.run, or a fake in tests."""
+    try:
+        done = run(
+            sync_command(uv),
+            cwd=str(folder),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            creationflags=NO_WINDOW,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = _tail(exc.output)
+        return SyncResult(False, f"The setup (uv sync) took over {timeout:.0f} s.", output)
+    except OSError as exc:
+        return SyncResult(False, f"uv couldn't be started ({type(exc).__name__}).")
+    if done.returncode != 0:
+        return SyncResult(
+            False, f"The setup (uv sync) failed (exit {done.returncode}).", _tail(done.stdout)
+        )
+    return SyncResult(True)
+
+
+def _tail(data: bytes | str | None) -> str:
+    if not data:
+        return ""
+    text = data if isinstance(data, str) else _decode(data)
+    return text.replace("\r\n", "\n")[-SYNC_OUTPUT_LIMIT:].strip()
 
 
 def kill_tree(pid: int) -> None:

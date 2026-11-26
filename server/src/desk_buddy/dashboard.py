@@ -9,7 +9,8 @@ browser could still try to reach it, so:
   DNS rebinding from reading anything;
 - every change (PUT/DELETE) must carry our Origin and the X-CARL-Token header, a random
   per-process token put into the page we serve (CSRF);
-- listing Windows' apps (it starts PowerShell) needs the X-CARL-Token header too;
+- listing Windows' apps (it starts PowerShell) and listing the skills (it reads the
+  skill folders) need the X-CARL-Token header too;
 - the event WebSocket must carry our Origin;
 - anything else gets a 403.
 
@@ -33,12 +34,15 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import desk_buddy
+from desk_buddy import skills_setup
 from desk_buddy.apps_store import AppsStore, ListError
 from desk_buddy.config import ConfigError, Settings
 from desk_buddy.events import EventBus
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.server import RunningServer, ServerStartError, start_server
 from desk_buddy.settings_store import LiveSettings, SettingsStore
+from desk_buddy.skills_store import SkillsStore, check_slug, taken_names
+from desk_buddy.tools.skills import SkillRunner, run_sync
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +96,13 @@ def create_dashboard(
     status: Callable[[], dict[str, Any]],
     preview: Callable[[], str],
     apps: AppsStore | None = None,
+    skills: SkillsStore | None = None,
+    skill_runner: SkillRunner | None = None,
+    skill_sync: skills_setup.Sync = run_sync,
 ) -> FastAPI:
-    """The dashboard app. Without `apps`, there is no Apps API."""
+    """The dashboard app. Without `apps`, there is no Apps API; without `skills`, no
+    Skills API. `skill_runner` is None when uv wasn't found (skills can't be approved);
+    `skill_sync` runs `uv sync` (a fake in tests)."""
     app = FastAPI(title="CARL dashboard", docs_url=None, redoc_url=None, openapi_url=None)
     hosts = {f"{HOST}:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
@@ -106,6 +115,8 @@ def create_dashboard(
     @app.middleware("http")
     async def guard(request: Request, call_next: Callable[[Request], Any]) -> Response:
         if request.headers.get("host") not in hosts:
+            if request.method in CHANGES:
+                await _read_capped(request)  # read it, so the connection closes cleanly
             return _refused("Unknown host.")
         if request.method in CHANGES:
             try:
@@ -218,6 +229,22 @@ def create_dashboard(
 
     # --- apps and bookmarks ---
 
+    def other_names() -> frozenset[str]:
+        """The spoken names apps and bookmarks use: a skill can't take them."""
+        if apps is None:
+            return frozenset()
+        _, chosen, sites = apps.snapshot()
+        return taken_names(chosen, sites)
+
+    def skill_clashes(
+        items: Any, names_of: Callable[[Any], list[Any]], prefix: str
+    ) -> dict[str, str]:
+        """Errors for apps or bookmarks that take an approved skill's spoken name."""
+        if skills is None:
+            return {}
+        owners = skills_setup.approved_names(skills, live.latest.skills_dir)
+        return skills_setup.name_clashes(items, names_of, prefix, owners)
+
     if apps is not None:
 
         @app.get("/api/apps/available")
@@ -243,6 +270,9 @@ def create_dashboard(
             body = await _json_object(request)
             if isinstance(body, Response):
                 return body
+            clashes = await asyncio.to_thread(skill_clashes, body.get("apps"), _app_names, "apps")
+            if clashes:
+                return JSONResponse({"errors": clashes}, status_code=400)
             try:
                 errors = await asyncio.to_thread(apps.update_apps, body.get("apps"))
             except OSError as exc:
@@ -260,6 +290,11 @@ def create_dashboard(
             body = await _json_object(request)
             if isinstance(body, Response):
                 return body
+            clashes = await asyncio.to_thread(
+                skill_clashes, body.get("bookmarks"), _bookmark_names, "bookmarks"
+            )
+            if clashes:
+                return JSONResponse({"errors": clashes}, status_code=400)
             try:
                 errors = await asyncio.to_thread(apps.update_bookmarks, body.get("bookmarks"))
             except OSError as exc:
@@ -267,6 +302,76 @@ def create_dashboard(
             if errors:
                 return JSONResponse({"errors": errors}, status_code=400)
             return JSONResponse(apps.bookmarks_view())
+
+    # --- skills ---
+
+    if skills is not None:
+        approving = asyncio.Lock()  # one approval (and `uv sync`) at a time
+
+        def skills_view() -> dict[str, Any]:
+            return skills_setup.skills_view(
+                skills,
+                live.latest.skills_dir,
+                other_names(),
+                uv_found=skill_runner is not None,
+            )
+
+        @app.get("/api/skills")
+        async def get_skills(request: Request) -> Response:
+            # It reads the skill folders, so it needs the page's token like a change.
+            sent = request.headers.get("x-carl-token", "").encode()
+            origin = request.headers.get("origin")
+            if not hmac.compare_digest(sent, token.encode()) or (
+                origin is not None and origin not in origins
+            ):
+                return _refused("Only the dashboard page can list the skills.")
+            try:
+                view = await asyncio.to_thread(skills_view)
+            except OSError as exc:
+                return JSONResponse(
+                    {"error": f"Couldn't read the skills ({type(exc).__name__})."}, status_code=503
+                )
+            return JSONResponse(view)
+
+        @app.post("/api/skills/{slug}/approve")
+        async def approve_skill(slug: str, request: Request) -> Response:
+            await _read_capped(request)  # no body is needed; read it, so it closes cleanly
+            if approving.locked():
+                return JSONResponse(
+                    {"error": "Another skill is being set up; try again when it's done."},
+                    status_code=409,
+                )
+            async with approving:
+                # Off the event loop: `uv sync` can take minutes, and the voice loop
+                # must never wait for it.
+                try:
+                    outcome = await asyncio.to_thread(
+                        skills_setup.approve,
+                        skills,
+                        skill_runner,
+                        live.latest.skills_dir,
+                        slug,
+                        other_names(),
+                        sync=skill_sync,
+                    )
+                except OSError as exc:
+                    return _store_failed(exc)
+            if outcome.status == 200:
+                log.info("Dashboard: skill %s approved", slug)
+            return JSONResponse(outcome.body, status_code=outcome.status)
+
+        @app.post("/api/skills/{slug}/disable")
+        async def disable_skill(slug: str, request: Request) -> Response:
+            await _read_capped(request)
+            try:
+                check_slug(slug)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            try:
+                await asyncio.to_thread(skills.disable, slug)
+            except OSError as exc:
+                return _store_failed(exc)
+            return JSONResponse(await asyncio.to_thread(skills_view))
 
     # --- live events ---
 
@@ -313,6 +418,15 @@ async def start_dashboard(app: FastAPI, port: int) -> RunningServer | None:
         return None
     log.info("Dashboard: http://%s:%d", HOST, server.port)
     return server
+
+
+def _app_names(item: Any) -> list[Any]:
+    names = item.get("names")
+    return names if isinstance(names, list) else []
+
+
+def _bookmark_names(item: Any) -> list[Any]:
+    return [item.get("name")]
 
 
 def _refused(message: str) -> JSONResponse:

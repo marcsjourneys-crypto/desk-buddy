@@ -20,6 +20,7 @@ from desk_buddy.brain.personality import Personality
 from desk_buddy.config import (
     ConfigError,
     Settings,
+    app_data_dir,
     dashboard_settings_path,
     load_settings,
     read_dashboard_values,
@@ -33,6 +34,7 @@ from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.settings_store import LiveSettings, SettingsStore
+from desk_buddy.skills_store import SkillsStore
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
@@ -40,6 +42,7 @@ from desk_buddy.tools.confirm import Confirmations
 from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker, SessionDucker
 from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.media import MediaKeys
+from desk_buddy.tools.skills import SkillRunner, default_python, find_uv, python_ok
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tools.youtube import YouTubeClient, YouTubeTools
@@ -113,6 +116,8 @@ async def _run(settings: Settings) -> None:
         bus = EventBus()  # live events for the dashboard; never blocks the voice loop
         personality = PersonalityStore()  # edited on the dashboard; defaults otherwise
         apps = AppsStore()  # the apps and websites CARL may open, from the Apps tab
+        skills = SkillsStore()  # which of the user's skills are approved (Apps tab)
+        skill_runner = _skill_runner(settings)
         guard = ActionGuard(settings.computer_control, bus=bus)
         # Reads the Spotify login from disk: off the event loop.
         music = await asyncio.to_thread(_music_tools, settings, guard)
@@ -124,6 +129,8 @@ async def _run(settings: Settings) -> None:
             music=music,
             apps=apps,
             apps_ducker=_apps_ducker(settings),
+            skills=skills,
+            skill_runner=skill_runner,
         )
         stack.callback(brain.close)  # runs after the farewell, which restores the music
         conversation = Conversation(settings.history_turns)
@@ -212,6 +219,8 @@ async def _run(settings: Settings) -> None:
             ),
             preview=lambda: prompt_for(live.current, brain.tools, personality.current()),
             apps=apps,
+            skills=skills,
+            skill_runner=skill_runner,
         )
         dashboard = await start_dashboard(dashboard_app, settings.dashboard_port)
         if dashboard is not None:  # never fatal: CARL runs without it
@@ -261,7 +270,8 @@ class Brain:
     - Making them later (computer control turned on from the dashboard) reads the
       Spotify login on a worker thread; they join at the next question.
     - The app and website tools are made from a snapshot of the Apps tab's lists at each
-      rebuild; a saved change to the lists rebuilds at the next question.
+      rebuild; a saved change to the lists rebuilds at the next question. So does a skill
+      approved or turned off on the dashboard (the skills store's version).
     """
 
     def __init__(
@@ -274,6 +284,8 @@ class Brain:
         music: tuple[MusicTools | None, MusicDucker | None] = (None, None),
         apps: AppsStore | None = None,
         apps_ducker: SessionDucker | None = None,
+        skills: SkillsStore | None = None,
+        skill_runner: SkillRunner | None = None,
     ) -> None:
         """apps_ducker: lowers other apps while CARL is busy (MUSIC_DUCK only; it needs no
         computer control). Closed with the brain."""
@@ -285,6 +297,11 @@ class Brain:
         self.search_results = SearchResults()
         self._app_store = apps
         self._apps_version: int | None = None  # the lists' version the tools were built from
+        # The approved skills and the runner (None without uv): the same instances the
+        # dashboard uses.
+        self.skills = skills
+        self.skill_runner = skill_runner
+        self._skills_version: int | None = None  # the approvals the tools were built from
         self._bus = bus  # each web search is shown on the dashboard
         self._personality = personality
         self._settings = settings
@@ -330,7 +347,8 @@ class Brain:
         lists_changed = (
             self._app_store is not None and self._app_store.snapshot()[0] != self._apps_version
         )
-        if self._rebuild_due or lists_changed:
+        skills_changed = self.skills is not None and self.skills.version != self._skills_version
+        if self._rebuild_due or lists_changed or skills_changed:
             self._rebuild_due = False
             self._rebuild()
 
@@ -437,6 +455,8 @@ class Brain:
 
     def _rebuild(self) -> None:
         settings = self._settings
+        if self.skills is not None:
+            self._skills_version = self.skills.version
         tools = build_tools(
             settings,
             music=self.music,
@@ -490,6 +510,22 @@ def _music_tools(
         return MusicTools(control, guard, ducker=ducker), ducker
     log.info("Music tools: off (%s)", reason)
     return None, None
+
+
+def _skill_runner(settings: Settings) -> SkillRunner | None:
+    """The runner for the user's skills, with uv's full path found once now. Without uv,
+    skills are off: a warning now, and the dashboard says so."""
+    uv = find_uv()
+    if uv is None:
+        if settings.skills_dir:
+            log.warning("Skills: off (uv.exe wasn't found on PATH)")
+        else:
+            log.info("Skills: uv.exe wasn't found on PATH")
+        return None
+    python = default_python()
+    if not python_ok(python):
+        log.warning("Skills: Python wasn't found at %s; skills without a project won't run", python)
+    return SkillRunner(uv, app_data_dir())
 
 
 def _apps_ducker(settings: Settings) -> SessionDucker | None:
