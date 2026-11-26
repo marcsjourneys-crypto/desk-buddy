@@ -1,6 +1,6 @@
 # Robot ↔ server protocol
 
-Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-24). The server code is in `server/src/desk_buddy/server.py` and `server/src/desk_buddy/link/`. Two clients follow it:
+Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-24), and for the wake word (2026-11-26). The server code is in `server/src/desk_buddy/server.py` and `server/src/desk_buddy/link/`. Two clients follow it:
 - the robot firmware (`firmware/src/net.cpp`);
 - the fake robot (`python -m desk_buddy.fake_robot`), a reference client in Python.
 
@@ -11,7 +11,8 @@ Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-2
 - **Binary frames** are audio: 16 kHz, 16-bit signed little-endian mono PCM.
 - **The server is the source of truth.** It decides the state; the robot only shows it, sends audio (and button presses, if it has a button), and plays what it is sent.
 - **One robot at a time.** While a robot is connected, the server uses the robot's mic and speaker. When it disconnects, the PC mic and speaker take over again. Conversation memory survives reconnects.
-- **The talk button is the PC key** (Right Ctrl by default, `PTT_KEY`), held in the CARL window (the server's). It drives a connected robot as well as the PC. A robot button, touch pad or wake word is optional and can send `button` later.
+- **The talk button is the PC key** (Right Ctrl by default, `PTT_KEY`), held in the CARL window (the server's). It drives a connected robot as well as the PC. A robot button or touch pad is optional and can send `button` later.
+- **The wake word** ("Hey CARL") is detected on the robot, which sends `wake`; the server decides whether to listen. The key always wins over a wake.
 
 ## Connecting
 
@@ -22,9 +23,10 @@ Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-2
    ```
    - `token`: the same value as `ROBOT_TOKEN` in the server's `.env` (at least 16 characters, at most 256). It is compared in constant time and never logged. The firmware also refuses tokens with spaces, quotes or backslashes.
    - `fw_version`: optional, any string. The server keeps the first 64 characters for its log.
-3. The server replies `welcome`, then the current `state`:
+3. The server replies `welcome`, then (only if the server has wake word settings) `wake_config`, then the current `state`:
    ```json
    {"type": "welcome"}
+   {"type": "wake_config", "enabled": true, "threshold": 0.97}
    {"type": "state", "name": "idle"}
    ```
 4. Messages then flow both ways until either side closes.
@@ -54,13 +56,23 @@ If `ROBOT_TOKEN` is blank, the server doesn't listen at all and logs `Robot link
 | `button` | `{"type": "button", "action": "down"}` / `{"type": "button", "action": "up"}` | **Optional** push-to-talk on the robot (the M6 robot has none; the PC key does this). Down starts a recording; up ends it and starts the turn. Down while CARL is thinking or speaking interrupts it. Rate-limited (see [Hardening](#hardening)). |
 | `touch` | `{"type": "touch"}` | The head touch pad. Logged only (not used yet). |
 | `stats` | `{"type": "stats", "data": {"rssi": -58, "heap": 123456}}` | Free-form diagnostics. `data` must be an object; it is logged at debug level. |
-| `wake` | `{"type": "wake"}` | **Reserved** for an on-robot wake word (later). Accepted and logged, not used yet. |
+| `wake` | `{"type": "wake", "score": 0.99}` | The robot heard the wake word. `score` (required) is the detector's averaged probability, a number from 0 to 1. Logged as `Robot: wake (score 0.99)`. Rate-limited to one every 2 s (see [Hardening](#hardening)). See [Wake word](#wake-word). |
 
 **Audio up:** binary frames of 20 ms (640 bytes) of PCM.
 - **The robot streams while the state is `listening`,** and stops when the state changes. No extra message is needed: the server's state says when to listen. The firmware flushes stale mic audio and removes the mic's DC offset before streaming.
-- **The server keeps frames only while a recording is open:** from the PC key's press (or `button down`) to its release. Frames at other times are dropped silently, as are frames with an odd number of bytes.
+- **The server keeps frames only while a recording is open:** from the PC key's press (or `button down`) to its release, or from an accepted `wake` to the end of the question. Frames at other times are dropped silently, as are frames with an odd number of bytes.
 - **The PC key keeps the robot's mic open 250 ms after release,** so the last frames still in flight over Wi-Fi arrive before the turn starts. Pressing again within those 250 ms ends the first clip at once (it is then too short and is dropped as a tap, by design).
 - A recording is capped at 30 s; audio after that is dropped and the turn uses the first 30 s. A press shorter than 0.3 s is ignored as a tap.
+
+### Wake word
+
+The robot runs the detector only while the state is `idle`. On a detection:
+
+1. The robot's eyes open at once, and it sends `{"type": "wake", "score": 0.99}`. It keeps buffering its mic from the moment of detection (a pre-roll of up to 1.5 s, in PSRAM).
+2. If the server accepts the wake (CARL is idle), it sends `state listening`. The robot then streams **the buffered audio after the phrase first**, then live audio, as 20 ms binary frames as usual. Nothing is sent before `state listening`, and the phrase itself is never sent.
+3. The server ends the question itself when the speech ends (about 0.8 s of silence), after 4 s with no speech (a false wake: back to `idle`), or after 15 s at most. It sends `state thinking` (or `idle`) and the robot stops streaming, exactly as after a key release.
+
+A `wake` while CARL isn't idle is ignored, and the robot drops its pre-roll if `state listening` doesn't come. Pressing the PC key during a wake recording takes over as push-to-talk. No audio leaves the robot until the phrase is heard or the key is pressed.
 
 ## Server → robot
 
@@ -75,6 +87,7 @@ If `ROBOT_TOKEN` is blank, the server doesn't listen at all and logs `Robot link
 | `look` | `{"type": "look", "pan": 20, "tilt": -5, "speed": 0.5}` | **Reserved** for the servos (not wired yet). |
 | `led` | `{"type": "led", "mode": "pulse"}` | **Reserved** for the antenna LED (not wired yet). |
 | `volume` | `{"type": "volume", "level": 70}` | **Reserved.** |
+| `wake_config` | `{"type": "wake_config", "enabled": true, "threshold": 0.97}` | The wake word on or off, and its detection threshold (a number from 0.5 to 0.99). Sent right after `welcome` when the server has these settings, and again whenever they change. It overrides the robot's own NVS settings until the robot restarts; without it the robot uses its NVS settings. |
 
 The robot should ignore any message type it doesn't know, so new ones can be added without breaking old firmware.
 
@@ -110,6 +123,7 @@ Added in M6, when the server moved onto the LAN. All of it is in memory only and
 
 - **Bad-token throttle, per client IP:** 5 failures within 60 s block that IP for 60 s. A missing or malformed hello (a timeout included) counts as a failure too. A blocked IP is accepted and closed with `4001` at once, before any hello is read, and the block is logged once. A successful hello clears that IP's failures.
 - **Half-open cap:** at most 4 connections may wait for their hello at once, and at most 2 from one IP. Extra connections are closed with `4002` at once.
+- **Wake limit:** one `wake` every 2 s per connection; extra ones are dropped and logged once per burst (again only after 2 s without drops).
 - **Button flood limit:** 10 `button down` messages a second, with a burst of 10; extra downs are dropped and logged once per burst. `up` is never limited: an `up` without its `down` is harmless, because the orchestrator ignores an `up` when it isn't listening.
 - **Send-queue cap:** 128 queued items. On overflow the server logs a warning once, closes the link with `1011` and drops further sends; the robot reconnects.
 

@@ -228,11 +228,13 @@ def test_handle_frame(caplog):
     handle_frame({"type": "state", "name": "thinking"}, playback)
     handle_frame({"type": "emotion", "name": "happy"}, playback)
     handle_frame({"type": "audio_stop"}, playback)
+    handle_frame({"type": "wake_config", "enabled": True, "threshold": 0.97}, playback)
     handle_frame({"type": "something_new"}, playback)  # ignored
     assert playback.fed == [b"\x01\x00"]
     assert playback.stops == 1
     assert "Robot state: thinking" in caplog.text
     assert "Robot emotion: happy" in caplog.text
+    assert "Wake word: True, threshold 0.97" in caplog.text
 
 
 def test_main_without_token_is_a_clear_error(monkeypatch, capsys):
@@ -365,3 +367,63 @@ class NullDevice:
 
     def play(self, pcm, token):
         pass
+
+
+def test_wake_and_stream_sends_the_audio_once_carl_listens():
+    """The robot's side of a wake: `wake`, then the audio after `state listening`. The
+    hook stands in for S3's loop: it begins the recording and sets the state."""
+
+    async def run():
+        switch = DeviceSwitch(object(), object())
+        events: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_wake(score):
+            switch.robot.mic.begin()
+            switch.robot.send({"type": "state", "name": State.LISTENING.value})
+            events.put_nowait(f"wake {score}")
+
+        app = create_app(
+            token=TOKEN,
+            switch=switch,
+            events=events,
+            current_state=lambda: "idle",
+            on_wake=on_wake,
+        )
+        server = await start_server(app, "127.0.0.1", 0)
+        try:
+            robot = FakeRobot(f"ws://127.0.0.1:{server.port}/robot", TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            pcm = b"\x05\x00" * 1600  # 100 ms
+            frames = await robot.wake_and_stream(pcm, score=0.98)
+            assert frames == [{"type": "state", "name": "listening"}]
+            assert await asyncio.wait_for(events.get(), 2) == "reset"
+            assert await asyncio.wait_for(events.get(), 2) == "wake 0.98"
+            await async_wait_until(lambda: switch.robot.mic._buffer._size >= len(pcm))
+            switch.robot.mic.end()
+            assert switch.robot.mic.stop() == pcm
+            await robot.close()
+        finally:
+            await asyncio.wait_for(server.stop(), 5)
+
+    asyncio.run(run())
+
+
+def test_wake_and_stream_times_out_if_carl_never_listens():
+    async def run():
+        switch = DeviceSwitch(object(), object())
+        app = create_app(
+            token=TOKEN, switch=switch, events=asyncio.Queue(), current_state=lambda: "idle"
+        )
+        server = await start_server(app, "127.0.0.1", 0)
+        try:
+            robot = FakeRobot(f"ws://127.0.0.1:{server.port}/robot", TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            with pytest.raises(TimeoutError):
+                await robot.wake_and_stream(b"\x00\x00" * 320, timeout=0.3)
+            await robot.close()
+        finally:
+            await asyncio.wait_for(server.stop(), 5)
+
+    asyncio.run(run())

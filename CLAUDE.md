@@ -161,8 +161,8 @@ Anyone (or any TV) near the robot can talk to it.
 
 - One WebSocket at `/robot`. Text frames = JSON control messages. Binary frames = audio, 16 kHz 16-bit mono PCM: 20 ms frames up (mic), **100 ms frames down** (speech; the ESP32's lwIP can't keep up with 20 ms segments).
 - The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token (or IP blocked), 4002 no valid hello, 4003 replaced by a newer connection (the newest wins), 1011 send-queue overflow. The firmware can't see close codes (library limit), so it infers a refusal from closes < 1 s after hello.
-- Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`; `wake` reserved.
-- Server → robot: `welcome`, `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
+- Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`, `wake {score}` (0–1, at most one per 2 s; the robot then streams its post-phrase pre-roll once the state is `listening`).
+- Server → robot: `welcome`, `wake_config {enabled, threshold}` (0.5–0.99; right after `welcome` when the server has settings), `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
 - While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the CARL window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
 - Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a 128-item send queue.
 - Localhost by default (`SERVER_HOST`, `SERVER_PORT`). For the robot: `SERVER_HOST=0.0.0.0` plus a Private-only firewall rule (exact command in `docs/protocol.md`).

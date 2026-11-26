@@ -39,6 +39,9 @@ MAX_PENDING_PER_IP = 2  # ...and from one IP, so one host can't take every slot
 BUTTON_RATE = 10.0  # button downs per second, with a burst of BUTTON_BURST (ups are free)
 BUTTON_BURST = 10
 BUTTON_QUIET_SECONDS = 1.0  # a flood is logged again after this long without drops
+WAKE_INTERVAL = 2.0  # at most one wake per this many seconds, per connection
+
+WakeConfig = tuple[bool, float]  # (enabled, threshold) for the robot's wake word
 
 
 class ServerStartError(Exception):
@@ -86,6 +89,26 @@ class _AuthThrottle:
                 del self._failures[ip]
 
 
+class _WakeLimiter:
+    """At most one wake every WAKE_INTERVAL seconds. Logs once per burst of drops, and
+    again only after WAKE_INTERVAL without drops."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._last_allowed: float | None = None
+        self._last_drop: float | None = None
+
+    def allow(self) -> bool:
+        now = self._clock()
+        if self._last_allowed is None or now - self._last_allowed >= WAKE_INTERVAL:
+            self._last_allowed = now
+            return True
+        if self._last_drop is None or now - self._last_drop >= WAKE_INTERVAL:
+            log.warning("Robot wake flood: dropping")
+        self._last_drop = now
+        return False
+
+
 class _ButtonLimiter:
     """A token bucket for button downs: BUTTON_RATE per second, bursts of BUTTON_BURST.
     Logs once per flood, and again only after BUTTON_QUIET_SECONDS without drops."""
@@ -119,9 +142,16 @@ def create_app(
     clock: Callable[[], float] = time.monotonic,
     on_connect: Callable[[], None] = lambda: None,
     bus: Any = NULL_BUS,
+    on_wake: Callable[[float], None] = lambda score: None,
+    wake_config: Callable[[], WakeConfig | None] = lambda: None,
 ) -> FastAPI:
     """on_connect runs on the event loop each time a robot is attached (CARL greets it).
-    Connects and disconnects are published on `bus` for the dashboard."""
+    Connects and disconnects are published on `bus` for the dashboard.
+
+    on_wake(score) runs on the event loop for each `wake` that passes the rate limit, in
+    order with the button events it puts on `events` (the loop subscribes here).
+    wake_config() is asked at each connect: (enabled, threshold) is sent to the robot right
+    after `welcome`; None sends nothing, so the robot keeps its own NVS settings."""
     app = FastAPI(title="Desk Buddy", docs_url=None, redoc_url=None, openapi_url=None)
     expected = token.encode()
     throttle = _AuthThrottle(clock)
@@ -172,6 +202,7 @@ def create_app(
         # Queue welcome and state before attaching, so no state or emotion from the
         # orchestrator can reach the robot ahead of them.
         link.send(protocol.welcome())
+        _send_wake_config(link, wake_config)
         link.send(protocol.state(current_state()))
         sender = asyncio.create_task(link.run_sender())
         old = switch.attach(link)
@@ -186,7 +217,9 @@ def create_app(
                 await old.close(CLOSE_REPLACED)
             log.info("Robot connected (firmware %r)", link.fw_version or "unknown")
             bus.publish("robot", connected=True, fw_version=link.fw_version)
-            await _receive_loop(ws, link, events, _ButtonLimiter(clock))
+            await _receive_loop(
+                ws, link, events, _ButtonLimiter(clock), _WakeLimiter(clock), on_wake
+            )
         finally:
             try:
                 await link.close()
@@ -199,6 +232,16 @@ def create_app(
                     events.put_nowait("reset")
 
     return app
+
+
+def _send_wake_config(link: RobotLink, wake_config: Callable[[], WakeConfig | None]) -> None:
+    """Never fatal: a broken hook or a bad value only skips the message."""
+    try:
+        config = wake_config()
+        if config is not None:
+            link.send_wake_config(*config)
+    except Exception:
+        log.exception("Couldn't send the wake word settings to the robot")
 
 
 async def _close(ws: WebSocket, code: int) -> None:
@@ -227,8 +270,11 @@ async def _receive_loop(
     link: RobotLink,
     events: asyncio.Queue[str],
     buttons: _ButtonLimiter | None = None,
+    wakes: _WakeLimiter | None = None,
+    on_wake: Callable[[float], None] = lambda score: None,
 ) -> None:
     buttons = buttons or _ButtonLimiter(time.monotonic)
+    wakes = wakes or _WakeLimiter(time.monotonic)
     while not link.closed:
         try:
             frame = await ws.receive()
@@ -255,6 +301,14 @@ async def _receive_loop(
             else:
                 link.mic.end()
             events.put_nowait(msg.data["action"])
+        elif msg.type == "wake":
+            if not wakes.allow():
+                continue
+            log.info("Robot: wake (score %.2f)", msg.data["score"])
+            try:
+                on_wake(msg.data["score"])
+            except Exception:
+                log.exception("Robot wake hook failed")
         elif msg.type == "stats":
             log.debug("Robot stats: %s", msg.data["data"])
         elif msg.type == "hello":

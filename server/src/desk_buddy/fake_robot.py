@@ -59,6 +59,30 @@ class FakeRobot:
     async def release(self) -> None:
         await self.send({"type": "button", "action": "up"})
 
+    async def wake(self, score: float = 0.99) -> None:
+        """Say the wake word was heard (the real robot does this on its own)."""
+        await self.send({"type": "wake", "score": score})
+
+    async def wake_and_stream(
+        self, pcm: bytes, score: float = 0.99, timeout: float = 5.0
+    ) -> list[Any]:
+        """Like the real robot after "Hey CARL": send `wake`, wait for `state listening`,
+        then stream `pcm` (the audio after the phrase) in 20 ms frames. Returns the frames
+        received up to and including that state. Raises TimeoutError if CARL doesn't start
+        listening within `timeout` seconds, or ConnectionError if it closes first."""
+        await self.wake(score)
+        frames: list[Any] = []
+        async with asyncio.timeout(timeout):
+            while True:
+                frame = await self.recv(timeout=None)
+                if frame is None:
+                    raise ConnectionError(f"closed ({self.close_code}) before listening")
+                frames.append(frame)
+                if frame == {"type": "state", "name": "listening"}:
+                    break
+        await self.send_audio(pcm)
+        return frames
+
     async def send_audio(self, pcm: bytes) -> None:
         for i in range(0, len(pcm), CHUNK_BYTES):
             await self.ws.send(pcm[i : i + CHUNK_BYTES])
@@ -134,6 +158,8 @@ def handle_frame(frame: dict[str, Any] | bytes, playback: _Playback) -> None:
         playback.stop()
     elif kind == "welcome":
         log.info("CARL says welcome")
+    elif kind == "wake_config":
+        log.info("Wake word: %s, threshold %s", frame.get("enabled"), frame.get("threshold"))
     else:
         log.debug("Frame %s", kind)
 

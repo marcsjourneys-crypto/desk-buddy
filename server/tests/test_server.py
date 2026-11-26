@@ -817,3 +817,186 @@ def test_a_new_robot_mid_reply_closes_the_old_one_and_goes_idle():
     started = time.monotonic()
     asyncio.run(run())
     assert time.monotonic() - started < 5  # the old link's 10 s play stopped
+
+
+@contextlib.asynccontextmanager
+async def running_with(clock=time.monotonic, **hooks):
+    """Like running(), with extra create_app hooks (on_wake, wake_config)."""
+    switch = DeviceSwitch(NullMic(), NullPlayer())
+    events: asyncio.Queue[str] = asyncio.Queue()
+    app = create_app(
+        token=TOKEN,
+        switch=switch,
+        events=events,
+        current_state=lambda: "idle",
+        clock=clock,
+        **hooks,
+    )
+    server = await start_server(app, "127.0.0.1", 0)
+    try:
+        yield f"ws://127.0.0.1:{server.port}/robot", switch, events
+    finally:
+        await asyncio.wait_for(server.stop(), 5)
+
+
+def wake_hook(events):
+    """What S3's subscription will look like: the hook runs on the event loop."""
+    return lambda score: events.put_nowait(f"wake {score}")
+
+
+def test_a_wake_reaches_the_hook_in_order_with_the_buttons(caplog):
+    caplog.set_level(logging.INFO)
+
+    async def run():
+        events: asyncio.Queue[str] = asyncio.Queue()
+        async with running_with(on_wake=wake_hook(events)) as (url, switch, link_events):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            assert await next_event(link_events) == "reset"
+            await robot.press()
+            await robot.wake(0.97)
+            await robot.release()
+            assert await next_event(link_events) == "down"
+            assert await next_event(events) == "wake 0.97"
+            assert await next_event(link_events) == "up"
+            await robot.close()
+
+    asyncio.run(run())
+    assert "Robot: wake (score 0.97)" in caplog.messages
+
+
+def test_a_wake_without_a_hook_is_only_logged(caplog):
+    caplog.set_level(logging.INFO)
+
+    async def run():
+        async with running() as (url, switch, events):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            assert await next_event(events) == "reset"
+            await robot.wake(1)
+            await poll(lambda: "Robot: wake (score 1.00)" in caplog.messages)
+            assert events.empty()  # nothing reaches the orchestrator yet
+            assert not switch.robot.mic._recording  # the loop decides when to record
+            await robot.close()
+
+    asyncio.run(run())
+
+
+def test_a_bad_wake_is_ignored_and_a_failing_hook_is_not_fatal(caplog):
+    def broken(score):
+        raise RuntimeError("boom")
+
+    async def run():
+        async with running_with(on_wake=broken) as (url, switch, events):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            assert await next_event(events) == "reset"
+            await robot.send({"type": "wake", "score": 7})
+            await robot.wake()
+            await robot.press()
+            assert await next_event(events) == "down"  # the link is still up
+            await robot.close()
+
+    asyncio.run(run())
+    assert any("wake score" in m for m in caplog.messages)
+    assert "Robot wake hook failed" in caplog.messages
+
+
+def test_wakes_are_limited_to_one_every_two_seconds_and_logged_once(caplog):
+    caplog.set_level(logging.INFO)
+    clock = FakeClock()
+
+    async def run():
+        events: asyncio.Queue[str] = asyncio.Queue()
+        async with running_with(clock=clock, on_wake=wake_hook(events)) as (url, switch, _):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            for score in (0.91, 0.92, 0.93):  # the 2nd and 3rd are dropped
+                await robot.wake(score)
+            await robot.press()  # a marker: every wake before it was handled
+            await poll(lambda: switch.robot.mic._recording)
+            clock.now += server_module.WAKE_INTERVAL
+            await robot.wake(0.94)
+            await robot.press()
+            await poll(lambda: events.qsize() >= 2)
+            got = [events.get_nowait() for _ in range(events.qsize())]
+            await robot.close()
+            return got
+
+    assert asyncio.run(run()) == ["wake 0.91", "wake 0.94"]
+    assert caplog.messages.count("Robot wake flood: dropping") == 1
+
+
+def test_the_wake_limit_logs_again_after_a_quiet_spell(caplog):
+    from desk_buddy.server import _WakeLimiter
+
+    clock = FakeClock()
+    limiter = _WakeLimiter(clock)
+    assert limiter.allow()
+    clock.now += 0.5
+    assert not limiter.allow()
+    clock.now += 1.4  # 1.9 s after the first: still too soon
+    assert not limiter.allow()
+    clock.now += 0.1
+    assert limiter.allow()
+    clock.now += 0.1
+    assert not limiter.allow()  # a new burst, but the last drop was only 0.2 s ago
+    clock.now += 1.95
+    assert limiter.allow()
+    clock.now += 0.1
+    assert not limiter.allow()  # 2.05 s after the last drop: logged again
+    assert caplog.messages.count("Robot wake flood: dropping") == 2
+
+
+def test_wake_config_is_sent_right_after_welcome():
+    async def run():
+        async with running_with(wake_config=lambda: (True, 0.97)) as (url, _, _):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            assert await robot.recv() == {"type": "welcome"}
+            assert await robot.recv() == {
+                "type": "wake_config",
+                "enabled": True,
+                "threshold": 0.97,
+            }
+            assert await robot.recv() == {"type": "state", "name": "idle"}
+            await robot.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("config", [lambda: (True, 1.5), lambda: 1 / 0])
+def test_a_bad_wake_config_is_skipped_not_fatal(config, caplog):
+    async def run():
+        async with running_with(wake_config=config) as (url, _, _):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            assert await robot.recv() == {"type": "welcome"}
+            assert await robot.recv() == {"type": "state", "name": "idle"}
+            await robot.close()
+
+    asyncio.run(run())
+    assert "Couldn't send the wake word settings to the robot" in caplog.messages
+
+
+def test_wake_config_can_be_sent_to_a_connected_robot():
+    async def run():
+        async with running() as (url, switch, _):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            switch.robot.send_wake_config(False, 0.9)
+            assert await robot.recv() == {
+                "type": "wake_config",
+                "enabled": False,
+                "threshold": 0.9,
+            }
+            with pytest.raises(ValueError):
+                switch.robot.send_wake_config(True, 0.2)
+            await robot.close()
+
+    asyncio.run(run())

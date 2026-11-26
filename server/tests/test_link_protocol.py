@@ -30,6 +30,15 @@ def test_hello_fw_version_is_optional():
         '{"type": "button", "action": "sideways"}',
         '{"type": "button"}',
         '{"type": "stats", "data": 5}',
+        '{"type": "wake"}',
+        '{"type": "wake", "score": "0.9"}',
+        '{"type": "wake", "score": true}',
+        '{"type": "wake", "score": null}',
+        '{"type": "wake", "score": -0.01}',
+        '{"type": "wake", "score": 1.01}',
+        '{"type": "wake", "score": NaN}',
+        '{"type": "wake", "score": Infinity}',
+        '{"type": "wake", "score": 1%s}' % ("0" * 400),
     ],
 )
 def test_bad_messages_raise(text):
@@ -52,7 +61,7 @@ def test_button(action):
     assert parse(f'{{"type": "button", "action": "{action}"}}').data["action"] == action
 
 
-@pytest.mark.parametrize("kind", ["touch", "wake", "stats"])
+@pytest.mark.parametrize("kind", ["touch", "stats"])
 def test_simple_messages(kind):
     assert parse(f'{{"type": "{kind}"}}').type == kind
 
@@ -98,3 +107,37 @@ def test_server_messages():
     assert protocol.audio_start() == {"type": "audio_start", "rate": 16000}
     assert protocol.audio_end() == {"type": "audio_end"}
     assert protocol.audio_stop() == {"type": "audio_stop"}
+
+
+@pytest.mark.parametrize(("text", "score"), [("0.99", 0.99), ("0", 0.0), ("1", 1.0)])
+def test_wake_keeps_its_score_as_a_float(text, score):
+    msg = parse(f'{{"type": "wake", "score": {text}}}')
+    assert msg.type == "wake"
+    assert msg.data == {"score": score}
+    assert isinstance(msg.data["score"], float)
+
+
+@pytest.mark.parametrize(("enabled", "threshold"), [(True, 0.97), (False, 0.5), (True, 0.99)])
+def test_wake_config(enabled, threshold):
+    assert protocol.wake_config(enabled, threshold) == {
+        "type": "wake_config",
+        "enabled": enabled,
+        "threshold": threshold,
+    }
+
+
+@pytest.mark.parametrize(
+    ("enabled", "threshold"),
+    [
+        (1, 0.9),
+        ("on", 0.9),
+        (True, 0.49),
+        (True, 1),
+        (True, float("nan")),
+        (True, "0.9"),
+        (True, True),
+    ],
+)
+def test_wake_config_refuses_bad_values(enabled, threshold):
+    with pytest.raises(ValueError):
+        protocol.wake_config(enabled, threshold)

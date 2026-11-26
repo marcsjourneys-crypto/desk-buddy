@@ -14,8 +14,9 @@ from desk_buddy.audio import SAMPLE_RATE
 
 MAX_TOKEN_CHARS = 256
 BUTTON_ACTIONS = ("down", "up")
-# wake is reserved for a later wake word; the server accepts and ignores it for now.
 ROBOT_MESSAGES = ("hello", "button", "touch", "stats", "wake")
+WAKE_THRESHOLD_MIN = 0.5  # the range of the robot's wake word cutoff (wake_config)
+WAKE_THRESHOLD_MAX = 0.99
 
 
 class ProtocolError(ValueError):
@@ -68,6 +69,14 @@ def parse(text: str) -> Message:
         if not isinstance(data, dict):
             raise ProtocolError("stats data must be an object")
         return Message(kind, {"data": data})
+    if kind == "wake":
+        score = obj.get("score")
+        # bool is an int in Python, so a JSON true is refused explicitly. The range check
+        # also refuses NaN and infinities (json.loads accepts them), and a huge int never
+        # reaches float().
+        if isinstance(score, bool) or not isinstance(score, int | float) or not 0 <= score <= 1:
+            raise ProtocolError("wake score must be a number from 0 to 1")
+        return Message(kind, {"score": float(score)})
     return Message(kind)
 
 
@@ -93,3 +102,16 @@ def audio_end() -> dict[str, Any]:
 
 def audio_stop() -> dict[str, Any]:
     return {"type": "audio_stop"}
+
+
+def wake_config(enabled: bool, threshold: float) -> dict[str, Any]:
+    """The robot's wake word settings. Raises ValueError for a bad value (never sent)."""
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a bool")
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, int | float)
+        or not WAKE_THRESHOLD_MIN <= threshold <= WAKE_THRESHOLD_MAX
+    ):
+        raise ValueError(f"threshold must be from {WAKE_THRESHOLD_MIN} to {WAKE_THRESHOLD_MAX}")
+    return {"type": "wake_config", "enabled": enabled, "threshold": float(threshold)}
