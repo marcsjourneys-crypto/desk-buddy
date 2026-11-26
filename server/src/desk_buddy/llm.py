@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -139,21 +140,20 @@ SMART_OFF_HINT = (
     "SMART_MODEL %r isn't available to this API key; answering on LLM_MODEL until restart "
     "(set SMART_MODEL=off to silence this)"
 )
-# Set once the API said the smart model doesn't exist or this key can't use it.
-# Module-level for the same reason as _web_search_blocked.
-_smart_blocked = False
+# Smart model ids the API said don't exist or this key can't use. Module-level for the
+# same reason as _web_search_blocked; by id, so a corrected SMART_MODEL works at once.
+_smart_blocked: set[str] = set()
 
 
-def smart_blocked() -> bool:
-    """True once the API refused the smart model for this key (until the next restart)."""
-    return _smart_blocked
+def smart_blocked(model: str) -> bool:
+    """True once the API refused this smart model for this key (until the next restart)."""
+    return model in _smart_blocked
 
 
 def _block_smart(model: str) -> None:
-    global _smart_blocked
-    if not _smart_blocked:
+    if model not in _smart_blocked:
         log.warning(SMART_OFF_HINT, model)
-    _smart_blocked = True
+    _smart_blocked.add(model)
 
 
 # Offered to Haiku in its first round when the smart model may answer: calling it hands
@@ -321,26 +321,32 @@ class ClaudeChat:
         self.searches = []
         self.answered_by = None
         turn = _Turn()
+        # Every inner run is closed with aclosing, so a reply cut off by the caller's
+        # aclose() closes its HTTP stream at once, not at garbage collection.
         route = self.smart_route
         if route is not None and self.smart_available:
-            async for delta in self._smart_run(messages, turn, route):
-                yield delta
+            async with contextlib.aclosing(self._smart_run(messages, turn, route)) as run:
+                async for delta in run:
+                    yield delta
             return
         try:
-            async for delta in self._haiku_run(messages, turn, handover=self.smart_available):
-                yield delta
+            haiku = self._haiku_run(messages, turn, handover=self.smart_available)
+            async with contextlib.aclosing(haiku) as run:
+                async for delta in run:
+                    yield delta
         except _HandOver:
             # Haiku's round is thrown away (its think_harder call and thinking blocks
             # included): the smart model gets the original messages and a fresh 3 rounds.
-            async for delta in self._smart_run(messages, turn, HANDED_OVER):
-                yield delta
+            async with contextlib.aclosing(self._smart_run(messages, turn, HANDED_OVER)) as run:
+                async for delta in run:
+                    yield delta
 
     @property
     def smart_available(self) -> bool:
         """Whether a question may go to the smart model now."""
         return (
             self._smart_model is not None
-            and not smart_blocked()
+            and not smart_blocked(self._smart_model)
             and self._smart_model != self._model
         )
 
@@ -367,32 +373,36 @@ class ClaudeChat:
         assert smart is not None
         log.info("Model: %s (%s)", smart, route)
         self.answered_by = (smart, route)
-        yielded = False
+        rounds = self._rounds(
+            messages,
+            turn,
+            model=smart,
+            effort="high" if route == ASKED else "medium",
+            max_tokens=SMART_MAX_TOKENS,
+            system=self._plain_system,
+            smart=True,
+        )
         try:
-            async for delta in self._rounds(
-                messages,
-                turn,
-                model=smart,
-                effort="high" if route == ASKED else "medium",
-                max_tokens=SMART_MAX_TOKENS,
-                system=self._plain_system,
-            ):
-                yielded = True
-                yield delta
+            async with contextlib.aclosing(rounds) as run:
+                async for delta in run:
+                    yield delta
             return
         except LLMRefusal:
             raise
         except LLMError as exc:
-            if yielded or self.last_tool_rounds:
+            # Only if the whole reply (Haiku before a handover too) said nothing and ran
+            # no tool: otherwise answering again would repeat or contradict it.
+            if turn.spoke or self.last_tool_rounds:
                 raise
-            log.warning("Smart model failed (%s); answering on %s", exc, self._model)
-            if isinstance(
-                exc.__cause__, (anthropic.NotFoundError, anthropic.PermissionDeniedError)
-            ):
+            cause = exc.__cause__
+            why = type(cause).__name__ if cause is not None else str(exc)
+            log.warning("Smart model failed (%s); answering on %s", why, self._model)
+            if isinstance(cause, (anthropic.NotFoundError, anthropic.PermissionDeniedError)):
                 _block_smart(smart)
         self.answered_by = (self._model, UNAVAILABLE)
-        async for delta in self._haiku_run(messages, turn, handover=False):
-            yield delta
+        async with contextlib.aclosing(self._haiku_run(messages, turn, handover=False)) as run:
+            async for delta in run:
+                yield delta
 
     async def _rounds(
         self,
@@ -404,9 +414,12 @@ class ClaudeChat:
         max_tokens: int,
         system: Callable[[], str],
         handover: bool = False,
+        smart: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Up to MAX_TOOL_ROUNDS API calls on one model, running tools between them.
-        `handover`: offer think_harder in round 1, and raise _HandOver if it's called."""
+        `handover`: offer think_harder in round 1, and raise _HandOver if it's called.
+        `smart`: a web-search 400 only retries the round without search, never turns
+        search off for the process (it may be this model's problem, not the account's)."""
         searching, reported = turn.searching, turn.reported
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             last = round_no == MAX_TOOL_ROUNDS
@@ -450,7 +463,7 @@ class ClaudeChat:
                     break
                 except anthropic.BadRequestError as exc:
                     if web and not said_here and _mentions_web_search(exc):
-                        if _search_not_enabled(exc):
+                        if _search_not_enabled(exc) and not smart:
                             _block_web_search()
                         else:
                             log.warning(
@@ -726,7 +739,7 @@ def create_chat(
                 settings,
                 tools,
                 personality(),
-                think_harder=bool(settings.smart_model) and not smart_blocked(),
+                think_harder=bool(settings.smart_model) and not smart_blocked(settings.smart_model),
             ),
             plain_system=lambda: prompt_for(settings, tools, personality(), think_harder=False),
             smart_model=settings.smart_model or None,

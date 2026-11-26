@@ -942,7 +942,7 @@ def test_a_planted_instruction_in_a_search_result_cant_get_past_the_guard(search
 @pytest.fixture(autouse=True)
 def smart_allowed(monkeypatch):
     """The 'smart model unavailable' flag is clear, and is cleared again afterwards."""
-    monkeypatch.setattr(llm_module, "_smart_blocked", False)
+    monkeypatch.setattr(llm_module, "_smart_blocked", set())
 
 
 def smart_chat(*streams, tools=None, smart="big", route=None, system="sys", plain="plain"):
@@ -1011,13 +1011,13 @@ def test_answered_by_is_reset_for_each_reply():
 
 
 def test_a_route_is_ignored_when_the_smart_model_is_blocked_or_the_same(monkeypatch):
-    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    monkeypatch.setattr(llm_module, "_smart_blocked", {"big"})
     chat, client = smart_chat(FakeStream(["hi"]), route=ASKED)
     assert not chat.smart_available
     collect(chat, "think hard")
     assert client.calls[0]["model"] == "m"
     assert chat.answered_by is None
-    monkeypatch.setattr(llm_module, "_smart_blocked", False)
+    monkeypatch.setattr(llm_module, "_smart_blocked", set())
     chat, client = smart_chat(FakeStream(["hi"]), smart="m", route=ASKED)
     assert not chat.smart_available
     collect(chat, "think hard")
@@ -1037,8 +1037,8 @@ def test_a_failed_smart_call_before_any_text_falls_back_to_haiku(caplog):
     assert second["output_config"] == {"effort": "low"}
     assert "tools" not in second
     assert chat.answered_by == ("m", UNAVAILABLE)
-    assert "Smart model failed (can't reach the API); answering on m" in caplog.text
-    assert not llm_module.smart_blocked()
+    assert "Smart model failed (APIConnectionError); answering on m" in caplog.text
+    assert not llm_module.smart_blocked("big")
 
 
 @pytest.mark.parametrize(
@@ -1051,7 +1051,7 @@ def test_a_model_the_key_cant_use_blocks_the_smart_model_until_restart(caplog, c
     )
     with caplog.at_level("WARNING", logger="desk_buddy.llm"):
         assert collect(chat, "think hard") == ["Quick."]
-        assert llm_module.smart_blocked()
+        assert llm_module.smart_blocked("big")
         assert chat.answered_by == ("m", UNAVAILABLE)
         # The next chat object (rebuilt between turns) ignores the route.
         rebuilt, client = smart_chat(FakeStream(["Hi."]), route=ASKED)
@@ -1060,6 +1060,14 @@ def test_a_model_the_key_cant_use_blocks_the_smart_model_until_restart(caplog, c
     assert client.calls[0]["model"] == "m"
     assert rebuilt.answered_by is None
     assert caplog.text.count("SMART_MODEL 'big' isn't available to this API key") == 1
+    # The log names the API's error, not the key ("API key rejected" would mislead).
+    assert f"Smart model failed ({cls.__name__})" in caplog.text
+    assert "API key rejected" not in caplog.text
+    # A corrected model id works at once (the block is per id), with its own hint.
+    fixed, client = smart_chat(FakeStream(["Deep."]), smart="bigger", route=ASKED)
+    assert fixed.smart_available
+    collect(fixed, "think hard")
+    assert client.calls[0]["model"] == "bigger"
 
 
 def test_a_smart_error_after_text_is_an_error_without_a_fallback():
@@ -1133,7 +1141,7 @@ def test_think_harder_is_not_offered_on_a_smart_run_or_with_the_feature_off(monk
     chat, client = make_chat(FakeStream(["Hi."]), tools=note_registry([]))
     collect(chat, "hi")
     assert tool_names(client.calls[0]) == ["take_note"]
-    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    monkeypatch.setattr(llm_module, "_smart_blocked", {"big"})
     chat, client = smart_chat(FakeStream(["Hi."]), tools=note_registry([]))
     collect(chat, "hi")
     assert tool_names(client.calls[0]) == ["take_note"]
@@ -1237,8 +1245,131 @@ def test_create_chat_wires_the_smart_model_and_both_prompts():
 
 def test_create_chat_drops_the_rule_once_the_smart_model_is_blocked(monkeypatch):
     chat = create_chat(Settings(anthropic_api_key="k"))
-    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    monkeypatch.setattr(llm_module, "_smart_blocked", {"claude-sonnet-5-5"})
     assert THINK_HARDER_TEXT not in chat._system()
+    # Another smart model id isn't blocked: its rule is back.
+    other = create_chat(Settings(anthropic_api_key="k", smart_model="claude-opus-5-5"))
+    assert THINK_HARDER_TEXT in other._system()
+
+
+def test_without_a_smart_model_the_request_is_exactly_as_before(search_allowed):
+    registry = note_registry([])
+    client = FakeClient(FakeStream(["hi"]))
+    chat = ClaudeChat(
+        client, model="m", effort="low", system="sys", tools=registry, web_search_max=2
+    )
+    chat.smart_route = ASKED
+    collect(chat, "hi")
+    assert client.calls == [
+        {
+            "model": "m",
+            "max_tokens": 2048,
+            "system": "sys",
+            "output_config": {"effort": "low"},
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [*registry.schemas(), WEB_TOOL],
+        }
+    ]
+
+
+async def _first_then_aclose(chat):
+    agen = chat.stream_reply([], "q")
+    first = await agen.__anext__()
+    await agen.aclose()
+    return first
+
+
+@pytest.mark.parametrize("path", ["haiku", "smart", "handed over", "fallback"])
+def test_aclose_closes_the_open_stream_at_once(path):
+    live = FakeStream(["a", "b", "c"])
+    if path == "haiku":
+        chat, _ = smart_chat(live)
+    elif path == "smart":
+        chat, _ = smart_chat(live, route=ASKED)
+    elif path == "handed over":
+        first = FakeStream([], stop_reason="tool_use", content=[think_use()])
+        chat, _ = smart_chat(first, live)
+    else:
+        chat, _ = smart_chat(FakeStream([], error=connection_error()), live, route=ASKED)
+
+    async def run():
+        assert await _first_then_aclose(chat) == "a"
+        return live.closed  # before asyncio.run's own generator clean-up
+
+    assert asyncio.run(run())
+
+
+def test_a_web_search_400_on_the_smart_model_never_turns_search_off(search_allowed, caplog):
+    client = FakeClient(FakeStream([], error=web_search_refused()), FakeStream(["Deep."]))
+    chat = ClaudeChat(
+        client,
+        model="m",
+        effort="low",
+        system="sys",
+        web_search_max=2,
+        smart_model="big",
+        plain_system="plain",
+    )
+    chat.smart_route = ASKED
+    with caplog.at_level("WARNING", logger="desk_buddy.llm"):
+        assert collect(chat, "think hard") == ["Deep."]
+    first, second = client.calls
+    assert first["model"] == second["model"] == "big"
+    assert WEB_TOOL in first["tools"] and "tools" not in second
+    assert not web_search_blocked() and chat.web_search
+    assert "isn't enabled for this API key" not in caplog.text
+    assert "trying without search" in caplog.text
+    assert chat.answered_by == ("big", ASKED)
+
+
+def test_no_fallback_after_a_handover_once_haiku_spoke():
+    first = FakeStream(["Hmm."], stop_reason="tool_use", content=[think_use()])
+    chat, client = smart_chat(first, FakeStream([], error=connection_error()), FakeStream(["x"]))
+    got = []
+
+    async def run():
+        async for d in chat.stream_reply([], "q"):
+            got.append(d)
+
+    with pytest.raises(LLMError):
+        asyncio.run(run())
+    assert got == ["Hmm."]
+    assert len(client.calls) == 2
+
+
+def test_a_smart_run_out_of_room_before_any_text_falls_back():
+    chat, client = smart_chat(
+        FakeStream([], stop_reason="max_tokens"), FakeStream(["Quick."]), route=ASKED
+    )
+    assert collect(chat, "think hard") == ["Quick."]
+    assert [c["model"] for c in client.calls] == ["big", "m"]
+    assert chat.answered_by == ("m", UNAVAILABLE)
+
+
+def test_a_smart_run_paused_to_the_end_before_any_text_falls_back():
+    paused = [FakeStream([], stop_reason="pause_turn") for _ in range(MAX_TOOL_ROUNDS)]
+    chat, client = smart_chat(*paused, FakeStream(["Quick."]), route=ASKED)
+    assert collect(chat, "think hard") == ["Quick."]
+    assert [c["model"] for c in client.calls] == ["big"] * MAX_TOOL_ROUNDS + ["m"]
+    assert chat.answered_by == ("m", UNAVAILABLE)
+
+
+def test_a_handover_next_to_a_tool_that_waits_for_a_yes_proposes_nothing():
+    from desk_buddy.tools.registry import NotDone
+
+    proposed = []
+
+    def open_page(text):
+        proposed.append(text)
+        return NotDone("Not done yet")
+
+    registry = ToolRegistry([Tool("take_note", "d", SCHEMA, open_page)])
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use("a"), think_use()])
+    chat, client = smart_chat(first, FakeStream(["Deep."]), tools=registry)
+    assert collect(chat, "x") == ["Deep."]
+    assert proposed == []
+    assert chat.last_tool_rounds == [] and chat.tools_succeeded == 0
+    assert [c["model"] for c in client.calls] == ["m", "big"]
 
 
 def test_the_dashboard_preview_has_no_think_harder_rule():
