@@ -251,6 +251,10 @@
       case "action":
         action(event);
         break;
+      case "control":
+        if (event.action === "stop") say("note", "Stopped from the dashboard", "", event.ts);
+        else if (event.action === "forget") say("note", "Forgot everything (dashboard)", "", event.ts);
+        break;
       case "robot":
         loadStatus();
         break;
@@ -281,6 +285,7 @@
       lastId = 0;
       clearLists(); // the server re-sends its recent history
       setOnline(true);
+      setControls(true);
       loadStatus();
     });
     socket.addEventListener("message", (message) => {
@@ -297,11 +302,91 @@
       handle(event);
     });
     socket.addEventListener("close", () => {
+      releaseTalk();
+      setControls(false);
       setOnline(false);
       setTimeout(connect, delay);
       delay = Math.min(delay * 2, 30000);
     });
   }
+
+  // ---------------------------------------------------------------- controls
+  // Stop, Forget and Talk (hold), for when the CARL window isn't in front. They work
+  // only while the event socket is open. The server lets go of a Talk held over 60 s.
+
+  const talk = $("control-talk");
+  let talkPressed = false; // a press was sent and its release not yet
+  let talkQueue = Promise.resolve(); // presses and releases are sent in order
+
+  function setControls(on) {
+    for (const name of ["talk", "stop", "forget"]) $(`control-${name}`).disabled = !on;
+  }
+
+  function controlFailed(what, error) {
+    setBanner("control", `${what} didn't work: ${error.message}`);
+  }
+
+  function sendTalk(action) {
+    talkQueue = talkQueue
+      .then(() => api("POST", "/api/control/talk", { action }))
+      .then(() => setBanner("control", null))
+      .catch((error) => controlFailed("Talk", error));
+  }
+
+  function pressTalk(event) {
+    if (talk.disabled || talkPressed) return;
+    if (event.type === "pointerdown") {
+      if (event.button !== 0) return;
+      event.preventDefault(); // no text selection or focus dance on a long press
+      try {
+        talk.setPointerCapture(event.pointerId);
+      } catch (_) {
+        // the release triggers below still catch the end
+      }
+    }
+    talkPressed = true;
+    talk.classList.add("held");
+    sendTalk("down");
+  }
+
+  function releaseTalk() {
+    if (!talkPressed) return; // only a press that was sent gets a release
+    talkPressed = false;
+    talk.classList.remove("held");
+    sendTalk("up");
+  }
+
+  talk.addEventListener("pointerdown", pressTalk);
+  for (const trigger of ["pointerup", "pointercancel", "lostpointercapture", "pointerleave"]) {
+    talk.addEventListener(trigger, releaseTalk);
+  }
+  talk.addEventListener("contextmenu", (event) => event.preventDefault());
+  talk.addEventListener("keydown", (event) => {
+    if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+      event.preventDefault();
+      pressTalk(event);
+    }
+  });
+  talk.addEventListener("keyup", (event) => {
+    if (event.key === " " || event.key === "Enter") releaseTalk();
+  });
+  talk.addEventListener("blur", releaseTalk);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") releaseTalk();
+  });
+  window.addEventListener("pagehide", releaseTalk);
+  window.addEventListener("blur", releaseTalk);
+
+  $("control-stop").addEventListener("click", () => {
+    api("POST", "/api/control/stop")
+      .then(() => setBanner("control", null))
+      .catch((error) => controlFailed("Stop", error));
+  });
+  $("control-forget").addEventListener("click", () => {
+    api("POST", "/api/control/forget")
+      .then(() => setBanner("control", null))
+      .catch((error) => controlFailed("Forget", error));
+  });
 
   // ---------------------------------------------------------------- status bar
 

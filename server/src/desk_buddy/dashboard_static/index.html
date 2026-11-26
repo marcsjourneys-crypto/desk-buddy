@@ -29,6 +29,11 @@
   <div class="title">
     <h1>CARL-42</h1>
     <p><span id="state" class="state">connecting</span> <span id="emotion" class="emotion"></span></p>
+    <div id="controls" class="controls" role="group" aria-label="Controls">
+      <button type="button" id="control-talk" class="talk" title="Hold to talk, like the talk key" disabled>Talk (hold)</button>
+      <button type="button" id="control-stop" class="secondary" title="Stop listening or talking" disabled>Stop</button>
+      <button type="button" id="control-forget" class="secondary" title="Forget the conversation, like saying “forget that”" disabled>Forget</button>
+    </div>
   </div>
   <ul id="status" class="chips" aria-label="Status"></ul>
   <span id="conn" class="conn off">offline</span>

@@ -43,6 +43,15 @@ code, pre, textarea, input, select { font-family: "Cascadia Mono", Consolas, ui-
 }
 
 .title p { margin: 2px 0 0; color: var(--muted); }
+.controls { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+/* Hold to talk: no scrolling, text selection or long-press menu while it's held. */
+.controls .talk {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.controls .talk.held { background: var(--brass); color: #2a1f0a; }
 .state { color: var(--teal); font-weight: 600; }
 .state.listening { color: var(--brass); }
 .state.speaking { color: var(--green); }

@@ -136,3 +136,51 @@ def test_a_smart_reply_shows_its_model_and_route_as_plain_text():
     assert 'el("span", { class: "model", text: label })' in JS  # textContent via el()
     assert "modelLabel(event)" in JS.split('case "reply":', 1)[1].split("break;", 1)[0]
     assert ".msg .meta .model" in CSS
+
+
+def test_the_live_controls_sit_under_the_state_line_and_start_disabled():
+    title = HTML[HTML.index('class="title"') : HTML.index('id="status"')]
+    assert title.index('id="state"') < title.index('id="controls"')
+    for name in ("stop", "forget", "talk"):
+        button = re.search(rf'<button[^>]*id="control-{name}"[^>]*>', title)
+        assert button, name
+        assert "disabled" in button.group(0) and 'type="button"' in button.group(0)
+
+
+def test_the_controls_post_with_the_token():
+    for call in (
+        'api("POST", "/api/control/stop")',
+        'api("POST", "/api/control/forget")',
+        'api("POST", "/api/control/talk", { action })',
+    ):
+        assert call in JS
+
+
+def test_every_talk_release_trigger_is_listened_to():
+    for trigger in (
+        '"pointerdown"',
+        '"pointerup"',
+        '"pointercancel"',
+        '"lostpointercapture"',
+        '"pointerleave"',
+        '"visibilitychange"',
+        '"pagehide"',
+        '"blur"',
+        '"contextmenu"',
+    ):
+        assert trigger in JS, trigger
+    assert "setPointerCapture" in JS
+    assert "talkPressed" in JS  # a release is sent only if a press was sent
+    # The socket closing releases it too, and the buttons follow the socket.
+    close = JS[JS.index('socket.addEventListener("close"') :].split("});", 1)[0]
+    assert "releaseTalk(" in close and "setControls(false)" in close
+    opened = JS[JS.index('socket.addEventListener("open"') :].split("});", 1)[0]
+    assert "setControls(true)" in opened
+    assert "touch-action: none" in CSS and "user-select: none" in CSS
+
+
+def test_control_events_are_rendered_as_text():
+    case = JS.split('case "control":', 1)[1].split("break;", 1)[0]
+    assert "Stopped from the dashboard" in case
+    assert "Forgot everything (dashboard)" in case
+    assert "say(" in case  # say() renders with textContent via el()
