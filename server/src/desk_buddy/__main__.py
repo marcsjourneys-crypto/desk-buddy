@@ -307,6 +307,7 @@ class Brain:
         self.skills = skills
         self.skill_runner = skill_runner
         self._skills_version: int | None = None  # the approvals the tools were built from
+        self._skills_scan: tuple[Any, tuple[Any, ...]] | None = None  # (key, usable skills)
         self._bus = bus  # each web search is shown on the dashboard
         self._personality = personality
         self._settings = settings
@@ -477,10 +478,17 @@ class Brain:
             return None
         apps: tuple[Any, ...] = ()
         sites: tuple[Any, ...] = ()
+        apps_version = None
         if self._app_store is not None:
-            _, apps, sites = self._app_store.snapshot()
-        scan = self.skills.scan(settings.skills_dir, taken_names(apps, sites))
-        usable = scan.usable[:MAX_APPROVED]
+            apps_version, apps, sites = self._app_store.snapshot()
+        # The scan fingerprints every skill (blocking file reads on the event loop), so it
+        # is redone only when the approvals, SKILLS_DIR or the app names changed, not at
+        # every rebuild. Files edited since are caught by the check before every run.
+        key = (self.skills.version, settings.skills_dir, apps_version)
+        if self._skills_scan is None or self._skills_scan[0] != key:
+            scan = self.skills.scan(settings.skills_dir, taken_names(apps, sites))
+            self._skills_scan = (key, scan.usable[:MAX_APPROVED])
+        usable = self._skills_scan[1]
         if not usable:
             log.info("Skills: off (none approved on the dashboard's Apps tab)")
             return None

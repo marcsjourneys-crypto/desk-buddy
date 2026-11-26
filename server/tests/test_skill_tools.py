@@ -5,6 +5,7 @@ results reaching Claude but never the dashboard, and nothing planted in a skill'
 or a web page able to run or confirm a skill. Fake runners only: no real processes."""
 
 import asyncio
+import dataclasses
 import json
 import logging
 import threading
@@ -221,15 +222,15 @@ def test_one_tool_per_usable_skill_named_after_its_folder(rig):
     assert rig.tools.names == ["skill_hello_time", "skill_send_note_email"]
 
 
-def test_choices_become_enums_and_a_default_makes_one_nullable(rig):
+def test_choices_are_required_enums_and_a_default_is_described(rig):
     (schema,) = [s for s in rig.registry.schemas() if s["name"] == "skill_hello_time"]
     assert schema["strict"] is True
     inputs = schema["input_schema"]
     assert inputs["additionalProperties"] is False
     assert inputs["required"] == ["format", "zone"]
     fmt, zone = inputs["properties"]["format"], inputs["properties"]["zone"]
-    assert fmt["type"] == ["string", "null"] and fmt["enum"] == ["short", "long", None]
-    assert 'the default, "short"' in fmt["description"]
+    assert fmt["type"] == "string" and fmt["enum"] == ["short", "long"]  # never a union
+    assert 'Use "short" unless the user says otherwise.' in fmt["description"]
     assert zone == {"type": "string", "enum": ["local", "utc"], "description": "Which clock."}
     assert "text" not in inputs["properties"]
 
@@ -250,14 +251,27 @@ def test_the_text_field_has_its_description_and_no_max_length(rig):
     assert schema["input_schema"]["required"] == ["text"]
 
 
-def test_an_optional_text_field_is_nullable():
+def test_an_optional_text_field_is_a_required_string_where_empty_means_none():
     from desk_buddy.skills_store import Manifest, TextInput
 
     manifest = Manifest("N", ("n",), "d", text=TextInput("Words."))
     schema = input_schema(manifest)
-    assert schema["properties"]["text"]["type"] == ["string", "null"]
+    assert schema["properties"]["text"]["type"] == "string"
+    assert 'Use "" if the user gave none.' in schema["properties"]["text"]["description"]
     assert schema["required"] == ["text"]
     assert input_schema(Manifest("N", ("n",), "d"))["properties"] == {}
+
+
+def test_a_needs_yes_skill_takes_at_most_200_characters_and_says_so():
+    from desk_buddy.skills_store import Manifest, TextInput
+
+    long_text = TextInput("Words.", max_length=500)
+    asked_first = Manifest("N", ("n",), "d", text=long_text, needs_yes=True)
+    at_once = Manifest("N", ("n",), "d", text=long_text)
+    assert (
+        "At most 200 characters." in input_schema(asked_first)["properties"]["text"]["description"]
+    )
+    assert "At most 500 characters." in input_schema(at_once)["properties"]["text"]["description"]
 
 
 def test_an_unapproved_or_changed_skill_has_no_tool(rig):
@@ -369,16 +383,26 @@ def test_a_skill_changed_between_the_question_and_the_yes_is_not_run(rig):
 def test_the_result_reaches_claude_but_only_ran_reaches_the_dashboard_and_log(rig, caplog):
     caplog.set_level(logging.INFO)
     rig.runner.result = SkillResult(True, wrap("skill:hello-time", "SECRET-OUTPUT 4pm"), "ok")
-    result = rig.call("skill_hello_time", format="long", zone="local")
-    assert "SECRET-OUTPUT 4pm" in result and not isinstance(result, NotDone)
+    outcome = rig.registry.run("skill_hello_time", {"format": "long", "zone": "local"})
+    assert "SECRET-OUTPUT 4pm" in outcome.text and outcome.done and not outcome.is_error
     (event,) = rig.bus.of("action")
     assert event["outcome"] == "ok" and event["result"] == "Ran Hello time."
     assert json.loads(event["args"]) == {
         "skill": "hello-time",
         "choices": {"format": "long", "zone": "local"},
     }
-    actions = [m for m in caplog.messages if m.startswith("Action:")]
-    assert actions and not any("SECRET-OUTPUT" in m for m in actions)
+    assert any(m.startswith("Action:") for m in caplog.messages)
+    assert any(m.startswith("Tool skill_hello_time ->") for m in caplog.messages)
+    assert not any("SECRET-OUTPUT" in m for m in caplog.messages)  # no log line at all
+
+
+def test_a_confirmed_skills_output_never_reaches_the_log(rig, caplog):
+    caplog.set_level(logging.DEBUG)
+    rig.runner.result = SkillResult(True, wrap("skill:send-note-email", "SECRET-OUTPUT"), "ok")
+    rig.registry.run("skill_send_note_email", {"text": LATE})
+    asked(rig.confirmations)
+    assert "SECRET-OUTPUT" in rig.confirmations.answer("Yes.", 2)
+    assert not any("SECRET-OUTPUT" in m for m in caplog.messages)
 
 
 def test_a_failed_run_is_shown_as_failed_with_the_short_text(rig):
@@ -433,15 +457,64 @@ def test_a_needs_yes_skill_waits_and_the_question_reads_the_text_back(rig):
     assert rig.confirmations.pending.ask == ASK
 
 
-def test_the_spoken_text_is_one_clean_line_of_at_most_200_characters():
-    assert spoken_text("I'm\n running\t\tlate‮!") == "I'm running late !"
-    assert len(spoken_text("a" * 500)) == 200
+def test_the_spoken_text_is_one_line_and_the_question_has_one_question_mark():
+    assert spoken_text("I'm\n running\t\tlate!") == "I'm running late!"
     from desk_buddy.skills_store import Manifest
 
     m = Manifest("Send", ("send",), "d")
     assert description_for(m, None) == "Send"
     assert description_for(m, "\n") == "Send"
     assert description_for(m, "two\nlines") == "Send with: two lines"
+    assert description_for(m, "are you free?") == "Send with: are you free"
+    assert description_for(m, "?!") == "Send with: ?!"
+
+
+def test_the_payload_is_exactly_the_text_read_back(rig):
+    rig.call("skill_send_note_email", text="  I'm \n running\tlate. ")
+    asked(rig.confirmations)
+    assert rig.confirmations.pending.ask == "Shall I run Send note email with: I'm running late?"
+    rig.confirmations.answer("Yes.", 2)
+    assert rig.runner.calls == [("send-note-email", {"text": "I'm running late."})]
+
+
+def test_needs_yes_text_over_200_characters_is_refused_not_cut(tmp_path):
+    rig = Rig(tmp_path)
+    rig.add(
+        "long-email",
+        {**EMAIL, "name": "Long email", "spoken_names": ["long email"]}
+        | {"inputs": {"text": {"description": "Words.", "max_length": 500}}},
+    )
+    rig.build()
+    with pytest.raises(ToolError, match="at most 200 characters"):
+        rig.call("skill_long_email", text="a" * 201)
+    assert rig.confirmations.pending is None and rig.outcomes() == ["refused"]
+    assert isinstance(rig.call("skill_long_email", text="a" * 200), NotDone)
+
+
+@pytest.mark.parametrize(
+    "char", ["‮", "​", "⁦", "\U000e0041", "﻿"]
+)  # bidi, zero-width, isolate, tag, BOM
+def test_format_characters_are_refused_for_every_skill(tmp_path, char):
+    rig = Rig(tmp_path)
+    rig.add(
+        "plain-note",
+        {
+            "name": "Plain note",
+            "spoken_names": ["plain note"],
+            "description": "d",
+            "inputs": {"text": {"description": "Words."}},
+        },
+    )
+    rig.build()
+    for name in ("skill_send_note_email", "skill_plain_note"):
+        with pytest.raises(ToolError, match=CONTROL_TEXT):
+            rig.call(name, text=f"late{char}ly")
+    assert rig.runner.calls == [] and rig.confirmations.pending is None
+
+
+def test_choices_match_case_insensitively(rig):
+    rig.call("skill_hello_time", format="LONG", zone=" Utc ")
+    assert rig.runner.calls == [("hello-time", {"format": "long", "zone": "utc"})]
 
 
 def test_a_yes_runs_it_once_and_the_result_goes_into_the_note(rig):
@@ -710,3 +783,178 @@ def test_the_prompt_rules_are_there_only_with_the_flag():
     assert "Shall I run" not in on  # the model never asks
     cc_off = system_prompt(3, skills=False, computer_control=False)
     assert "computer control isn't switched on" in cc_off
+
+
+# --- Review fixes: fingerprints, crashes, cut-off runs, the API's limits ---
+
+
+def test_a_skill_reapproved_between_the_question_and_the_yes_is_not_run(rig):
+    rig.call("skill_send_note_email", text=LATE)
+    asked(rig.confirmations)
+    (rig.root / "send-note-email" / "main.py").write_text("print('new code')\n")
+    new = rig.store.scan(rig.root).get("send-note-email").fingerprint
+    rig.store.approve("send-note-email", new)  # approved again, but not what was asked about
+    note = rig.confirmations.answer("Yes.", 2)
+    assert rig.runner.calls == [] and "nothing was run" in note
+
+
+def test_a_crash_in_the_confirmed_action_says_it_may_not_have_run(rig, monkeypatch):
+    rig.call("skill_send_note_email", text=LATE)
+    asked(rig.confirmations)
+
+    def boom(*a):
+        raise RuntimeError("bug")
+
+    pending = rig.confirmations.pending
+    rig.confirmations._pending = dataclasses.replace(pending, run=boom)
+    note = rig.confirmations.answer("Yes.", 2)
+    assert "may not have run" in note and "nothing was run" not in note
+
+
+def test_a_yes_while_a_confirmed_skill_still_runs_runs_nothing_new(rig):
+    gate = threading.Event()
+    rig.runner.gate = gate
+    rig.call("skill_send_note_email", text=LATE)
+    asked(rig.confirmations)
+    notes = []
+    worker = threading.Thread(target=lambda: notes.append(rig.confirmations.answer("Yes.", 2)))
+    worker.start()
+    for _ in range(200):
+        if rig.confirmations.running is not None:
+            break
+        threading.Event().wait(0.01)
+    assert rig.confirmations.answer("Yes.", 3) == (
+        "(System note: Send note email is still running from the user's last yes; nothing "
+        "new was run.)"
+    )
+    assert rig.confirmations.answer("What's the time?", 4) is None
+    gate.set()
+    worker.join(5)
+    assert len(rig.runner.calls) == 1 and "it ran Send note email" in notes[0]
+    assert rig.confirmations.running is None
+
+
+async def _until(condition, timeout=5.0):
+    for _ in range(int(timeout / 0.01)):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out")
+
+
+def test_a_key_press_during_a_confirmed_run_keeps_its_note_for_the_next_question(rig):
+    gate = threading.Event()
+    rig.runner.gate = gate
+    orch, _, _ = rig.orchestrator(chat=SkillChat(rig), transcriber=FakeTranscriber("Email"))
+    later = FakeChat()
+
+    async def scenario():
+        await talk(orch)
+        orch.transcriber, orch.chat = FakeTranscriber("Yes."), FakeChat()
+        await orch.handle("down")
+        await orch.handle("up")  # question 2: "Yes." starts the run
+        await _until(lambda: rig.confirmations.running is not None)
+        await orch.handle("down")  # the user cuts it off mid-run
+        gate.set()
+        await _until(lambda: rig.confirmations._unreported)
+        orch.transcriber, orch.chat = FakeTranscriber("Did it work?"), later
+        await orch.handle("up")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert len(rig.runner.calls) == 1
+    (prompt,) = later.prompts
+    assert "it ran Send note email" in prompt and prompt.startswith("Did it work?")
+
+
+def test_a_yes_during_a_cut_off_run_is_told_it_is_still_running(rig):
+    gate = threading.Event()
+    rig.runner.gate = gate
+    orch, _, _ = rig.orchestrator(chat=SkillChat(rig), transcriber=FakeTranscriber("Email"))
+    third, fourth = FakeChat(), FakeChat()
+
+    async def scenario():
+        await talk(orch)
+        orch.transcriber, orch.chat = FakeTranscriber("Yes."), FakeChat()
+        await orch.handle("down")
+        await orch.handle("up")
+        await _until(lambda: rig.confirmations.running is not None)
+        await orch.handle("down")  # cut off mid-run
+        orch.transcriber, orch.chat = FakeTranscriber("Yes."), third
+        await orch.handle("up")  # another yes while it still runs
+        await orch.wait_idle()
+        gate.set()
+        await _until(lambda: rig.confirmations._unreported)
+        await answer(orch, "And?", fourth)
+
+    asyncio.run(scenario())
+    assert len(rig.runner.calls) == 1
+    assert "is still running from the user's last yes; nothing new was run" in third.prompts[0]
+    assert "it ran Send note email" in fourth.prompts[0]
+
+
+def _union(prop):
+    return isinstance(prop.get("type"), list) or "anyOf" in prop
+
+
+def test_every_tool_kind_and_20_skills_stay_within_the_strict_limits(tmp_path):
+    from desk_buddy.apps_store import AppEntry, Bookmark
+    from desk_buddy.tools import MAX_STRICT_TOOLS
+    from desk_buddy.tools.launch import LaunchTools
+    from desk_buddy.tools.media import MediaKeys
+    from desk_buddy.tools.spotify import MusicTools
+    from desk_buddy.tools.urls import SearchResults
+    from desk_buddy.tools.youtube import YouTubeTools
+
+    rig = Rig(tmp_path)
+    for i in range(18):  # 20 skills in all, each with 4 choices and a text field
+        choices = {
+            f"choice_{c}": {"options": ["a", "b"], **({"default": "a"} if n % 2 else {})}
+            for n, c in enumerate("abcd")
+        }
+        rig.add(
+            f"skill-{i:02d}",
+            {
+                "name": f"Skill {i}",
+                "spoken_names": [f"skill number {i}"],
+                "description": "d",
+                "inputs": {"choices": choices, "text": {"description": "Words."}},
+                "needs_yes": i % 2 == 0,
+            },
+        )
+    skills = rig.build()
+    assert len(skills.names) == 20
+    guard = rig.guard
+    registry = build_tools(
+        Settings(anthropic_api_key="k", obsidian_vault_path=str(tmp_path / "vault")),
+        music=MusicTools(object(), guard),
+        launch=LaunchTools(
+            guard,
+            [AppEntry("Notepad", "Notepad", ("notepad",))],
+            [Bookmark("news", "https://news.example")],
+            results=SearchResults(),
+            confirmations=rig.confirmations,
+        ),
+        youtube=YouTubeTools(guard, object()),
+        media=MediaKeys(guard),
+        skills=skills,
+    )
+    schemas = registry.schemas()
+    strict = [s for s in schemas if s["strict"]]
+    assert len(schemas) == 12 + 20
+    assert len(strict) <= MAX_STRICT_TOOLS == 20
+    props = [
+        (name, p) for s in strict for name, p in s["input_schema"].get("properties", {}).items()
+    ]
+    optional = sum(
+        len(s["input_schema"].get("properties", {}))
+        - len(set(s["input_schema"].get("required", [])))
+        for s in strict
+    )
+    assert sum(1 for _, p in props if _union(p)) <= 16
+    assert optional <= 24
+    # Past the budget, skill tools are offered without strict, and still check inputs.
+    loose = [s["name"] for s in schemas if not s["strict"]]
+    assert loose and all(n.startswith("skill_") for n in loose)
+    with pytest.raises(ToolError):
+        registry._tools[loose[0]].func(choice_a="zzz", choice_b="a", choice_c="a", choice_d="a")

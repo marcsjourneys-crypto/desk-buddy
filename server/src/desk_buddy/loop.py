@@ -359,20 +359,24 @@ class Orchestrator:
         note that goes after the user's words, or None. Never raises into the turn. A
         confirmed action that takes over PONDER_AFTER seconds (a slow skill) gets
         PONDERING meanwhile (at most once every PONDER_EVERY seconds)."""
-        if self._confirmations is None:
+        confirmations = self._confirmations
+        if confirmations is None:
             return None
+        # Off the loop: a confirmed action may take a moment (opening a page, a skill).
+        answering = asyncio.ensure_future(asyncio.to_thread(confirmations.answer, text, question))
         try:
-            # Off the loop: a confirmed action may take a moment (opening a page, a skill).
-            answering = asyncio.ensure_future(
-                asyncio.to_thread(self._confirmations.answer, text, question)
-            )
             try:
                 return await asyncio.wait_for(asyncio.shield(answering), PONDER_AFTER)
             except TimeoutError:
                 pass
             await self._ponder(_Turn(user=text), token)
             self._set_state(State.THINKING)
-            return await answering
+            return await asyncio.shield(answering)
+        except asyncio.CancelledError:
+            # Cut off while the action runs: it still finishes, and its note reaches
+            # Claude with the next question instead.
+            answering.add_done_callback(lambda task: _report_late(confirmations, task))
+            raise
         except Exception:
             log.exception("Couldn't answer the pending action")
             return None
@@ -530,6 +534,20 @@ class Orchestrator:
         self._set_state(State.SPEAKING)
         spoken.append(sentence)  # before play: an interrupt mid-sentence still counts it
         await asyncio.to_thread(self.speaker.play, pcm, token)
+
+
+def _report_late(confirmations: Confirmations, task: asyncio.Future[str | None]) -> None:
+    """The answer to a yes whose turn was cut off has finished: hand its note on (or log
+    why there's none). Never raises: it runs as a done-callback."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Couldn't answer the pending action", exc_info=exc)
+        return
+    note = task.result()
+    if note:
+        confirmations.report_late(note)
 
 
 def _tools_succeeded(chat: Chat) -> int:

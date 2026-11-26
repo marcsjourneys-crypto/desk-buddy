@@ -118,6 +118,7 @@ class ActionGuard:
         ok_note: Callable[[str], str] | None = None,
         failed_note: Callable[[ToolError], str] | None = None,
         shown_result: Callable[[str], str] | None = None,
+        title: str | None = None,
     ) -> str:
         """A powerful action: checked and counted now like run(), but not run. It waits
         in `confirmations` (tools.confirm.Confirmations) for the user's spoken yes at the
@@ -126,7 +127,8 @@ class ActionGuard:
         raises ToolError if refused. `public_args` replace `args` on the dashboard (the
         log shows `args`). `verb` (a confirm.Verb, default OPEN) names the action in the
         question and the notes; `ok_note`/`failed_note` let the action write the note
-        Claude gets after a yes; `shown_result` is as in run()."""
+        Claude gets after a yes; `shown_result` is as in run(); `title` names it in
+        the notes when it's shorter than the description."""
         from desk_buddy.tools.confirm import OPEN, PendingAction  # it imports this module
 
         verb = verb or OPEN
@@ -152,6 +154,7 @@ class ActionGuard:
                 ok_note=ok_note,
                 failed_note=failed_note,
                 shown=shown_result,
+                title=title,
             )
         )
         log.info("Action: %s %s -> waiting for a yes", name, shown)

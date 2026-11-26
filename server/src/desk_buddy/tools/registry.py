@@ -33,13 +33,19 @@ class Tool:
     description: str
     input_schema: dict[str, Any]  # strict: additionalProperties false, every property required
     func: Callable[..., str]
+    # False only past the API's strict-schema budget (build_tools); the tool must then
+    # check its inputs itself, as the skill tools do.
+    strict: bool = True
+    # What the "Tool <name> -> ..." log line shows of a result (None: its start). A skill
+    # passes its own, so its output never reaches the log.
+    log_result: Callable[[str], str] | None = None
 
     def schema(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
-            "strict": True,
+            "strict": self.strict,
         }
 
 
@@ -83,11 +89,15 @@ class ToolRegistry:
         except Exception:
             log.exception("Tool %s crashed", name)
             return ToolOutcome("The tool failed unexpectedly.", is_error=True)
-        log.info("Tool %s -> %s", name, _preview(text))
+        shown = tool.log_result(text) if tool.log_result is not None else text
+        log.info("Tool %s -> %s", name, _preview(shown))
         return ToolOutcome(str(text), done=not isinstance(text, NotDone))
 
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def tools(self) -> list[Tool]:
+        return list(self._tools.values())
 
     def __len__(self) -> int:
         return len(self._tools)

@@ -1,14 +1,21 @@
 """skill_<slug>: one tool per approved skill (skills_store), run by the SkillRunner.
 
-- The schema is built from the manifest: each choice an enum (a choice with a default may
-  be null, and the server fills the default in), and the optional text field a string.
-  The server checks everything again: an unknown key or option, a missing required input,
-  text over its max_length or with control characters is refused through the guard.
+- The schema is built from the manifest, within Anthropic's strict-schema limits (which
+  count across every strict tool in a request): every choice is a required, non-null
+  enum (its default is described in words), and the text field is a required string
+  where "" means none. So a skill adds no optional or union-typed parameter. Past the
+  strict-tool budget, build_tools offers skill tools with strict off: the server checks
+  every input itself in any case.
+- The server checks everything again: an unknown key or option (case-insensitive), a
+  missing required input, text over its limit or with control or format characters is
+  refused through the guard.
 - The skill's files are fingerprinted again just before every run (and again when a
-  confirmed one runs, on the yes): a skill that changed or was turned off is refused.
+  confirmed one runs, on the yes); they must still match the approval the tool was built
+  from, or the run is refused.
 - Every run goes through the ActionGuard (computer control, the limits, the log line, the
   dashboard event). A skill with needs_yes waits in Confirmations for the user's spoken
-  yes: "Shall I run <name> with: <text>?".
+  yes: "Shall I run <name> with: <text>?". Its text is at most SPOKEN_TEXT characters and
+  is sent exactly as it is read back.
 - The log and the dashboard show the slug, the choices and the text cut to LOG_TEXT
   characters; never the skill's output (only "Ran <name>.").
 """
@@ -22,12 +29,12 @@ from pathlib import Path
 from typing import Any
 
 from desk_buddy.skills_store import APPROVED, TEXT_KEY, Manifest, Skill, SkillsStore
-from desk_buddy.tools.confirm import RUN
-from desk_buddy.tools.registry import Tool, ToolError
+from desk_buddy.tools.confirm import RUN, ActionCrashed
+from desk_buddy.tools.registry import NotDone, Tool, ToolError
 
 log = logging.getLogger(__name__)
 
-SPOKEN_TEXT = 200  # characters of the text read back in the robot's question
+SPOKEN_TEXT = 200  # characters of text a needs_yes skill takes: all read back in the question
 LOG_TEXT = 60  # characters of the text in the log line and on the dashboard
 LOG_VALUE = 40  # characters of a (maybe invalid) choice value there
 
@@ -38,7 +45,7 @@ BAD_CHOICE = "That isn't one of the options for {choice}: {options}."
 MISSING_TEXT = "That skill needs its text."
 BAD_TEXT = "The text must be plain text."
 LONG_TEXT = "The text can be at most {limit} characters."
-CONTROL_TEXT = "The text can't hold control characters."
+CONTROL_TEXT = "The text can't hold control or invisible formatting characters."
 
 
 class SkillFailed(ToolError):
@@ -50,46 +57,56 @@ class SkillFailed(ToolError):
         self.summary = summary
 
 
-def spoken_text(text: str, limit: int = SPOKEN_TEXT) -> str:
-    """The text as the robot reads it back: one line, no control or format characters,
-    whitespace collapsed, cut to `limit` characters."""
-    kept = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in text)
-    return " ".join(kept.split())[:limit].strip()
+def spoken_text(text: str) -> str:
+    """The text on one line, whitespace collapsed: what a needs_yes skill gets and what
+    the robot reads back (control and format characters are refused before this)."""
+    return " ".join(text.split())
 
 
 def _has_control(text: str) -> bool:
-    return any(unicodedata.category(ch) == "Cc" and ch not in "\n\t" for ch in text)
+    """Control characters other than newline and tab, or format characters (bidi
+    controls, zero-width and tag characters)."""
+    for ch in text:
+        category = unicodedata.category(ch)
+        if (category == "Cc" and ch not in "\n\t") or category == "Cf":
+            return True
+    return False
+
+
+def text_limit(manifest: Manifest) -> int:
+    """The most text the skill takes: its max_length, and for a needs_yes skill at most
+    SPOKEN_TEXT, so the question reads all of it back."""
+    assert manifest.text is not None
+    limit = manifest.text.max_length
+    return min(limit, SPOKEN_TEXT) if manifest.needs_yes else limit
 
 
 def description_for(manifest: Manifest, text: str | None) -> str:
-    """What the yes question names: "<name>" or "<name> with: <text>"."""
+    """What the yes question names: "<name>" or "<name> with: <text>", without a
+    trailing ?, . or ! (the question adds its own "?")."""
     said = spoken_text(text) if text else ""
+    said = said.rstrip("?.!").rstrip() or said
     return f"{manifest.name} with: {said}" if said else manifest.name
 
 
 def input_schema(manifest: Manifest) -> dict[str, Any]:
-    """The strict schema: every property listed in required; optional ones nullable."""
+    """The strict schema: every property required, none nullable (no union types)."""
     properties: dict[str, Any] = {}
     for choice in manifest.choices:
-        options: list[Any] = list(choice.options)
         about = choice.description or f"One of: {', '.join(choice.options)}."
-        if choice.default is None:
-            prop: dict[str, Any] = {"type": "string", "enum": options}
-        else:
-            about += f' Null means the default, "{choice.default}".'
-            prop = {"type": ["string", "null"], "enum": [*options, None]}
-        prop["description"] = about.strip()
-        properties[choice.name] = prop
+        if choice.default is not None:
+            about += f' Use "{choice.default}" unless the user says otherwise.'
+        properties[choice.name] = {
+            "type": "string",
+            "enum": list(choice.options),
+            "description": about.strip(),
+        }
     if manifest.text is not None:
         spec = manifest.text
-        about = f"{spec.description} At most {spec.max_length} characters."
-        if spec.required:
-            properties[TEXT_KEY] = {"type": "string", "description": about}
-        else:
-            properties[TEXT_KEY] = {
-                "type": ["string", "null"],
-                "description": about + " Null if the user gave none.",
-            }
+        about = f"{spec.description} At most {text_limit(manifest)} characters."
+        if not spec.required:
+            about += ' Use "" if the user gave none.'
+        properties[TEXT_KEY] = {"type": "string", "description": about}
     return {
         "type": "object",
         "properties": properties,
@@ -111,6 +128,13 @@ def tool_description(manifest: Manifest) -> str:
             "only if they say yes."
         )
     return text
+
+
+def _log_result(result: str) -> str:
+    """What the tool log line shows of a skill's result: never its output."""
+    if isinstance(result, NotDone):
+        return "(waiting for a yes)"
+    return f"(the skill's output, {len(result)} characters)"
 
 
 class SkillTools:
@@ -135,7 +159,7 @@ class SkillTools:
         self._skills: dict[str, Skill] = {}
         for skill in skills:
             m = skill.manifest
-            if m is None or skill.status != APPROVED:
+            if m is None or skill.status != APPROVED or skill.fingerprint is None:
                 continue
             if m.needs_yes and confirmations is None:
                 log.info("Skills: %s needs a yes, which isn't available; not offered", skill.slug)
@@ -156,6 +180,7 @@ class SkillTools:
                     description=tool_description(skill.manifest),
                     input_schema=input_schema(skill.manifest),
                     func=self._func(skill),
+                    log_result=_log_result,
                 )
             )
         return tools
@@ -189,6 +214,7 @@ class SkillTools:
             confirmations=self._confirmations,
             description=description_for(manifest, text),
             verb=RUN,
+            title=manifest.name,
             ok_note=lambda result: (
                 "(System note: the server asked and the user said yes; it ran "
                 f"{manifest.name}. Result: {result})"
@@ -200,9 +226,9 @@ class SkillTools:
     def _check(
         self, skill: Skill, manifest: Manifest, inputs: Mapping[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """The inputs as the skill gets them (defaults filled in, empty optional text
-        left out), and the arguments for the log and the dashboard. Anything wrong is
-        refused through the guard."""
+        """The inputs as the skill gets them (choices as their listed options, an empty
+        text left out), and the arguments for the log and the dashboard. Anything wrong
+        is refused through the guard."""
         name = skill.tool_name
         choices: dict[str, Any] = {}
         raw_text = inputs.get(TEXT_KEY)
@@ -221,40 +247,57 @@ class SkillTools:
         for choice in manifest.choices:
             value = inputs.get(choice.name)
             options = ", ".join(choice.options)
-            if value is None:
+            if value is None:  # a non-strict call may leave it out
                 if choice.default is None:
                     message = MISSING_CHOICE.format(choice=choice.name, options=options)
                     self._guard.refuse(name, args, message)
                 value = choice.default
-            if not isinstance(value, str) or value not in choice.options:
+            picked = None
+            if isinstance(value, str):
+                picked = next((o for o in choice.options if o == value.strip().lower()), None)
+            if picked is None:
                 message = BAD_CHOICE.format(choice=choice.name, options=options)
                 self._guard.refuse(name, args, message)
-            payload[choice.name] = choices[choice.name] = value
-        spec = manifest.text
-        if spec is not None:
-            if raw_text is not None and not isinstance(raw_text, str):
-                self._guard.refuse(name, args, BAD_TEXT)
-            text = (raw_text or "").replace("\r\n", "\n").strip()
-            if not text:
-                if spec.required:
-                    self._guard.refuse(name, args, MISSING_TEXT)
-            elif _has_control(text):
-                self._guard.refuse(name, args, CONTROL_TEXT)
-            elif len(text) > spec.max_length:
-                self._guard.refuse(name, args, LONG_TEXT.format(limit=spec.max_length))
-            else:
+            payload[choice.name] = choices[choice.name] = picked
+        if manifest.text is not None:
+            text = self._check_text(skill, manifest, raw_text, args)
+            if text:
                 payload[TEXT_KEY] = text
         return payload, args
 
+    def _check_text(
+        self, skill: Skill, manifest: Manifest, raw: Any, args: Mapping[str, Any]
+    ) -> str:
+        name = skill.tool_name
+        assert manifest.text is not None
+        if raw is not None and not isinstance(raw, str):
+            self._guard.refuse(name, args, BAD_TEXT)
+        text = (raw or "").replace("\r\n", "\n").strip()
+        if _has_control(text):
+            self._guard.refuse(name, args, CONTROL_TEXT)
+        if manifest.needs_yes:
+            text = spoken_text(text)  # exactly what the robot reads back
+        if not text and manifest.text.required:
+            self._guard.refuse(name, args, MISSING_TEXT)
+        limit = text_limit(manifest)
+        if len(text) > limit:
+            self._guard.refuse(name, args, LONG_TEXT.format(limit=limit))
+        return text
+
     def _approved_now(self, skill: Skill) -> Skill | None:
-        """The skill as it is on disk right now, if it's still approved with these files;
-        otherwise None."""
+        """The skill as it is on disk right now, if it's still approved with the files
+        this tool was built from; otherwise None."""
         try:
             current = self._store.check(self._skills_dir, skill.slug)
         except Exception:
             log.warning("Skills: couldn't check %s", skill.slug, exc_info=True)
             return None
-        if current is None or current.status != APPROVED or current.manifest is None:
+        if (
+            current is None
+            or current.status != APPROVED
+            or current.manifest is None
+            or current.fingerprint != skill.fingerprint
+        ):
             log.warning("Skills: %s changed or was turned off; not run", skill.slug)
             return None
         return current
@@ -284,5 +327,10 @@ def _failed_note(name: str, exc: ToolError) -> str:
         return (
             f"(System note: the server asked and the user said yes; it tried to run {name}, "
             f"but it {how}.)"
+        )
+    if isinstance(exc, ActionCrashed):
+        return (
+            f"(System note: the server asked and the user said yes; running {name} failed "
+            "unexpectedly, and it may not have run.)"
         )
     return f"(System note: the server asked and the user said yes, but nothing was run: {exc})"

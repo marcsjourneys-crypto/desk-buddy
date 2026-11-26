@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from desk_buddy.config import Settings
 from desk_buddy.tools.notes import NoteVault, note_tools
 from desk_buddy.tools.registry import Tool, ToolRegistry
+
+# Anthropic's strict-schema limits count across every strict tool in one request: at most
+# 20 strict tools, 24 optional parameters and 16 union-typed parameters (type arrays or
+# anyOf). Skill tools add no optional or union-typed parameter, so only the tool count
+# needs a budget: past it, skill tools go without strict (they check their inputs).
+MAX_STRICT_TOOLS = 20
 
 if TYPE_CHECKING:
     from desk_buddy.tools.launch import LaunchTools
@@ -49,5 +56,11 @@ def build_tools(
     if media is not None:
         tools += media.tools()
     if skills is not None:
-        tools += skills.tools()
+        budget = MAX_STRICT_TOOLS - sum(1 for t in tools if t.strict)
+        for tool in skills.tools():
+            if budget > 0:
+                budget -= 1
+            else:
+                tool = dataclasses.replace(tool, strict=False)
+            tools.append(tool)
     return ToolRegistry(tools)

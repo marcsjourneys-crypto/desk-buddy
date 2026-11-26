@@ -93,6 +93,11 @@ def is_yes(text: str) -> bool:
     return any(phrase in pairs for phrase in YES_PHRASES)
 
 
+class ActionCrashed(ToolError):
+    """A confirmed action raised something other than ToolError: it may or may not have
+    done its work (given to failed_note)."""
+
+
 @dataclass(frozen=True)
 class Verb:
     """How the question and the notes name an action: "Shall I {base} …?", "it {third}
@@ -129,6 +134,7 @@ class PendingAction:
     failed_note: Callable[[ToolError], str] | None = None
     # What the log line and the dashboard show of run()'s result (None: the result).
     shown: Callable[[str], str] | None = None
+    title: str | None = None  # a short name for notes ("Send note email"); else description
 
     @property
     def ask(self) -> str:
@@ -156,6 +162,7 @@ class Confirmations:
         # before the user was asked, replaced, dropped): delivered once, with the next
         # answer(). Claude was told each one was waiting, so it must learn it never ran.
         self._unreported: list[str] = []
+        self._running: PendingAction | None = None  # confirmed, and running now
 
     @property
     def pending(self) -> PendingAction | None:
@@ -219,8 +226,28 @@ class Confirmations:
         note = self._answer(action, text, question)
         return " ".join(n for n in (*earlier, note) if n) or None
 
+    def report_late(self, note: str) -> None:
+        """A note answer() produced that never reached Claude (the turn was cut off while
+        a confirmed action ran): delivered once, with the next answer()."""
+        if note:
+            with self._lock:
+                self._unreported.append(note)
+
+    @property
+    def running(self) -> PendingAction | None:
+        """The confirmed action running right now (after a yes), if any."""
+        with self._lock:
+            return self._running
+
     def _answer(self, action: PendingAction | None, text: str, question: int) -> str | None:
         if action is None:
+            running = self.running
+            if running is not None and is_yes(text):
+                return (
+                    f"(System note: {running.title or running.description} is still "
+                    f"{running.verb.doing} from the user's last yes; nothing new was "
+                    f"{running.verb.done}.)"
+                )
             if is_yes(text):
                 return "(System note: nothing was waiting for a yes, so nothing was opened.)"
             return None
@@ -240,6 +267,8 @@ class Confirmations:
                 f"(System note: the pending action, {verb.doing} {what}, was cancelled; the "
                 "user didn't say yes.)"
             )
+        with self._lock:
+            self._running = action
         try:
             result = action.run()
         except ToolError as exc:
@@ -251,8 +280,12 @@ class Confirmations:
             log.exception("Confirmed action %s crashed", action.tool)
             self._outcome(action, "failed", "The action failed unexpectedly.")
             if action.failed_note is not None:
-                return action.failed_note(ToolError("failed unexpectedly"))
+                return action.failed_note(ActionCrashed("The action failed unexpectedly."))
             return failed_note(what, verb)
+        finally:
+            with self._lock:
+                if self._running is action:
+                    self._running = None
         self._outcome(action, "ok", action.shown(result) if action.shown else result)
         if action.ok_note is not None:
             return action.ok_note(result)
