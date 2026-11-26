@@ -127,3 +127,12 @@ def test_the_apps_tab_has_a_skills_section_with_its_safety_line():
     ):
         assert call in JS
     assert "loadSkills()" in JS[JS.index("async function loadApps") :]
+
+
+def test_a_smart_reply_shows_its_model_and_route_as_plain_text():
+    assert "function modelLabel(event)" in JS
+    assert 'event.model.replace(/^claude-/, "")' in JS
+    assert "${event.route}" in JS
+    assert 'el("span", { class: "model", text: label })' in JS  # textContent via el()
+    assert "modelLabel(event)" in JS.split('case "reply":', 1)[1].split("break;", 1)[0]
+    assert ".msg .meta .model" in CSS

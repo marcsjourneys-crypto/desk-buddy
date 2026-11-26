@@ -160,7 +160,7 @@
     $("actions-empty").hidden = false;
   }
 
-  function say(who, text, meta, ts) {
+  function say(who, text, meta, ts, label) {
     addItem(
       "transcript",
       "transcript-empty",
@@ -169,9 +169,20 @@
         { class: `msg ${who}` },
         el("span", { class: "who", text: who === "you" ? "You" : who === "note" ? "" : "CARL" }),
         el("span", { class: "text", text }),
-        el("span", { class: "meta", text: [time(ts), meta].filter(Boolean).join(" · ") }),
+        el(
+          "span",
+          { class: "meta", text: [time(ts), meta].filter(Boolean).join(" · ") },
+          label ? el("span", { class: "model", text: label }) : null,
+        ),
       ),
     );
+  }
+
+  // Which model answered, for a reply that used (or tried) the smart model:
+  // "sonnet-5-5 · asked". Nothing for a plain Haiku reply.
+  function modelLabel(event) {
+    if (typeof event.model !== "string" || typeof event.route !== "string") return null;
+    return `${event.model.replace(/^claude-/, "")} · ${event.route}`;
   }
 
   function ms(value) {
@@ -215,6 +226,7 @@
           event.text,
           `[${event.emotion}] · first word ${ms(event.first_token_ms)} · first sound ${ms(event.first_audio_ms)}`,
           event.ts,
+          modelLabel(event),
         );
         break;
       case "line":

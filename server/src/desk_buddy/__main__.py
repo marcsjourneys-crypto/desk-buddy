@@ -17,6 +17,7 @@ from desk_buddy.apps_store import AppsStore
 from desk_buddy.audio import AudioDeviceError, Microphone, Speaker, check_audio_devices
 from desk_buddy.brain.memory import Conversation
 from desk_buddy.brain.personality import Personality
+from desk_buddy.brain.smart import SmartRouter
 from desk_buddy.config import (
     ConfigError,
     Settings,
@@ -166,6 +167,7 @@ async def _run(settings: Settings) -> None:
             search_results=brain.search_results,
             # Read at each wake and follow-up: dashboard changes apply at the next one.
             hands_free=lambda: hands_free_settings(live.latest),
+            smart_router=SmartRouter(),  # one for the process: the stay outlives each chat
         )
         stack.push_async_callback(orchestrator.shutdown)
         live.on_question(brain.on_settings)

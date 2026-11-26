@@ -18,6 +18,7 @@ from desk_buddy.audio import duration_seconds
 from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
 from desk_buddy.brain.memory import Conversation, is_forget_command
 from desk_buddy.brain.personality import Line, Personality
+from desk_buddy.brain.smart import UNAVAILABLE, SmartRouter
 from desk_buddy.events import NULL_BUS
 from desk_buddy.llm import Chat, LLMError, LLMRefusal, SentenceSplitter
 from desk_buddy.stt import Transcriber
@@ -152,6 +153,7 @@ class Orchestrator:
         search_results: SearchResults | None = None,
         hands_free: Callable[[], HandsFree] = HandsFree,
         endpointer: Callable[..., Endpointer] = Endpointer,
+        smart_router: SmartRouter | None = None,
     ) -> None:
         self.mic = mic
         self.transcriber = transcriber
@@ -178,6 +180,9 @@ class Orchestrator:
         # open_search_result may open): each question with speech moves them along.
         self._search_results = search_results
         self._questions = 0  # questions with speech so far
+        # When a question goes to the smart model (a phrase, or the stay after a smart
+        # answer). Lives here, not in the chat, which is rebuilt between turns.
+        self._smart = smart_router
         # Hands-free listening (after a wake word, or the follow-up after a reply): its
         # kind ("wake" or "follow_up"), its end-of-speech detector, and a generation that
         # makes the detector's late results stale once it is stopped.
@@ -609,6 +614,8 @@ class Orchestrator:
                 if self._search_results is not None:
                     self._search_results.clear()
                 self.conversation.forget()
+                if self._smart is not None:
+                    self._smart.forget()
                 log.info("Memory cleared")
                 await self._say(self._line("forget"), token)
                 replied = True
@@ -624,6 +631,10 @@ class Orchestrator:
                 self.chat.last_tool_rounds = []  # never remember an earlier turn's tools
             if hasattr(self.chat, "searches"):
                 self.chat.searches = []  # ...or its searches
+            if self._smart is not None and hasattr(self.chat, "smart_route"):
+                self.chat.smart_route = self._smart.route(text)
+            if hasattr(self.chat, "answered_by"):
+                self.chat.answered_by = None  # never an earlier turn's model
             queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(maxsize=2)
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._produce(turn, queue))
@@ -650,19 +661,35 @@ class Orchestrator:
                 self._confirmations.cancel_unarmed("The user wasn't asked (cut off or failed).")
             if turn:
                 self._remember(turn)
+                answered_by = getattr(self.chat, "answered_by", None)
+                self._note_answer(turn, answered_by)
                 if turn.spoken:  # what CARL actually said, even if it was cut off
+                    smart = (
+                        {"model": answered_by[0], "route": answered_by[1]} if answered_by else {}
+                    )
                     self._publish(
                         "reply",
                         text=" ".join(turn.spoken),
                         emotion=turn.emotion or DEFAULT_EMOTION,
                         first_token_ms=turn.first_token_ms,
                         first_audio_ms=turn.first_audio_ms,
+                        **smart,
                     )
             if not asyncio.current_task().cancelling():
                 if replied and kind is not None:
                     await self._follow_up()
                 else:
                     self._set_state(State.IDLE)
+
+    def _note_answer(self, turn: _Turn, answered_by: tuple[str, str] | None) -> None:
+        """Tell the router who answered, so a smart answer starts (or restarts) the stay
+        and a Haiku one ends it. A reply that was heard counts even if it was cut off (or
+        ended at the server's yes question); a failed turn, or one cut off before CARL
+        said anything, leaves the stay as it was."""
+        if self._smart is None or turn.failed:
+            return
+        if turn.complete or turn.spoken or turn.asked:
+            self._smart.answered(answered_by is not None and answered_by[1] != UNAVAILABLE)
 
     def _remember(self, turn: _Turn) -> None:
         """Keep what the user actually heard, plus every tool call that ran (the action

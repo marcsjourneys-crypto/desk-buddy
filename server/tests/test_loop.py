@@ -19,6 +19,7 @@ from desk_buddy.brain.personality import (
     REFUSAL_LINE,
     TASK_DONE,
 )
+from desk_buddy.brain.smart import ASKED, FOLLOW_ON, STAY_SECONDS, UNAVAILABLE, SmartRouter
 from desk_buddy.llm import ClaudeChat, LLMError, LLMRefusal, Search, publish_search
 from desk_buddy.loop import Orchestrator, State
 from desk_buddy.tools.actions import ActionGuard
@@ -1742,3 +1743,194 @@ def test_open_that_page_from_the_last_questions_search_end_to_end(search_allowed
     q3 = sent[6]["content"]
     assert q3.startswith("Yes. (System note: the server asked and the user said yes")
     assert "pages from your last search" not in q3  # Q2 searched nothing
+
+
+# --- The smart model: routing and the stay ---
+
+
+class SmartChat(FakeChat):
+    """Records the route the loop set; answers on the smart model when routed (like
+    ClaudeChat), or on Haiku after a failed smart call when `unavailable`."""
+
+    def __init__(self, *args, unavailable: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.smart_route = None
+        self.answered_by = None
+        self.routes = []
+        self.unavailable = unavailable
+
+    async def stream_reply(self, history, text: str):
+        self.routes.append(self.smart_route)
+        self.answered_by = None
+        if self.smart_route:
+            route = UNAVAILABLE if self.unavailable else self.smart_route
+            self.answered_by = ("claude-sonnet-5-5", route)
+        async for delta in super().stream_reply(history, text):
+            yield delta
+
+
+def smart_rig(chat=None, clock=None, **overrides):
+    clock = clock or FakeClock(1000.0)
+    chat = chat or SmartChat()
+    transcriber = FakeTranscriber()
+    orch, parts, _ = make(
+        chat=chat,
+        transcriber=transcriber,
+        smart_router=SmartRouter(clock=clock),
+        **overrides,
+    )
+    return orch, chat, transcriber, clock
+
+
+def test_a_spoken_phrase_routes_the_question_to_the_smart_model():
+    orch, chat, transcriber, _ = smart_rig()
+    transcriber.text = "Think hard about prime numbers"
+    asyncio.run(talk(orch))
+    assert chat.routes == [ASKED]
+
+
+def test_the_next_question_within_the_stay_is_a_follow_on_and_later_ones_are_not():
+    orch, chat, transcriber, clock = smart_rig()
+
+    async def scenario():
+        transcriber.text = "think hard: what's 17 times 23?"
+        await talk(orch)
+        clock.now += 60
+        transcriber.text = "and divided by 7?"
+        await talk(orch)
+        clock.now += STAY_SECONDS + 1
+        transcriber.text = "what time is it?"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, FOLLOW_ON, None]
+
+
+def test_a_haiku_answer_ends_the_stay():
+    orch, chat, transcriber, clock = smart_rig()
+
+    async def scenario():
+        transcriber.text = "think hard about it"
+        await talk(orch)
+        chat.unavailable = True  # the follow-on fails over to Haiku
+        transcriber.text = "and then?"
+        await talk(orch)
+        chat.unavailable = False
+        transcriber.text = "and after that?"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, FOLLOW_ON, None]
+
+
+def test_a_forget_ends_the_stay():
+    orch, chat, transcriber, _ = smart_rig()
+
+    async def scenario():
+        transcriber.text = "think hard about it"
+        await talk(orch)
+        transcriber.text = "forget that"
+        await talk(orch)
+        transcriber.text = "what's new?"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, None]
+
+
+def test_a_failed_turn_neither_starts_nor_ends_a_stay():
+    orch, chat, transcriber, _ = smart_rig()
+
+    async def scenario():
+        chat.error = LLMError("boom")
+        transcriber.text = "think hard about it"
+        await talk(orch)  # failed: no stay
+        transcriber.text = "hello?"
+        await talk(orch)
+        chat.error = None
+        transcriber.text = "think hard about it"
+        await talk(orch)  # a stay starts
+        chat.error = LLMError("boom")
+        transcriber.text = "and then?"
+        await talk(orch)  # failed: the stay is unchanged
+        chat.error = None
+        transcriber.text = "and then?"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, None, ASKED, FOLLOW_ON, FOLLOW_ON]
+
+
+def test_a_cut_off_smart_reply_still_keeps_the_stay():
+    speaker = FakeSpeaker(block=True)
+    orch, chat, transcriber, _ = smart_rig(speaker=speaker)
+
+    async def scenario():
+        transcriber.text = "think hard about it"
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")  # cut off after it started speaking
+        speaker.block = False
+        transcriber.text = "go on"
+        await orch.handle("up")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, FOLLOW_ON]
+
+
+def test_without_a_router_the_route_is_never_set():
+    chat = SmartChat()
+    orch, _, _ = make(chat=chat, transcriber=FakeTranscriber("think hard about it"))
+    asyncio.run(talk(orch))
+    assert chat.routes == [None]
+
+
+def test_the_reply_event_names_the_model_and_route_only_when_smart():
+    bus = RecordingBus()
+    orch, chat, transcriber, clock = smart_rig(bus=bus)
+
+    async def scenario():
+        transcriber.text = "think hard about it"
+        await talk(orch)
+        clock.now += STAY_SECONDS + 1
+        transcriber.text = "hello"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    smart, plain = bus.of("reply")
+    assert smart["model"] == "claude-sonnet-5-5" and smart["route"] == ASKED
+    assert "model" not in plain and "route" not in plain
+
+
+def test_a_chat_without_answered_by_publishes_no_model():
+    bus = RecordingBus()
+    orch, _, _ = make(
+        bus=bus, smart_router=SmartRouter(), transcriber=FakeTranscriber("think hard")
+    )
+    asyncio.run(talk(orch))
+    (reply,) = bus.of("reply")
+    assert "model" not in reply and "route" not in reply
+
+
+def test_a_smart_turn_that_ends_at_the_yes_question_keeps_the_stay():
+    class SmartProposingChat(ProposingChat, SmartChat):
+        pass
+
+    rig = YesRig()
+    chat = SmartProposingChat(rig, deltas=())  # says nothing: the server asks
+    orch, parts, _ = rig.orchestrator(
+        chat=chat,
+        transcriber=FakeTranscriber("Think hard, then open that page."),
+        smart_router=SmartRouter(clock=FakeClock(1000.0)),
+    )
+
+    async def scenario():
+        await talk(orch)
+        assert parts["speaker"].played == [ASK]
+        orch.transcriber = FakeTranscriber("Hmm, and what else?")  # not a yes
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, FOLLOW_ON]
