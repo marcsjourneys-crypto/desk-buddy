@@ -15,6 +15,7 @@ import anthropic
 
 from desk_buddy.brain.memory import merge_consecutive
 from desk_buddy.brain.personality import Personality, system_prompt
+from desk_buddy.brain.smart import ASKED, UNAVAILABLE
 from desk_buddy.config import Settings
 from desk_buddy.skills_store import TOOL_PREFIX as SKILL_TOOL_PREFIX
 from desk_buddy.tools.actions import publish_action
@@ -132,6 +133,38 @@ def _block_web_search() -> None:
     _web_search_blocked = True
 
 
+# The smart model for hard questions (SMART_MODEL). Thinking counts toward max_tokens.
+SMART_MAX_TOKENS = 8192
+SMART_OFF_HINT = (
+    "SMART_MODEL %r isn't available to this API key; answering on LLM_MODEL until restart "
+    "(set SMART_MODEL=off to silence this)"
+)
+# Set once the API said the smart model doesn't exist or this key can't use it.
+# Module-level for the same reason as _web_search_blocked.
+_smart_blocked = False
+
+
+def smart_blocked() -> bool:
+    """True once the API refused the smart model for this key (until the next restart)."""
+    return _smart_blocked
+
+
+def _block_smart(model: str) -> None:
+    global _smart_blocked
+    if not _smart_blocked:
+        log.warning(SMART_OFF_HINT, model)
+    _smart_blocked = True
+
+
+@dataclass
+class _Turn:
+    """What one reply's runs share: searches seen and reported, and whether text was said."""
+
+    searching: dict[str, str] = field(default_factory=dict)  # search id -> query
+    reported: set[str] = field(default_factory=set)  # search ids already reported
+    spoke: bool = False
+
+
 @dataclass(frozen=True)
 class Search:
     """One web search Claude ran: the query, ok or failed, and what came back."""
@@ -205,16 +238,28 @@ class ClaudeChat:
         web_search_max: int | None = None,
         location: Callable[[], Mapping[str, str]] = dict,
         on_search: Callable[[Search], None] | None = None,
+        smart_model: str | None = None,
+        plain_system: str | Callable[[], str] | None = None,
     ) -> None:
         """web_search_max: searches per request, or None for no web search. location:
         the user's rough location ({"city", "region", "country"}, any subset), read for
         every request. on_search: told about each search (the dashboard); never raises
-        into the reply."""
+        into the reply. smart_model: the model for hard questions, or None. plain_system:
+        the prompt without the think_harder rule (default: `system`)."""
         # client: anthropic.AsyncAnthropic (typed Any so tests can pass a fake)
         self._client = client
         self._model = model
         self._effort = effort
         self._system = system if callable(system) else (lambda: system)
+        if plain_system is None:
+            self._plain_system = self._system
+        else:
+            self._plain_system = plain_system if callable(plain_system) else (lambda: plain_system)
+        self._smart_model = smart_model or None
+        # Set by the loop before each reply: smart.ASKED, smart.FOLLOW_ON or None.
+        self.smart_route: str | None = None
+        # (model, route) after a reply that used or tried the smart model; else None.
+        self.answered_by: tuple[str, str] | None = None
         self._tools = tools or ToolRegistry()
         self._web_search_max = web_search_max
         self._location = location
@@ -247,6 +292,10 @@ class ClaudeChat:
         Each web search is reported as soon as its result arrives, so a reply cut off
         later still shows and remembers it.
 
+        With `smart_route` set and the smart model available, the reply runs on the smart
+        model; if that fails before saying anything or running a tool (not a refusal), it
+        runs again on `model`, and `answered_by` says so.
+
         Raises LLMError (any API or network failure) or LLMRefusal. Either can arrive
         after some text was already yielded, so callers must handle a partial reply.
         """
@@ -254,9 +303,90 @@ class ClaudeChat:
         messages: list[Any] = merge_consecutive([*history, {"role": "user", "content": user_text}])
         self.last_tool_rounds = []
         self.searches = []
-        searching: dict[str, str] = {}  # web search id -> query, until its result arrives
-        reported: set[str] = set()  # web search ids already reported
-        spoke = False
+        self.answered_by = None
+        turn = _Turn()
+        route = self.smart_route
+        if route is not None and self.smart_available:
+            async for delta in self._smart_run(messages, turn, route):
+                yield delta
+            return
+        async for delta in self._haiku_run(messages, turn):
+            yield delta
+
+    @property
+    def smart_available(self) -> bool:
+        """Whether a question may go to the smart model now."""
+        return (
+            self._smart_model is not None
+            and not smart_blocked()
+            and self._smart_model != self._model
+        )
+
+    def _haiku_run(self, messages: list[Any], turn: _Turn) -> AsyncGenerator[str, None]:
+        """The reply on `model` (no handover: Task 4 adds it)."""
+        return self._rounds(
+            messages,
+            turn,
+            model=self._model,
+            effort=self._effort,
+            max_tokens=MAX_TOKENS,
+            system=self._system,
+        )
+
+    async def _smart_run(
+        self, messages: list[Any], turn: _Turn, route: str
+    ) -> AsyncGenerator[str, None]:
+        """The reply on the smart model, falling back to `model` if it fails at once."""
+        smart = self._smart_model
+        assert smart is not None
+        log.info("Model: %s (%s)", smart, route)
+        self.answered_by = (smart, route)
+        yielded = False
+        try:
+            async for delta in self._rounds(
+                messages,
+                turn,
+                model=smart,
+                effort="high" if route == ASKED else "medium",
+                max_tokens=SMART_MAX_TOKENS,
+                system=self._plain_system,
+            ):
+                yielded = True
+                yield delta
+            return
+        except LLMRefusal:
+            raise
+        except LLMError as exc:
+            if yielded or self.last_tool_rounds:
+                raise
+            log.warning("Smart model failed (%s); answering on %s", exc, self._model)
+            if isinstance(
+                exc.__cause__, (anthropic.NotFoundError, anthropic.PermissionDeniedError)
+            ):
+                _block_smart(smart)
+        self.answered_by = (self._model, UNAVAILABLE)
+        async for delta in self._rounds(
+            messages,
+            turn,
+            model=self._model,
+            effort=self._effort,
+            max_tokens=MAX_TOKENS,
+            system=self._plain_system,
+        ):
+            yield delta
+
+    async def _rounds(
+        self,
+        messages: list[Any],
+        turn: _Turn,
+        *,
+        model: str,
+        effort: str,
+        max_tokens: int,
+        system: Callable[[], str],
+    ) -> AsyncGenerator[str, None]:
+        """Up to MAX_TOOL_ROUNDS API calls on one model, running tools between them."""
+        searching, reported = turn.searching, turn.reported
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             last = round_no == MAX_TOOL_ROUNDS
             retried = False
@@ -266,7 +396,15 @@ class ClaudeChat:
                 said_here = False
                 try:
                     async with self._client.messages.stream(
-                        **self._params(messages, last=last, web=web)
+                        **self._params(
+                            messages,
+                            model=model,
+                            effort=effort,
+                            max_tokens=max_tokens,
+                            system=system,
+                            last=last,
+                            web=web,
+                        )
                     ) as stream:
                         async for event in stream:
                             if event.type == "content_block_start":
@@ -281,10 +419,10 @@ class ClaudeChat:
                                 event.type == "content_block_delta"
                                 and event.delta.type == "text_delta"
                             ):
-                                if new_block and spoke:
+                                if new_block and turn.spoke:
                                     yield "\n"  # keep sentences from separate parts apart
                                 new_block = False
-                                spoke = said_here = True
+                                turn.spoke = said_here = True
                                 yield event.delta.text
                         message = await stream.get_final_message()
                     break
@@ -307,14 +445,18 @@ class ClaudeChat:
             if message.stop_reason == "refusal":
                 raise LLMRefusal("Claude declined to answer")
             if message.stop_reason == "max_tokens":
-                log.warning("reply truncated: stop_reason=max_tokens (MAX_TOKENS=%d)", MAX_TOKENS)
-                if not spoke:
+                log.warning(
+                    "reply truncated: stop_reason=max_tokens (%s, max_tokens=%d)",
+                    model,
+                    max_tokens,
+                )
+                if not turn.spoke:
                     raise LLMError("reply ran out of room before saying anything")
                 return
             if message.stop_reason == "pause_turn":
                 if last:
                     log.warning("reply paused on the last round; ending it")
-                    if not spoke:
+                    if not turn.spoke:
                         raise LLMError("reply paused before saying anything")
                     return
                 # Resume: the content goes back as is, with no new user message.
@@ -365,12 +507,24 @@ class ClaudeChat:
                 ]
             )
 
-    def _params(self, messages: list[Any], *, last: bool, web: bool) -> dict[str, Any]:
+    def _params(
+        self,
+        messages: list[Any],
+        *,
+        model: str,
+        effort: str,
+        max_tokens: int,
+        system: Callable[[], str],
+        last: bool,
+        web: bool,
+    ) -> dict[str, Any]:
+        # No "thinking" key: both models think adaptively by default (and "disabled" is a
+        # 400 on some).
         params: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": MAX_TOKENS,
-            "system": self._system(),
-            "output_config": {"effort": self._effort},
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system(),
+            "output_config": {"effort": effort},
             "messages": messages,
         }
         tools = self._tools.schemas()

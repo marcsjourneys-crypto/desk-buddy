@@ -9,10 +9,12 @@ import pytest
 
 import desk_buddy.llm as llm_module
 from desk_buddy.brain.personality import About, Personality
+from desk_buddy.brain.smart import ASKED, FOLLOW_ON, UNAVAILABLE
 from desk_buddy.config import Settings
 from desk_buddy.llm import (
     INTERRUPTED_RESULT,
     MAX_TOOL_ROUNDS,
+    SMART_MAX_TOKENS,
     ClaudeChat,
     LLMError,
     LLMRefusal,
@@ -931,3 +933,162 @@ def test_a_planted_instruction_in_a_search_result_cant_get_past_the_guard(search
     collect(chat, "news?")
     assert len(played) == 3
     assert sum(r.get("is_error", False) for r in client.calls[1]["messages"][-1]["content"]) == 2
+
+
+# --- The smart model (hard questions) ---
+
+
+@pytest.fixture(autouse=True)
+def smart_allowed(monkeypatch):
+    """The 'smart model unavailable' flag is clear, and is cleared again afterwards."""
+    monkeypatch.setattr(llm_module, "_smart_blocked", False)
+
+
+def smart_chat(*streams, tools=None, smart="big", route=None, system="sys", plain="plain"):
+    client = FakeClient(*streams)
+    chat = ClaudeChat(
+        client,
+        model="m",
+        effort="low",
+        system=system,
+        tools=tools,
+        smart_model=smart,
+        plain_system=plain,
+    )
+    chat.smart_route = route
+    return chat, client
+
+
+def connection_error():
+    return anthropic.APIConnectionError(request=httpx2.Request("POST", URL))
+
+
+def test_without_a_smart_model_a_route_changes_nothing():
+    chat, client = make_chat(FakeStream(["hi"]))
+    chat.smart_route = ASKED
+    assert collect(chat, "think hard") == ["hi"]
+    (call,) = client.calls
+    assert (call["model"], call["max_tokens"], call["system"]) == (
+        "m",
+        llm_module.MAX_TOKENS,
+        "sys",
+    )
+    assert call["output_config"] == {"effort": "low"}
+    assert "tools" not in call
+    assert chat.answered_by is None
+
+
+def test_an_asked_route_answers_on_the_smart_model(caplog):
+    chat, client = smart_chat(FakeStream(["Deep."]), route=ASKED)
+    with caplog.at_level("INFO", logger="desk_buddy.llm"):
+        assert collect(chat, "think hard about it") == ["Deep."]
+    (call,) = client.calls
+    assert call["model"] == "big"
+    assert call["output_config"] == {"effort": "high"}
+    assert call["max_tokens"] == SMART_MAX_TOKENS == 8192
+    assert call["system"] == "plain"
+    assert "thinking" not in call
+    assert chat.answered_by == ("big", ASKED)
+    assert "Model: big (asked)" in caplog.text
+
+
+def test_a_follow_on_route_uses_medium_effort():
+    chat, client = smart_chat(FakeStream(["Deep."]), route=FOLLOW_ON)
+    collect(chat, "and then?")
+    assert client.calls[0]["model"] == "big"
+    assert client.calls[0]["output_config"] == {"effort": "medium"}
+    assert chat.answered_by == ("big", FOLLOW_ON)
+
+
+def test_answered_by_is_reset_for_each_reply():
+    chat, client = smart_chat(FakeStream(["a"]), FakeStream(["b"]), route=ASKED)
+    collect(chat, "one")
+    chat.smart_route = None
+    collect(chat, "two")
+    assert chat.answered_by is None
+    assert client.calls[1]["model"] == "m"
+
+
+def test_a_route_is_ignored_when_the_smart_model_is_blocked_or_the_same(monkeypatch):
+    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    chat, client = smart_chat(FakeStream(["hi"]), route=ASKED)
+    assert not chat.smart_available
+    collect(chat, "think hard")
+    assert client.calls[0]["model"] == "m"
+    assert chat.answered_by is None
+    monkeypatch.setattr(llm_module, "_smart_blocked", False)
+    chat, client = smart_chat(FakeStream(["hi"]), smart="m", route=ASKED)
+    assert not chat.smart_available
+    collect(chat, "think hard")
+    assert client.calls[0]["max_tokens"] == llm_module.MAX_TOKENS
+
+
+def test_a_failed_smart_call_before_any_text_falls_back_to_haiku(caplog):
+    chat, client = smart_chat(
+        FakeStream([], error=connection_error()), FakeStream(["Quick."]), route=ASKED
+    )
+    with caplog.at_level("WARNING", logger="desk_buddy.llm"):
+        assert collect(chat, "think hard") == ["Quick."]
+    first, second = client.calls
+    assert first["model"] == "big"
+    assert second["model"] == "m"
+    assert second["max_tokens"] == llm_module.MAX_TOKENS
+    assert second["output_config"] == {"effort": "low"}
+    assert "tools" not in second
+    assert chat.answered_by == ("m", UNAVAILABLE)
+    assert "Smart model failed (can't reach the API); answering on m" in caplog.text
+    assert not llm_module.smart_blocked()
+
+
+@pytest.mark.parametrize(
+    ("cls", "status"),
+    [(anthropic.NotFoundError, 404), (anthropic.PermissionDeniedError, 403)],
+)
+def test_a_model_the_key_cant_use_blocks_the_smart_model_until_restart(caplog, cls, status):
+    chat, _ = smart_chat(
+        FakeStream([], error=status_error(cls, status)), FakeStream(["Quick."]), route=ASKED
+    )
+    with caplog.at_level("WARNING", logger="desk_buddy.llm"):
+        assert collect(chat, "think hard") == ["Quick."]
+        assert llm_module.smart_blocked()
+        assert chat.answered_by == ("m", UNAVAILABLE)
+        # The next chat object (rebuilt between turns) ignores the route.
+        rebuilt, client = smart_chat(FakeStream(["Hi."]), route=ASKED)
+        collect(rebuilt, "think hard again")
+        llm_module._block_smart("big")
+    assert client.calls[0]["model"] == "m"
+    assert rebuilt.answered_by is None
+    assert caplog.text.count("SMART_MODEL 'big' isn't available to this API key") == 1
+
+
+def test_a_smart_error_after_text_is_an_error_without_a_fallback():
+    chat, client = smart_chat(
+        FakeStream(["Hel"], stream_error=connection_error()), FakeStream(["never"]), route=ASKED
+    )
+    with pytest.raises(LLMError):
+        collect(chat, "think hard")
+    assert len(client.calls) == 1
+
+
+def test_a_smart_error_after_a_tool_round_is_an_error_without_a_fallback():
+    calls = []
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use()])
+    chat, client = smart_chat(
+        first,
+        FakeStream([], error=connection_error()),
+        FakeStream(["never"]),
+        tools=note_registry(calls),
+        route=ASKED,
+    )
+    with pytest.raises(LLMError):
+        collect(chat, "think hard and note it")
+    assert len(client.calls) == 2 and calls == ["buy milk"]
+
+
+def test_a_smart_refusal_never_falls_back():
+    chat, client = smart_chat(
+        FakeStream([], stop_reason="refusal"), FakeStream(["never"]), route=ASKED
+    )
+    with pytest.raises(LLMRefusal):
+        collect(chat, "think hard")
+    assert len(client.calls) == 1
