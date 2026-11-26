@@ -223,6 +223,19 @@
       case "interrupted":
         say("note", "Interrupted", "", event.ts);
         break;
+      case "wake":
+        say("note", "Heard “Hey CARL”", `score ${Number(event.score).toFixed(2)}`, event.ts);
+        break;
+      case "false_wake":
+        say("note", "False wake: no question followed", "", event.ts);
+        break;
+      case "follow_up":
+        if (event.active) {
+          say("note", "Listening for a follow-up", `${Number(event.seconds)} s`, event.ts);
+        } else {
+          say("note", event.heard ? "Follow-up question heard" : "Follow-up ended", "", event.ts);
+        }
+        break;
       case "action":
         action(event);
         break;

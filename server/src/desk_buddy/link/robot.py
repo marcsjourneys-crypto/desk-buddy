@@ -180,9 +180,10 @@ class RobotLink:
         except RuntimeError:  # loop already closed during shutdown
             pass
 
-    def send_wake_config(self, enabled: bool, threshold: float) -> None:
-        """Set the robot's wake word on or off and its threshold (0.5-0.99) until it
-        restarts. Raises ValueError for a bad value, before anything is sent."""
+    def send_wake_config(self, enabled: bool, threshold: float | None = None) -> None:
+        """Set the robot's wake word on or off and its threshold (0.5-0.99; None keeps
+        the robot's own) until it restarts. Raises ValueError for a bad value, before
+        anything is sent."""
         self.send(protocol.wake_config(enabled, threshold))
 
     def _enqueue(self, item: Any) -> None:

@@ -104,14 +104,19 @@ def audio_stop() -> dict[str, Any]:
     return {"type": "audio_stop"}
 
 
-def wake_config(enabled: bool, threshold: float) -> dict[str, Any]:
-    """The robot's wake word settings. Raises ValueError for a bad value (never sent)."""
+def wake_config(enabled: bool, threshold: float | None = None) -> dict[str, Any]:
+    """The robot's wake word settings. With no threshold, the robot keeps its own (NVS)
+    one. Raises ValueError for a bad value (never sent)."""
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be a bool")
+    msg: dict[str, Any] = {"type": "wake_config", "enabled": enabled}
+    if threshold is None:
+        return msg
     if (
         isinstance(threshold, bool)
         or not isinstance(threshold, int | float)
         or not WAKE_THRESHOLD_MIN <= threshold <= WAKE_THRESHOLD_MAX
     ):
         raise ValueError(f"threshold must be from {WAKE_THRESHOLD_MIN} to {WAKE_THRESHOLD_MAX}")
-    return {"type": "wake_config", "enabled": enabled, "threshold": float(threshold)}
+    msg["threshold"] = float(threshold)
+    return msg

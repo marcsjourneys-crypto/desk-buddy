@@ -43,6 +43,8 @@ MAX_VALUE = 300  # characters of any one setting
 NEXT_QUESTION = "next question"
 NEXT_SENTENCE = "next sentence"
 AFTER_RESTART = "after restart"
+AT_ONCE = "at once"
+NEXT_WAKE = "next wake"
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,28 @@ EDITABLE: tuple[Editable, ...] = (
     Editable("WEB_SEARCH", "Web", NEXT_QUESTION, "switch", "Web search"),
     Editable("WEB_SEARCH_MAX", "Web", NEXT_QUESTION, "int", "Searches per question (1-5)"),
     Editable("SKILLS_DIR", "Skills", NEXT_QUESTION, "path", "Skills folder (blank: off)"),
+    Editable("WAKE_WORD", "Wake word", AT_ONCE, "switch", 'Listen for "Hey CARL"'),
+    Editable(
+        "WAKE_THRESHOLD",
+        "Wake word",
+        AT_ONCE,
+        "float",
+        "Detection threshold (0.50-0.99; blank: the robot's own)",
+    ),
+    Editable(
+        "FOLLOW_UP_SECONDS",
+        "Wake word",
+        NEXT_WAKE,
+        "float",
+        "Follow-up listening, seconds (0-15; 0: off)",
+    ),
+    Editable(
+        "WAKE_END_SILENCE",
+        "Wake word",
+        NEXT_WAKE,
+        "float",
+        "Silence that ends a question, seconds (0.4-2.0)",
+    ),
     Editable("STT_MODEL", "Speech recognition and keys", AFTER_RESTART, "text", "Whisper model"),
     Editable(
         "STT_DEVICE", "Speech recognition and keys", AFTER_RESTART, "choice", "Device", STT_DEVICES

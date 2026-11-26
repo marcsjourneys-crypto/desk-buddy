@@ -46,6 +46,10 @@ ENV_KEYS = (
     "WEB_SEARCH_MAX",
     "YOUTUBE_API_KEY",
     "SKILLS_DIR",
+    "WAKE_WORD",
+    "WAKE_THRESHOLD",
+    "FOLLOW_UP_SECONDS",
+    "WAKE_END_SILENCE",
 )
 
 # The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
@@ -69,6 +73,10 @@ DASHBOARD_KEYS = frozenset(
         "WEB_SEARCH",
         "WEB_SEARCH_MAX",
         "SKILLS_DIR",
+        "WAKE_WORD",
+        "WAKE_THRESHOLD",
+        "FOLLOW_UP_SECONDS",
+        "WAKE_END_SILENCE",
     }
 )
 
@@ -90,6 +98,10 @@ MIN_TTS_SPEED, MAX_TTS_SPEED = 0.5, 2.0
 # never be a path ("/", "\", ".."). Use with fullmatch.
 PIPER_VOICE_NAME = re.compile(r"[A-Za-z]+_[A-Za-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+", re.ASCII)
 MIN_TOKEN_CHARS = 16
+# The wake word (on the robot) and hands-free listening (on the server).
+MIN_WAKE_THRESHOLD, MAX_WAKE_THRESHOLD = 0.5, 0.99  # as protocol.wake_config
+MAX_FOLLOW_UP_SECONDS = 15.0
+MIN_END_SILENCE, MAX_END_SILENCE = 0.4, 2.0
 
 
 def app_data_dir() -> Path:
@@ -142,6 +154,10 @@ class Settings:
     # A secret (never on the dashboard, never logged). Blank = play_youtube off.
     youtube_api_key: str = field(default="", repr=False)
     skills_dir: str = ""  # the user's skills (skills_store); blank = skills off
+    wake_word: bool = True  # off: the robot doesn't listen for it, wakes are ignored
+    wake_threshold: float | None = None  # blank: the robot's own (NVS) threshold
+    follow_up_seconds: float = 5.0  # listening after a hands-free reply; 0 = off
+    wake_end_silence: float = 0.8  # silence that ends a hands-free question
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -316,6 +332,14 @@ def _load(
         ),
         youtube_api_key=get("YOUTUBE_API_KEY", ""),
         skills_dir=_own_folder(get, "SKILLS_DIR"),
+        wake_word=_switch(get, "WAKE_WORD", Settings.wake_word),
+        wake_threshold=_wake_threshold(get),
+        follow_up_seconds=_float_between(
+            get, "FOLLOW_UP_SECONDS", Settings.follow_up_seconds, 0.0, MAX_FOLLOW_UP_SECONDS
+        ),
+        wake_end_silence=_float_between(
+            get, "WAKE_END_SILENCE", Settings.wake_end_silence, MIN_END_SILENCE, MAX_END_SILENCE
+        ),
     )
 
 
@@ -358,6 +382,26 @@ def _tts_speed(get: Callable[[str, str], str]) -> float:
             f"TTS_SPEED must be a number {MIN_TTS_SPEED}-{MAX_TTS_SPEED}, got {raw!r}"
         )
     return value
+
+
+def _float_between(
+    get: Callable[[str, str], str], key: str, default: float, low: float, high: float
+) -> float:
+    raw = get(key, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not low <= value <= high:  # also rejects nan and infinities
+        raise ConfigError(f"{key} must be a number {low:g}-{high:g}, got {raw!r}")
+    return value
+
+
+def _wake_threshold(get: Callable[[str, str], str]) -> float | None:
+    """Blank: None (the robot keeps its own threshold)."""
+    if not get("WAKE_THRESHOLD", ""):
+        return None
+    return _float_between(get, "WAKE_THRESHOLD", 0.0, MIN_WAKE_THRESHOLD, MAX_WAKE_THRESHOLD)
 
 
 def _robot_token(get: Callable[[str, str], str]) -> str:

@@ -23,7 +23,7 @@ Final as of M4 (2026-11-24), updated in M6 when the real robot joined (2026-11-2
    ```
    - `token`: the same value as `ROBOT_TOKEN` in the server's `.env` (at least 16 characters, at most 256). It is compared in constant time and never logged. The firmware also refuses tokens with spaces, quotes or backslashes.
    - `fw_version`: optional, any string. The server keeps the first 64 characters for its log.
-3. The server replies `welcome`, then (only if the server has wake word settings) `wake_config`, then the current `state`:
+3. The server replies `welcome`, then `wake_config` (the server's `WAKE_WORD` and, if set, `WAKE_THRESHOLD`), then the current `state`:
    ```json
    {"type": "welcome"}
    {"type": "wake_config", "enabled": true, "threshold": 0.97}
@@ -93,7 +93,7 @@ After a reply to a question that started with the wake word (or with a follow-up
 | `look` | `{"type": "look", "pan": 20, "tilt": -5, "speed": 0.5}` | **Reserved** for the servos (not wired yet). |
 | `led` | `{"type": "led", "mode": "pulse"}` | **Reserved** for the antenna LED (not wired yet). |
 | `volume` | `{"type": "volume", "level": 70}` | **Reserved.** |
-| `wake_config` | `{"type": "wake_config", "enabled": true, "threshold": 0.97}` | The wake word on or off, and its detection threshold (a number from 0.5 to 0.99). Sent right after `welcome` when the server has these settings, and again whenever they change. It overrides the robot's own NVS settings until the robot restarts; without it the robot uses its NVS settings. |
+| `wake_config` | `{"type": "wake_config", "enabled": true, "threshold": 0.97}` | The wake word on or off, and optionally its detection threshold (a number from 0.5 to 0.99). Both fields are optional for the robot; the server always sends `enabled` and leaves `threshold` out when `WAKE_THRESHOLD` is blank, so the robot keeps its own. Sent right after `welcome`, and again at once when either setting changes on the dashboard. It overrides the robot's own NVS settings until the robot restarts. With `WAKE_WORD` off the server also ignores any `wake` that still arrives. |
 
 The robot should ignore any message type it doesn't know, so new ones can be added without breaking old firmware.
 

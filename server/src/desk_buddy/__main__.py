@@ -29,7 +29,7 @@ from desk_buddy.dashboard import build_status, create_dashboard, start_dashboard
 from desk_buddy.events import EventBus
 from desk_buddy.link.switch import DeviceSwitch, Robot
 from desk_buddy.llm import create_chat, prompt_for, web_search_blocked
-from desk_buddy.loop import Orchestrator, State
+from desk_buddy.loop import HandsFree, Orchestrator, State
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
@@ -164,12 +164,15 @@ async def _run(settings: Settings) -> None:
             personality=personality.current,
             confirmations=brain.confirmations,
             search_results=brain.search_results,
+            # Read at each wake and follow-up: dashboard changes apply at the next one.
+            hands_free=lambda: hands_free_settings(live.latest),
         )
         stack.push_async_callback(orchestrator.shutdown)
         live.on_question(brain.on_settings)
         live.on_question(lambda old, new: conversation.set_max_turns(new.history_turns))
         live.on_now(lambda old, new: _set_speed(synthesizer, new.tts_speed))
         live.on_now(brain.on_settings_now)  # computer control off: at once
+        live.on_now(lambda old, new: send_wake_config(switch, old, new))  # to the robot now
 
         events: asyncio.Queue[str] = asyncio.Queue()
         if settings.robot_token:
@@ -184,6 +187,8 @@ async def _run(settings: Settings) -> None:
                 on_connect=lambda: events.put_nowait("greet"),
                 bus=bus,
                 on_wake=lambda score: events.put_nowait(f"wake {score}"),
+                # Sent after each welcome; a blank threshold leaves the robot's own.
+                wake_config=lambda: (live.latest.wake_word, live.latest.wake_threshold),
             )
             try:
                 server = await start_server(app, settings.server_host, settings.server_port)
@@ -606,6 +611,24 @@ def _apps_ducker(settings: Settings) -> SessionDucker | None:
         return None
     log.info("Ducking other apps: %s", "on" if settings.music_duck else "off (MUSIC_DUCK is off)")
     return ducker
+
+
+def hands_free_settings(settings: Settings) -> HandsFree:
+    """The loop's wake word and follow-up settings from CARL's settings."""
+    return HandsFree(
+        enabled=settings.wake_word,
+        follow_up_seconds=settings.follow_up_seconds,
+        end_silence=settings.wake_end_silence,
+    )
+
+
+def send_wake_config(switch: DeviceSwitch, old: Settings, new: Settings) -> None:
+    """A dashboard change to the wake word or its threshold goes to the robot at once."""
+    if (old.wake_word, old.wake_threshold) == (new.wake_word, new.wake_threshold):
+        return
+    robot = switch.robot
+    if robot is not None:
+        robot.send_wake_config(new.wake_word, new.wake_threshold)
 
 
 def _load_vad() -> None:

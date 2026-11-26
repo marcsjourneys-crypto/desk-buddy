@@ -42,7 +42,7 @@ BUTTON_QUIET_SECONDS = 1.0  # a flood is logged again after this long without dr
 WAKE_INTERVAL = 2.0  # at most one wake per this many seconds, per connection
 BAD_MESSAGE_QUIET_SECONDS = 1.0  # a burst of bad messages is logged once per this long
 
-WakeConfig = tuple[bool, float]  # (enabled, threshold) for the robot's wake word
+WakeConfig = tuple[bool, float | None]  # (enabled, threshold or None: the robot's own)
 
 
 class ServerStartError(Exception):
