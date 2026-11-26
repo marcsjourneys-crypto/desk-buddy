@@ -574,3 +574,20 @@ def test_the_site_name_is_plain_or_left_out():
     assert page_description(PAGE) == "the page on bbc.co.uk"
     assert page_description("https://bücher.example/") == "the page"
     assert PendingAction("t", "", "", "the page", lambda: "").ask == "Shall I open the page?"
+
+
+def test_cancel_drops_an_armed_one_and_claude_is_told_once():
+    bus, runs = RecordingBus(), []
+    confirmations = Confirmations(bus=bus)
+    confirmations.cancel("nothing waits", "was cancelled")  # nothing to do
+    propose(confirmations, run=lambda: runs.append(1) or "ok")
+    asked(confirmations)
+    confirmations.cancel("Stopped from the dashboard.", "was cancelled when the user pressed Stop")
+    assert confirmations.pending is None
+    note = confirmations.answer("Yes.", 2)
+    assert note.startswith(
+        "(System note: the request to open the page on bbc.co.uk was cancelled when the user "
+        "pressed Stop; nothing was opened.)"
+    )
+    assert confirmations.answer("What now?", 3) is None
+    assert runs == [] and bus.outcomes() == ["cancelled"]

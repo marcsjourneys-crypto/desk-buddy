@@ -23,9 +23,9 @@
     return node;
   }
 
-  async function api(method, path, body) {
+  async function api(method, path, body, extra = {}) {
     // Every request carries the token: changes need it, and so does listing the apps.
-    const options = { method, headers: { "X-CARL-Token": TOKEN } };
+    const options = { method, headers: { "X-CARL-Token": TOKEN }, ...extra };
     if (body !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
@@ -40,6 +40,7 @@
     if (!response.ok) {
       const error = new Error((data && data.error) || `${response.status} ${response.statusText}`);
       error.data = data;
+      error.status = response.status;
       throw error;
     }
     return data;
@@ -315,26 +316,31 @@
   // only while the event socket is open. The server lets go of a Talk held over 60 s.
 
   const talk = $("control-talk");
-  let talkPressed = false; // a press was sent and its release not yet
+  let talkHeld = false; // the pointer (or key) is holding Talk on this page
+  let talkPressed = false; // the server took the press, and no release was sent yet
   let talkQueue = Promise.resolve(); // presses and releases are sent in order
 
   function setControls(on) {
     for (const name of ["talk", "stop", "forget"]) $(`control-${name}`).disabled = !on;
   }
 
-  function controlFailed(what, error) {
+  // A 403 after the user pressed a button means the page is stale (CARL restarted with
+  // a new token): reload it once to get the new one. Never for a release, so it can't loop.
+  function controlFailed(what, error, byUser) {
+    if (byUser && error.status === 403) {
+      location.reload();
+      return;
+    }
     setBanner("control", `${what} didn't work: ${error.message}`);
   }
 
-  function sendTalk(action) {
-    talkQueue = talkQueue
-      .then(() => api("POST", "/api/control/talk", { action }))
-      .then(() => setBanner("control", null))
-      .catch((error) => controlFailed("Talk", error));
+  // keepalive: the release still goes out if the page is closing.
+  function talkRequest(action) {
+    return api("POST", "/api/control/talk", { action }, { keepalive: true });
   }
 
   function pressTalk(event) {
-    if (talk.disabled || talkPressed) return;
+    if (talk.disabled || talkHeld) return;
     if (event.type === "pointerdown") {
       if (event.button !== 0) return;
       event.preventDefault(); // no text selection or focus dance on a long press
@@ -344,16 +350,44 @@
         // the release triggers below still catch the end
       }
     }
-    talkPressed = true;
+    talkHeld = true;
     talk.classList.add("held");
-    sendTalk("down");
+    talkQueue = talkQueue.then(async () => {
+      try {
+        await talkRequest("down");
+        talkPressed = true; // only a press the server took ever gets a release
+        setBanner("control", null);
+      } catch (error) {
+        talkHeld = false;
+        talk.classList.remove("held");
+        controlFailed("Talk", error, true);
+      }
+    });
   }
 
   function releaseTalk() {
-    if (!talkPressed) return; // only a press that was sent gets a release
+    if (!talkHeld) return;
+    talkHeld = false;
+    talk.classList.remove("held");
+    talkQueue = talkQueue.then(async () => {
+      if (!talkPressed) return; // the press failed: nothing to release
+      talkPressed = false;
+      try {
+        await talkRequest("up");
+      } catch (error) {
+        controlFailed("Talk", error, false);
+      }
+    });
+  }
+
+  // The page is going away: send the release now, not behind the queue. If the press
+  // is still in flight, the server releases it when this page's event socket closes.
+  function releaseNow() {
+    if (!talkHeld && !talkPressed) return;
+    talkHeld = false;
     talkPressed = false;
     talk.classList.remove("held");
-    sendTalk("up");
+    talkRequest("up").catch(() => {});
   }
 
   talk.addEventListener("pointerdown", pressTalk);
@@ -374,18 +408,18 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") releaseTalk();
   });
-  window.addEventListener("pagehide", releaseTalk);
+  window.addEventListener("pagehide", releaseNow);
   window.addEventListener("blur", releaseTalk);
 
   $("control-stop").addEventListener("click", () => {
     api("POST", "/api/control/stop")
       .then(() => setBanner("control", null))
-      .catch((error) => controlFailed("Stop", error));
+      .catch((error) => controlFailed("Stop", error, true));
   });
   $("control-forget").addEventListener("click", () => {
     api("POST", "/api/control/forget")
       .then(() => setBanner("control", null))
-      .catch((error) => controlFailed("Forget", error));
+      .catch((error) => controlFailed("Forget", error, true));
   });
 
   // ---------------------------------------------------------------- status bar

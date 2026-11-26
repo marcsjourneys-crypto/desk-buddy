@@ -217,9 +217,10 @@ class Orchestrator:
         detached) interrupts any turn, stops the mic if it was listening, and goes idle;
         "greet" (startup, or a robot connected) says GREETING unless it was said in the
         last GREET_GAP seconds; "wake <score>" (the robot heard the wake word) starts a
-        hands-free question when idle; "stop" (the dashboard) ends whatever is going on
-        and goes idle, and "forget" does the same, then forgets like the spoken "forget
-        that" and says FORGET_LINE. The key always wins over hands-free listening."""
+        hands-free question when idle; "stop" (the dashboard) ends whatever is going on,
+        cancels an action waiting for a yes, and goes idle; "forget" ends it too, then
+        forgets like the spoken "forget that" and says FORGET_LINE. The key always wins
+        over hands-free listening."""
         if event == "down":
             # The robot's mic already dropped the tap when the key began its recording
             # (RobotMic.begin), so no frame after the press reaches the detector. One
@@ -241,36 +242,39 @@ class Orchestrator:
             self._endpoint(int(gen), name)
         elif event == "reset":
             # A robot attached or detached: drop whatever was happening and wait.
-            self._stop_hands_free(why="the robot link changed")
-            await self._interrupt()
-            try:
-                if self.state is State.LISTENING:
-                    self.mic.stop()
-            finally:
-                self._set_state(State.IDLE)
+            await self._drop_everything("the robot link changed")
         elif event == "greet":
             self._greet()
         elif event in ("stop", "forget"):
-            await self._stop()
-            if event == "forget":
-                self._forget_everything()
-                self.say(self._line("forget"))
+            await self._stop(forget=event == "forget")
             self._publish("control", action=event)
 
-    async def _stop(self) -> None:
-        """Stop from the dashboard: end any hands-free listening, interrupt a turn (a
-        reply, PONDERING, the yes question, a canned line), drop a recording in progress
-        without transcribing it, and go idle. A pending yes is left to expire as usual.
-        A later "up" finds CARL idle and does nothing."""
-        log.info("Stopped from the dashboard")
-        self._follow_ups = 0
-        self._stop_hands_free(why="stopped from the dashboard")
+    async def _drop_everything(self, why: str) -> None:
+        """End any hands-free listening, interrupt a turn (a reply, PONDERING, the yes
+        question, a canned line), drop a recording in progress without transcribing it,
+        and go idle. A later "up" finds CARL idle and does nothing."""
+        self._stop_hands_free(why=why)
         await self._interrupt()
         try:
             if self.state is State.LISTENING:
                 self.mic.stop()  # the clip is dropped
         finally:
             self._set_state(State.IDLE)
+
+    async def _stop(self, *, forget: bool) -> None:
+        """Stop or Forget from the dashboard: drop everything and go idle. Stop also
+        cancels an action waiting for a yes (pressing Stop means no); Forget then forgets
+        like the spoken "forget that" (which expires it) and says FORGET_LINE."""
+        log.info("Stopped from the dashboard")
+        self._follow_ups = 0
+        await self._drop_everything("stopped from the dashboard")
+        if forget:
+            self._forget_everything()
+            self.say(self._line("forget"))
+        elif self._confirmations is not None:
+            self._confirmations.cancel(
+                "Stopped from the dashboard.", "was cancelled when the user pressed Stop"
+            )
 
     def _forget_everything(self) -> None:
         """A fresh start (the spoken forget, or the dashboard's): expire a pending yes,

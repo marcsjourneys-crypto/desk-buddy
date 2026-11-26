@@ -1367,3 +1367,89 @@ def test_main_gives_the_dashboard_its_control(monkeypatch, fakes, calls):
     monkeypatch.setattr(entry, "create_dashboard", spy_dashboard)
     entry.main()
     assert callable(made["control"])
+
+
+def test_a_page_release_after_a_later_key_press_is_stale_and_dropped():
+    log = []
+
+    async def run():
+        switch, events, on_key = key_setup(log)
+        switch.attach(KeyRobot(log))
+        control = entry.dashboard_control(on_key, events)
+        control("down")  # the page's press; its release is lost
+        await until(lambda: "down" in log)
+        on_key("down")  # then the physical key
+        on_key("up")
+        await until(lambda: "up" in log)  # the key's release
+        before = list(log)
+        control("up")  # the page's late release (or its 60 s cap)
+        await asyncio.sleep(DELAY * 3)
+        return before
+
+    before = asyncio.run(run())
+    assert log == before  # no robot.mic.end(), no "up"
+
+
+def test_a_page_release_after_a_wake_is_stale_and_dropped():
+    log = []
+
+    async def run():
+        switch, events, on_key = key_setup(log)
+        switch.attach(KeyRobot(log))
+        control = entry.dashboard_control(on_key, events)
+        control("down")
+        on_key.new_press()  # a wake question started (after a stop or a reset)
+        before = list(log)
+        control("up")
+        await asyncio.sleep(DELAY * 3)
+        return before
+
+    before = asyncio.run(run())
+    assert log == before
+
+
+def test_a_page_release_without_a_page_press_is_dropped():
+    async def run():
+        switch, events, on_key = key_setup([])
+        control = entry.dashboard_control(on_key, events)
+        control("up")
+        control("down")
+        control("up")
+        control("up")  # a second release of the same press
+        return drain(events)
+
+    assert asyncio.run(run()) == ["down", "up"]
+
+
+def test_the_key_handler_counts_presses():
+    async def run():
+        switch, events, on_key = key_setup([])
+        assert on_key.presses == 0
+        on_key("down")
+        on_key("up")
+        on_key.new_press()
+        return on_key.presses
+
+    assert asyncio.run(run()) == 2
+
+
+def test_a_wake_makes_a_page_hold_stale(monkeypatch, fakes, calls):
+    made = {}
+    real = entry.create_dashboard
+
+    def spy_dashboard(**kwargs):
+        made.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(entry, "create_dashboard", spy_dashboard)
+    monkeypatch.setattr(
+        entry, "load_settings", lambda: Settings(anthropic_api_key="k", robot_token=TOKEN)
+    )
+    entry.main()
+    (app_kwargs,) = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "create_app"]
+    events = app_kwargs["events"]
+    drain(events)
+    made["control"]("down")
+    app_kwargs["on_wake"](0.9)
+    made["control"]("up")  # stale: the wake came after the page's press
+    assert drain(events) == ["down", "wake 0.9"]

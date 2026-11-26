@@ -8,6 +8,7 @@ from desk_buddy.dashboard import STATIC_DIR, STATIC_FILES, TOKEN_PLACEHOLDER
 HTML = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 JS = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 CSS = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+END = "\n  }\n"  # the end of a function inside app.js's IIFE
 
 
 def test_no_outside_urls_anywhere():
@@ -151,9 +152,24 @@ def test_the_controls_post_with_the_token():
     for call in (
         'api("POST", "/api/control/stop")',
         'api("POST", "/api/control/forget")',
-        'api("POST", "/api/control/talk", { action })',
+        'api("POST", "/api/control/talk", { action }, { keepalive: true })',
     ):
         assert call in JS
+
+
+def test_a_failed_press_is_never_released_and_a_stale_token_reloads_the_page():
+    press = JS.split("function pressTalk", 1)[1].split(END, 1)[0]
+    assert press.index('await talkRequest("down")') < press.index("talkPressed = true")
+    assert "error.status = response.status" in JS
+    failed = JS.split("function controlFailed", 1)[1].split(END, 1)[0]
+    assert "error.status === 403" in failed and "location.reload()" in failed
+    assert JS.count("location.reload()") == 1  # only there, after a user's action
+
+
+def test_leaving_the_page_sends_the_release_at_once_not_through_the_queue():
+    assert 'window.addEventListener("pagehide", releaseNow)' in JS
+    now = JS.split("function releaseNow", 1)[1].split(END, 1)[0]
+    assert "talkQueue" not in now and 'talkRequest("up")' in now
 
 
 def test_every_talk_release_trigger_is_listened_to():

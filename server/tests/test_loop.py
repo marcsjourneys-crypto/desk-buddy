@@ -2012,21 +2012,44 @@ def test_stop_interrupts_a_greeting():
     assert speaker.stops == 1 and orch.state is State.IDLE
 
 
-def test_stop_during_the_yes_question_leaves_the_pending_action():
+STOPPED_NOTE = (
+    "(System note: the request to open the page on bbc.co.uk was cancelled when the user "
+    "pressed Stop; nothing was opened.)"
+)
+
+
+def test_stop_during_the_yes_question_cancels_it_and_claude_is_told():
     rig = YesRig()
     speaker = AskBlockingSpeaker()
     orch, _, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
+    later = FakeChat()
 
     async def scenario():
         await orch.handle("down")
         await orch.handle("up")
         assert await asyncio.to_thread(speaker.started.wait, 2)  # the question is playing
         await orch.handle("stop")
+        assert orch.state is State.IDLE and rig.confirmations.pending is None
+        await answer(orch, "Yes.", later)  # too late: Stop meant no
 
     asyncio.run(scenario())
-    assert orch.state is State.IDLE
-    assert rig.confirmations.pending is not None and rig.confirmations.pending.armed
-    assert rig.outcomes() == ["waiting"]
+    assert rig.opener.calls == []
+    assert rig.outcomes() == ["waiting", "cancelled"]
+    assert STOPPED_NOTE in later.prompts[0]
+
+
+def test_stop_after_the_yes_question_cancels_it_too():
+    rig = YesRig()
+    orch, _, _ = rig.orchestrator(chat=ProposingChat(rig))
+
+    async def scenario():
+        await talk(orch)  # asked to the end: armed, CARL idle
+        assert rig.confirmations.pending.armed
+        await orch.handle("stop")
+
+    asyncio.run(scenario())
+    assert rig.confirmations.pending is None
+    assert rig.outcomes() == ["waiting", "cancelled"]
 
 
 def test_forget_during_the_yes_question_expires_it_and_says_the_line():

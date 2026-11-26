@@ -298,6 +298,14 @@ class Confirmations:
             return action.ok_note(result)
         return f"(System note: the server asked and the user said yes; {what} was {verb.done}.)"
 
+    def cancel(self, reason: str, why: str = "was cancelled") -> None:
+        """Cancel the pending action, armed or not (the user pressed Stop on the
+        dashboard, which means no). `why` finishes Claude's note, as for expire()."""
+        with self._lock:
+            action, self._pending = self._pending, None
+        if action is not None:
+            self._outcome(action, "cancelled", reason, why)
+
     def expire(self, reason: str, why: str = "was dropped") -> None:
         """Drop the pending action (a forget command, computer control turned off).
         `why` finishes the note Claude gets: "the request to open … <why>; nothing was

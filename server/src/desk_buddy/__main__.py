@@ -179,6 +179,8 @@ async def _run(settings: Settings) -> None:
         live.on_now(lambda old, new: stop_when_wake_word_off(main_loop, orchestrator, old, new))
 
         events: asyncio.Queue[str] = asyncio.Queue()
+        # The key's handler, shared with the dashboard's Talk button.
+        on_key = key_handler(switch, events)
         if settings.robot_token:
             # The wake word's end-of-speech detector: loaded now, off the event loop.
             await asyncio.to_thread(_load_vad)
@@ -190,7 +192,7 @@ async def _run(settings: Settings) -> None:
                 # Queued after the connect's "reset", so the greeting follows it.
                 on_connect=lambda: events.put_nowait("greet"),
                 bus=bus,
-                on_wake=lambda score: events.put_nowait(f"wake {score}"),
+                on_wake=lambda score: _on_wake(on_key, events, score),
                 # Sent after each welcome; a blank threshold leaves the robot's own.
                 wake_config=lambda: (live.latest.wake_word, live.latest.wake_threshold),
             )
@@ -215,8 +217,6 @@ async def _run(settings: Settings) -> None:
             log.info("Robot link: off (no ROBOT_TOKEN)")
 
         voice = "sapi" if settings.tts_engine == "sapi" else f"piper {settings.tts_voice}"
-        # The key's handler, shared with the dashboard's Talk button.
-        on_key = key_handler(switch, events)
         dashboard_app = create_dashboard(
             port=settings.dashboard_port,
             token=secrets.token_urlsafe(32),  # put into the page: changes must carry it
@@ -741,9 +741,13 @@ def lan_ip() -> str | None:
         return None
 
 
-def key_handler(
-    switch: DeviceSwitch, events: asyncio.Queue[str], delay: float = RELEASE_DELAY
-) -> Callable[[str], None]:
+def _on_wake(on_key: KeyHandler, events: asyncio.Queue[str], score: float) -> None:
+    """The robot heard the wake word: a held page Talk is over (its release is stale)."""
+    on_key.new_press()
+    events.put_nowait(f"wake {score}")
+
+
+class KeyHandler:
     """The push-to-talk key's handler (runs on the event loop). While a robot is connected
     the key drives it: down begins the robot's mic, and up ends it `delay` seconds later so
     audio still in flight over Wi-Fi isn't lost.
@@ -752,43 +756,78 @@ def key_handler(
     then begins again. The robot mic's begin() clears its buffer before the orchestrator
     takes the first clip on that "up", so a double press within `delay` deliberately drops
     the first clip: the orchestrator sees it as an ignored tap, and the second press is
-    the turn."""
-    pending: list[tuple[asyncio.TimerHandle, Robot]] = []  # at most one delayed release
+    the turn.
 
-    def release(robot: Robot) -> None:
-        pending.clear()
-        if switch.robot is robot:
+    `presses` counts every press (the key's and the dashboard's "down", and a wake through
+    new_press()), so the dashboard can tell that its own press has been taken over."""
+
+    def __init__(
+        self, switch: DeviceSwitch, events: asyncio.Queue[str], delay: float = RELEASE_DELAY
+    ) -> None:
+        self._switch, self._events, self._delay = switch, events, delay
+        self._pending: list[tuple[asyncio.TimerHandle, Robot]] = []  # one delayed release
+        self.presses = 0
+
+    def new_press(self) -> None:
+        """Something else started a question (a wake): earlier presses are over."""
+        self.presses += 1
+
+    def _release(self, robot: Robot) -> None:
+        self._pending.clear()
+        if self._switch.robot is robot:
             robot.mic.end()
-        events.put_nowait("up")  # always, so the orchestrator never stays listening
+        self._events.put_nowait("up")  # always, so the orchestrator never stays listening
 
-    def on_key(event: str) -> None:
-        if pending:  # fire a delayed release now, so the order stays down/up/down
-            handle, old = pending[0]
+    def __call__(self, event: str) -> None:
+        if event == "down":
+            self.presses += 1
+        if self._pending:  # fire a delayed release now, so the order stays down/up/down
+            handle, old = self._pending[0]
             handle.cancel()
-            release(old)
-        robot = switch.robot
+            self._release(old)
+        robot = self._switch.robot
         if robot is None:
-            events.put_nowait(event)
+            self._events.put_nowait(event)
         elif event == "down":
             robot.mic.begin()
-            events.put_nowait("down")
+            self._events.put_nowait("down")
         else:
-            handle = asyncio.get_running_loop().call_later(delay, release, robot)
-            pending.append((handle, robot))
-
-    return on_key
+            handle = asyncio.get_running_loop().call_later(self._delay, self._release, robot)
+            self._pending.append((handle, robot))
 
 
-def dashboard_control(
-    on_key: Callable[[str], None], events: asyncio.Queue[str]
-) -> Callable[[str], None]:
+def key_handler(
+    switch: DeviceSwitch, events: asyncio.Queue[str], delay: float = RELEASE_DELAY
+) -> KeyHandler:
+    """The push-to-talk key's handler: see KeyHandler."""
+    return KeyHandler(switch, events, delay)
+
+
+def dashboard_control(on_key: KeyHandler, events: asyncio.Queue[str]) -> Callable[[str], None]:
     """The Live tab's buttons (on the event loop): Talk's "down" and "up" go through the
     key's handler, so a robot's release delay applies exactly as for the key; "stop" and
-    "forget" go straight onto the orchestrator's queue. Anything else is a ValueError."""
+    "forget" go straight onto the orchestrator's queue. Anything else is a ValueError.
+
+    A page release (or the dashboard's 60 s cap, or its socket closing) only lets go of
+    the page's own press: if any press or wake came after it, the release is stale and
+    dropped, so it can never cut off the key's question or a wake question. Every
+    dashboard tab shares this one hold (accepted: it's one user on one PC)."""
+    held: list[int] = []  # the press id of the page's held Talk, if any
 
     def control(event: str) -> None:
-        if event in ("down", "up"):
-            on_key(event)
+        if event == "down":
+            held.clear()
+            on_key("down")
+            held.append(on_key.presses)
+        elif event == "up":
+            if not held:
+                log.debug("Dashboard: Talk release with no press held; ignored")
+                return
+            press = held.pop()
+            if press != on_key.presses:
+                log.debug("Dashboard: stale Talk release (taken over); ignored")
+                return
+            on_key("up")
         elif event in ("stop", "forget"):
             events.put_nowait(event)
         else:

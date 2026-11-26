@@ -875,15 +875,50 @@ def test_a_failing_control_callback_is_a_json_503(tmp_path):
     asyncio.run(run())
 
 
+class Timers:
+    """A call_later shim: the test fires the timers itself, no real waiting."""
+
+    def __init__(self):
+        self.made = []
+
+    def __call__(self, delay, callback):
+        timer = FakeTimer(delay, callback)
+        self.made.append(timer)
+        return timer
+
+    def live(self):
+        return [t for t in self.made if not t.cancelled]
+
+    def fire(self):
+        for timer in self.live():
+            timer.cancelled = True
+            timer.callback()
+
+
+class FakeTimer:
+    def __init__(self, delay, callback):
+        self.delay, self.callback, self.cancelled = delay, callback, False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+async def press(d, action):
+    status, _, _ = await call(
+        "POST", d.base + "/api/control/talk", body={"action": action}, headers=change_headers(d)
+    )
+    assert status == 200
+
+
 def test_a_held_talk_is_released_by_the_server_after_the_cap(tmp_path, caplog):
     caplog.set_level(logging.INFO)
-    calls = []
+    calls, timers = [], Timers()
 
     async def run():
-        async with running(tmp_path, control=calls.append, talk_max_hold=0.2) as d:
-            talk = d.base + "/api/control/talk"
-            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
-            await asyncio.sleep(0.5)
+        async with running(tmp_path, control=calls.append, call_later=timers) as d:
+            await press(d, "down")
+            assert [t.delay for t in timers.live()] == [60.0]
+            timers.fire()
 
     asyncio.run(run())
     assert calls == ["down", "up"]
@@ -891,31 +926,72 @@ def test_a_held_talk_is_released_by_the_server_after_the_cap(tmp_path, caplog):
 
 
 def test_the_pages_release_cancels_the_cap(tmp_path):
-    calls = []
+    calls, timers = [], Timers()
 
     async def run():
-        async with running(tmp_path, control=calls.append, talk_max_hold=0.3) as d:
-            talk = d.base + "/api/control/talk"
-            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
-            await call("POST", talk, body={"action": "up"}, headers=change_headers(d))
-            await asyncio.sleep(0.6)
+        async with running(tmp_path, control=calls.append, call_later=timers) as d:
+            await press(d, "down")
+            await press(d, "up")
+            assert timers.live() == []
 
     asyncio.run(run())
     assert calls == ["down", "up"]
 
 
 def test_a_second_press_restarts_the_cap(tmp_path):
-    calls = []
+    calls, timers = [], Timers()
 
     async def run():
-        async with running(tmp_path, control=calls.append, talk_max_hold=0.4) as d:
-            talk = d.base + "/api/control/talk"
-            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
-            await asyncio.sleep(0.25)
-            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
-            await asyncio.sleep(0.25)  # past the first press's cap, not the second's
-            assert calls == ["down", "down"]
-            await asyncio.sleep(0.4)
+        async with running(tmp_path, control=calls.append, call_later=timers) as d:
+            await press(d, "down")
+            first = timers.live()
+            await press(d, "down")
+            assert all(t.cancelled for t in first) and len(timers.live()) == 1
+            timers.fire()
 
     asyncio.run(run())
     assert calls == ["down", "down", "up"]
+
+
+@pytest.mark.parametrize("path", ["/api/control/stop", "/api/control/forget"])
+def test_stop_and_forget_cancel_a_pending_cap(tmp_path, path):
+    calls, timers = [], Timers()
+
+    async def run():
+        async with running(tmp_path, control=calls.append, call_later=timers) as d:
+            await press(d, "down")
+            status, _, _ = await call("POST", d.base + path, headers=change_headers(d))
+            assert status == 200 and timers.live() == []
+
+    asyncio.run(run())
+    assert calls == ["down", path.rsplit("/", 1)[1]]
+
+
+def test_the_event_socket_closing_releases_a_held_talk_at_once(tmp_path):
+    calls, timers = [], Timers()
+
+    async def run():
+        async with running(tmp_path, control=calls.append, call_later=timers) as d:
+            async with connect(f"ws://127.0.0.1:{d.port}/api/events", origin=d.origin):
+                await press(d, "down")
+            async with asyncio.timeout(2):  # the tab closed while Talk was held
+                while calls != ["down", "up"]:
+                    await asyncio.sleep(0.01)
+            assert timers.live() == []
+
+    asyncio.run(run())
+    assert calls == ["down", "up"]
+
+
+def test_the_event_socket_closing_with_no_hold_sends_nothing(tmp_path):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append) as d:
+            async with connect(f"ws://127.0.0.1:{d.port}/api/events", origin=d.origin):
+                await press(d, "down")
+                await press(d, "up")
+            await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert calls == ["down", "up"]

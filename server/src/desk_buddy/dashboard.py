@@ -105,13 +105,16 @@ def create_dashboard(
     skill_sync: skills_setup.Sync = run_sync,
     control: Callable[[str], None] | None = None,
     talk_max_hold: float = TALK_MAX_HOLD,
+    call_later: Callable[[float, Callable[[], None]], Any] | None = None,
 ) -> FastAPI:
     """The dashboard app. Without `apps`, there is no Apps API; without `skills`, no
     Skills API. `skill_runner` is None when uv wasn't found (skills can't be approved);
     `skill_sync` runs `uv sync` (a fake in tests). `control` takes the Live tab's buttons
     as events ("stop", "forget", and the talk button's "down" and "up"), on the event
     loop; without it the controls answer 503. A talk held longer than `talk_max_hold`
-    seconds is released by the server."""
+    seconds is released by the server, and so is one held when an event socket closes
+    (the tab went away). `call_later` schedules that cap (the running loop's by default;
+    a fake in tests)."""
     app = FastAPI(title="CARL dashboard", docs_url=None, redoc_url=None, openapi_url=None)
     hosts = {f"{HOST}:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
@@ -383,15 +386,19 @@ def create_dashboard(
 
     # --- the controls: Stop, Forget and Talk (not computer-control actions) ---
 
-    hold: list[asyncio.TimerHandle] = []  # the pending release of a held talk, if any
+    # The pending release (the cap) of a Talk held on the page, if any. Every dashboard
+    # tab shares this one hold: a press in one tab and a release (or a closing socket) in
+    # another count as the same press (accepted: one user, one PC). `control` itself
+    # drops a release whose press was taken over by the key or a wake.
+    hold: list[Any] = []
 
     def cancel_hold() -> None:
         while hold:
             hold.pop().cancel()
 
-    def release_held() -> None:
-        hold.clear()
-        log.warning("Dashboard: Talk held too long (%.0f s); released", talk_max_hold)
+    def release_held(why: str) -> None:
+        cancel_hold()
+        log.warning("Dashboard: Talk released (%s)", why)
         try:
             control("up")  # type: ignore[misc]
         except Exception:
@@ -410,11 +417,13 @@ def create_dashboard(
     @app.post("/api/control/stop")
     async def control_stop(request: Request) -> Response:
         await _read_capped(request)  # no body is needed; read it, so it closes cleanly
+        cancel_hold()  # the recording is dropped: nothing for the cap to release
         return send("stop")
 
     @app.post("/api/control/forget")
     async def control_forget(request: Request) -> Response:
         await _read_capped(request)
+        cancel_hold()
         return send("forget")
 
     @app.post("/api/control/talk")
@@ -428,7 +437,12 @@ def create_dashboard(
         cancel_hold()  # the page's next press or release replaces the cap
         response = send(action)
         if action == "down" and control is not None and response.status_code == 200:
-            hold.append(asyncio.get_running_loop().call_later(talk_max_hold, release_held))
+            schedule = call_later or asyncio.get_running_loop().call_later
+            hold.append(
+                schedule(
+                    talk_max_hold, lambda: release_held(f"held too long: {talk_max_hold:.0f} s")
+                )
+            )
         return response
 
     # --- live events ---
@@ -456,6 +470,8 @@ def create_dashboard(
         except Exception:
             pass  # the page went away
         finally:
+            if hold:  # the tab went away holding Talk: its release may never come
+                release_held("the page went away")
             bus.unsubscribe(queue)
             receiver.cancel()
             if getter is not None:
