@@ -75,6 +75,7 @@ EDITABLE: tuple[Editable, ...] = (
     Editable("LLM_EFFORT", "Brain", NEXT_QUESTION, "choice", "Thinking effort", EFFORT_LEVELS),
     Editable("WEB_SEARCH", "Web", NEXT_QUESTION, "switch", "Web search"),
     Editable("WEB_SEARCH_MAX", "Web", NEXT_QUESTION, "int", "Searches per question (1-5)"),
+    Editable("SKILLS_DIR", "Skills", NEXT_QUESTION, "path", "Skills folder (blank: off)"),
     Editable("STT_MODEL", "Speech recognition and keys", AFTER_RESTART, "text", "Whisper model"),
     Editable(
         "STT_DEVICE", "Speech recognition and keys", AFTER_RESTART, "choice", "Device", STT_DEVICES

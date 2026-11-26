@@ -431,6 +431,32 @@ def test_obsidian_vault_path_is_read(tmp_path):
     assert s.obsidian_vault_path == str(tmp_path)
 
 
+def test_skills_dir_is_blank_by_default_and_a_dashboard_setting(tmp_path):
+    from desk_buddy.config import DASHBOARD_KEYS
+
+    assert "SKILLS_DIR" in ENV_KEYS and "SKILLS_DIR" in DASHBOARD_KEYS
+    assert load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"}).skills_dir == ""
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"}, dashboard={})
+    assert s.skills_dir == ""
+    s = load_settings(
+        env_path=None,
+        environ={"ANTHROPIC_API_KEY": "k"},
+        dashboard={"SKILLS_DIR": str(tmp_path)},
+    )
+    assert s.skills_dir == str(tmp_path)
+
+
+@pytest.mark.parametrize("where", ["missing", "drive", "home"])
+def test_skills_dir_must_be_a_folder_of_its_own(tmp_path, where):
+    value = {
+        "missing": str(tmp_path / "nope"),
+        "drive": Path(tmp_path).anchor,
+        "home": str(Path.home()),
+    }[where]
+    with pytest.raises(ConfigError, match="SKILLS_DIR"):
+        load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SKILLS_DIR": value})
+
+
 def test_missing_vault_folder_is_a_clear_error(tmp_path):
     with pytest.raises(ConfigError, match="OBSIDIAN_VAULT_PATH"):
         load_settings(

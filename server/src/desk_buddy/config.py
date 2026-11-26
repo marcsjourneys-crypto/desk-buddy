@@ -45,6 +45,7 @@ ENV_KEYS = (
     "WEB_SEARCH",
     "WEB_SEARCH_MAX",
     "YOUTUBE_API_KEY",
+    "SKILLS_DIR",
 )
 
 # The keys the dashboard may set (never secrets, hosts or ports). See settings_store.
@@ -67,6 +68,7 @@ DASHBOARD_KEYS = frozenset(
         "PTT_KEY",
         "WEB_SEARCH",
         "WEB_SEARCH_MAX",
+        "SKILLS_DIR",
     }
 )
 
@@ -139,6 +141,7 @@ class Settings:
     web_search_max: int = 2  # searches per question, 1-MAX_WEB_SEARCHES
     # A secret (never on the dashboard, never logged). Blank = play_youtube off.
     youtube_api_key: str = field(default="", repr=False)
+    skills_dir: str = ""  # the user's skills (skills_store); blank = skills off
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -312,6 +315,7 @@ def _load(
             get, "WEB_SEARCH_MAX", Settings.web_search_max, 1, MAX_WEB_SEARCHES
         ),
         youtube_api_key=get("YOUTUBE_API_KEY", ""),
+        skills_dir=_own_folder(get, "SKILLS_DIR"),
     )
 
 
@@ -376,16 +380,19 @@ def _port(get: Callable[[str, str], str], key: str, default: int) -> int:
 
 
 def _vault_path(get: Callable[[str, str], str]) -> str:
-    raw = get("OBSIDIAN_VAULT_PATH", "")
+    return _own_folder(get, "OBSIDIAN_VAULT_PATH")
+
+
+def _own_folder(get: Callable[[str, str], str], key: str) -> str:
+    """Blank (off), or an existing folder of its own: not a drive or the home folder."""
+    raw = get(key, "")
     if not raw:
         return raw
     if not Path(raw).is_dir():
-        raise ConfigError(f"OBSIDIAN_VAULT_PATH is not an existing folder: {raw!r}")
+        raise ConfigError(f"{key} is not an existing folder: {raw!r}")
     path = Path(raw).resolve()
     if path == Path(path.anchor) or path == Path.home().resolve():
-        raise ConfigError(
-            "OBSIDIAN_VAULT_PATH must be a folder of its own, not a drive or your home folder"
-        )
+        raise ConfigError(f"{key} must be a folder of its own, not a drive or your home folder")
     return raw
 
 

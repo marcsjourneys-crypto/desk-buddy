@@ -337,7 +337,7 @@ class AppsStore:
             title = known[app_id]
         else:
             raise ValueError("That app isn't in Windows' list: use Find apps.")
-        return AppEntry(app_id, title, _check_names(item.get("names")))
+        return AppEntry(app_id, title, check_names(item.get("names")))
 
     def _read_apps(self) -> None:
         raw = self._load(self.apps_file)
@@ -357,7 +357,7 @@ class AppsStore:
                 entry = AppEntry(
                     check_app_id(item.get("app_id")),
                     clean_title(item.get("title")) or str(item.get("app_id")),
-                    _check_names(item.get("names")),
+                    check_names(item.get("names")),
                 )
                 if entry.app_id in ids or names.intersection(entry.names):
                     raise ValueError("a repeated app or name")
@@ -421,7 +421,8 @@ class AppsStore:
         log.warning("Bookmarks: %s", message)
 
 
-def _check_names(value: Any) -> tuple[str, ...]:
+def check_names(value: Any) -> tuple[str, ...]:
+    """1 to MAX_NAMES spoken names (check_name each), none twice. Also used for skills."""
     if not isinstance(value, list) or not value:
         raise ValueError(f"Give 1 to {MAX_NAMES} spoken names.")
     if len(value) > MAX_NAMES:

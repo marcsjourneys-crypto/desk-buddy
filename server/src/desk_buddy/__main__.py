@@ -243,6 +243,7 @@ _CHAT_SETTINGS = (
     "obsidian_ideas_folder",
     "web_search",
     "web_search_max",
+    "skills_dir",
 )
 _STT_KEYS = ("STT_MODEL", "STT_DEVICE", "STT_COMPUTE_TYPE")
 
