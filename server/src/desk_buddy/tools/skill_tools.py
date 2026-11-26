@@ -19,7 +19,8 @@
 - The log and the dashboard show the slug, the choices and the text cut to LOG_TEXT
   characters; never the skill's output (only "Ran <name>.", or "Ran <name> (N links).").
 - A skill with `pages` hands back pages (checked by the runner): they join this question's
-  SearchResults after anything already there, run directly or after a yes, so
+  SearchResults as a block of their own (first in the next list, numbered in order, a
+  second skill's after the first's), run directly or after a yes, so
   open_search_result can open them (by number from the next question on).
 """
 
@@ -34,6 +35,7 @@ from typing import Any
 from desk_buddy.skills_store import APPROVED, TEXT_KEY, Manifest, Skill, SkillsStore
 from desk_buddy.tools.confirm import RUN, ActionCrashed
 from desk_buddy.tools.registry import NotDone, Tool, ToolError
+from desk_buddy.tools.urls import MAX_LISTED
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,10 @@ MISSING_TEXT = "That skill needs its text."
 BAD_TEXT = "The text must be plain text."
 LONG_TEXT = "The text can be at most {limit} characters."
 CONTROL_TEXT = "The text can't hold control or invisible formatting characters."
+# Server-written lines after a pages skill's result (outside its untrusted block).
+PAGES_FROM = "(Its pages are numbered from {start}.)"
+PAGES_FULL = "(Its pages can't be opened: the list of pages is already full.)"
+PAGES_STALE = "(Its pages can no longer be opened.)"
 
 
 class SkillOutput(str):
@@ -207,6 +213,16 @@ class SkillTools:
     def names(self) -> list[str]:
         return list(self._skills)
 
+    @property
+    def has_pages(self) -> bool:
+        """Whether any offered skill hands back pages (so open_search_result is needed)."""
+        return any(s.manifest is not None and s.manifest.pages for s in self._skills.values())
+
+    def keep_pages(self, search_results: Any) -> None:
+        """Where pages go (SearchResults), set once open_search_result is known to be
+        offered; until then (or with None) a skill's pages are not kept."""
+        self._search_results = search_results
+
     def tools(self) -> list[Tool]:
         tools = []
         for name, skill in self._skills.items():
@@ -354,12 +370,22 @@ class SkillTools:
             raise SkillFailed("The skill failed unexpectedly.", "failed unexpectedly") from exc
         if not result.ok:
             raise SkillFailed(result.text, result.summary)
-        output = SkillOutput(result.text)
         pages = tuple(getattr(result, "pages", ()) or ())
-        if pages and self._search_results is not None:
-            # After this question's search results (and any earlier skill's pages).
-            self._search_results.add(pages)
-            output.links = len(pages)
+        if not pages or self._search_results is None:
+            return SkillOutput(result.text)
+        # First in the next list, after any earlier skill's pages in this question; a
+        # tool thread from a question that has moved on adds nothing.
+        start = self._search_results.add_skill_pages(pages)
+        text = result.text
+        if start is None:
+            text += "\n" + PAGES_STALE
+        elif start > MAX_LISTED:
+            text += "\n" + PAGES_FULL
+        elif start > 1:
+            text += "\n" + PAGES_FROM.format(start=start)
+        output = SkillOutput(text)
+        if start is not None:
+            output.links = sum(1 for _, _, url in pages if url)
         return output
 
     def _run_confirmed(self, skill: Skill, payload: Mapping[str, Any]) -> str:

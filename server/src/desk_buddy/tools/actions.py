@@ -100,6 +100,8 @@ class ActionGuard:
             log.warning("Action: %s -> crashed: %s", described, _one_line(repr(exc)))
             self._publish(name, shown, "The tool failed unexpectedly.", "failed")
             raise
+        # The result itself goes to shown_result, so it can carry extras for the log: a
+        # skill's SkillOutput (a str) carries `links`, shown as "Ran <name> (N links).".
         public = shown_result(result) if shown_result is not None else result
         log.info("Action: %s -> %s", described, _one_line(public))
         self._publish(name, shown, public, "ok")

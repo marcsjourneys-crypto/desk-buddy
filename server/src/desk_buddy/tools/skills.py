@@ -23,8 +23,9 @@
   code; stderr only ever goes to the server log, on a failure.
 - A skill whose manifest says `pages` prints one JSON object instead,
   {"text": str, "pages": [{"title": str, "url": str}, ...]}: the text goes to Claude as
-  above, and the pages (checked here: at most MAX_PAGES, public http(s) addresses only)
-  come back for SearchResults, so open_search_result can open them after a yes. Anything
+  above, and the pages (checked here: at most MAX_PAGES, public http(s) addresses only,
+  a dropped one kept as a numbered gap) come back for SearchResults, so
+  open_search_result can open them after a yes. Anything
   else is "failed (bad output)"; the log gets a short reason, never the output.
 """
 
@@ -43,7 +44,7 @@ from typing import Any
 
 from desk_buddy.skills_store import ENTRY, Skill, check_slug
 from desk_buddy.tools.untrusted import wrap
-from desk_buddy.tools.urls import Page, check_url, is_public_host, plain_line, site_name
+from desk_buddy.tools.urls import GAP, Page, check_url, is_public_host, plain_line, site_name
 
 log = logging.getLogger(__name__)
 
@@ -540,25 +541,35 @@ def parse_pages_output(out: bytes) -> tuple[str, list[dict[str, str]]]:
 
 
 def check_pages(pages: list[dict[str, str]]) -> tuple[tuple[Page, ...], int]:
-    """The pages that may be opened, in order, as (title, site, address), and how many
-    were dropped: a bad or non-public address, one already listed, or any past MAX_PAGES.
-    Titles are cleaned like search results' titles and cut to MAX_PAGE_TITLE."""
+    """The skill's first MAX_PAGES pages in order, as (title, site, address), and how
+    many were dropped. A dropped page (a bad or non-public address, a host with no plain
+    site name, an address already listed) keeps its place as GAP, so page i is always
+    number i of the skill's list; gaps at the end are left off, as are pages past
+    MAX_PAGES. Titles are cleaned like search results' titles and cut to MAX_PAGE_TITLE."""
     kept: list[Page] = []
     seen: set[str] = set()
-    for page in pages:
-        url = page["url"]
-        if len(kept) >= MAX_PAGES or url in seen:
-            continue
-        try:
-            check_url(url)
-        except ValueError:
-            continue
-        if not is_public_host(url):
-            continue
-        seen.add(url)
-        title = plain_line(page["title"])[:MAX_PAGE_TITLE].rstrip()
-        kept.append((title or "Untitled", site_name(url), url))
-    return tuple(kept), len(pages) - len(kept)
+    for page in pages[:MAX_PAGES]:
+        kept.append(_checked_page(page, seen))
+    good = sum(1 for _, _, url in kept if url)
+    while kept and not kept[-1][2]:
+        kept.pop()
+    return tuple(kept), len(pages) - good
+
+
+def _checked_page(page: dict[str, str], seen: set[str]) -> Page:
+    url = page["url"]
+    if url in seen:
+        return GAP
+    try:
+        check_url(url)
+    except ValueError:
+        return GAP
+    site = site_name(url)
+    if not is_public_host(url) or not site:
+        return GAP
+    seen.add(url)
+    title = plain_line(page["title"])[:MAX_PAGE_TITLE].rstrip()
+    return (title or "Untitled", site, url)
 
 
 def _decode(data: bytes) -> str:

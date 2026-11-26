@@ -270,7 +270,7 @@ class Orchestrator:
             question = self._questions
             QUESTION.set(question)
             if self._search_results is not None:
-                self._search_results.new_question()
+                self._search_results.new_question(question)
             if is_forget_command(text):
                 if self._confirmations is not None:
                     self._confirmations.expire(

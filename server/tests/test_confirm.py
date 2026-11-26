@@ -489,7 +489,7 @@ def test_the_numbered_list_note():
     note = results.note()
     assert note.startswith(
         "(System note: pages from your last search or skill, for open_search_result by number: "
-        '<untrusted source="web_search_results">\n1. Leeds weather &lt;b&gt;&amp;&lt;/b&gt; '
+        '<untrusted source="search_and_skill_pages">\n1. Leeds weather &lt;b&gt;&amp;&lt;/b&gt; '
         "(bbc.co.uk)\n2. Forecast 0 (site0.example)\n"
     )
     assert note.endswith("10. Forecast 8 (site8.example)\n</untrusted>)")

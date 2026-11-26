@@ -409,15 +409,16 @@ class Brain:
         self._switch_ducker()
         self._rebuild_due = True
 
-    def _launch_tools(self, settings: Settings) -> LaunchTools | None:
+    def _launch_tools(self, settings: Settings, skill_pages: bool = False) -> LaunchTools | None:
         """open_app and open_website from the lists as they are now, only when computer
         control is on and a list isn't empty; open_search_result when computer control
-        and web search are on. Otherwise CARL's prompt says why not."""
+        is on and web search is on or an offered skill hands back pages (`skill_pages`).
+        Otherwise CARL's prompt says why not."""
         if self._app_store is None:
             return None
         version, apps, sites = self._app_store.snapshot()
         self._apps_version = version
-        pages = settings.web_search and not web_search_blocked()
+        pages = (settings.web_search and not web_search_blocked()) or skill_pages
         if not settings.computer_control:
             log.info("Apps and websites: off (COMPUTER_CONTROL is off)")
             return None
@@ -505,20 +506,27 @@ class Brain:
             skills_dir=settings.skills_dir,
             runner=self.skill_runner,
             confirmations=self.confirmations,
-            search_results=self.search_results,
         )
 
     def _rebuild(self) -> None:
         settings = self._settings
         if self.skills is not None:
             self._skills_version = self.skills.version
+        skills = self._skill_tools(settings)
+        launch = self._launch_tools(settings, skill_pages=skills is not None and skills.has_pages)
+        # Pages (from searches or skills) are listed and kept only while
+        # open_search_result is offered to open them.
+        offered = launch is not None and launch.search_results
+        self.search_results.offered = offered
+        if skills is not None:
+            skills.keep_pages(self.search_results if offered else None)
         tools = build_tools(
             settings,
             music=self.music,
-            launch=self._launch_tools(settings),
+            launch=launch,
             youtube=self._youtube_tools(settings),
             media=self._media_keys(settings),
-            skills=self._skill_tools(settings),
+            skills=skills,
         )
         chat = create_chat(
             settings,
