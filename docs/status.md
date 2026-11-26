@@ -2,7 +2,7 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
-## 2026-11-26 — Local skills built (user check pending)
+## 2026-11-26 — Local skills done (user check passed)
 
 - **Built:**
   - **Skills:** the user's own Python scripts, one folder each in `SKILLS_DIR` (a Settings-tab setting), with a `skill.json` manifest and `main.py` (`skills_store.py`). Each approved skill is a tool, `skill_<slug>`, with its choices as enums and one optional text field, sent as JSON on stdin (`tools/skill_tools.py`).
@@ -12,8 +12,8 @@ Where the project stands, so work can resume after a break. Update this when a m
   - **Examples:** `examples/skills/hello-time` and `examples/skills/send-note-email` (only prints "Would send: …"). "Writing a skill" in `server/README.md`.
   - Review fixes: the fingerprint covers every file and refuses links, environments and bytecode caches live outside the skill folder, skills without packages run without uv, no skill inside another uv project, the strict-tool budget, the read-back refused rather than cut, a "still running" note.
 - **Plan:** `docs/plans/2026-11-26-local-skills.md`.
-- **Tests:** 1627 server tests pass (24 integration tests deselected; the skill runner's and the examples' integration tests pass on this PC).
-- **Check by the user (pending):**
+- **Tests:** 1631 server tests pass (24 integration tests deselected; the skill runner's and the examples' integration tests pass on this PC).
+- **Check by the user (passed 2026-11-26).** Two prompt fixes came out of it: CARL reworded the text ("I'm running late" became "Marc is running late this morning") and said "Say yes to confirm" before the call, so the rules now keep the user's own words and allow no text before a needs-yes call; and CARL said a "Would send" result had been sent, so it now reports only what the result says. The steps:
   1. Set `SKILLS_DIR` to a folder (outside any Python project and OneDrive) and copy both examples into it. On the Apps tab both appear, unticked. Tick them.
   2. "Run hello time, the long format": CARL says the time from the script.
   3. "Email the team that I'm running late": the robot asks "Shall I run Send note email with: I'm running late?". Say "yes": CARL reports "Would send: I'm running late". Repeat and say "no": nothing runs, and the Live tab shows `cancelled`.
@@ -21,7 +21,7 @@ Where the project stands, so work can resume after a break. Update this when a m
   5. Turn `COMPUTER_CONTROL` off: CARL says skills aren't set up.
 - **Wake word ("Hey CARL"):** Phase 0's test firmware is built (`docs/plans/2026-11-25-wake-word.md`); it waits on the user training the model in Colab (Task 0.1). Phase 1 only after the Phase 0 numbers are agreed.
 - **Not pushed yet:** everything since the web search and About you check (`2382d8f`): M7 apps and websites, YouTube, media keys and ducking, the wake word Phase 0 firmware, and local skills. Push only when the user asks.
-- **Next:** the user's skills check, wake word training, a write-only Keys section and first-run setup, the servo check, in-page controls, or M9 expressions.
+- **Next:** wake word training (the user is training on Colab's CPU), a write-only Keys section and first-run setup, the servo check, in-page controls, or M9 expressions.
 
 ## 2026-11-25 — M7 done (YouTube, media keys and ducking)
 

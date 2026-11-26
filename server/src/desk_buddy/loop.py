@@ -451,7 +451,9 @@ class Orchestrator:
             error = self._line("error")
             self._show(turn, error.emotion)
             await speak([error.text])
-        log.info("CARL [%s]: %s", turn.emotion or DEFAULT_EMOTION, " ".join(reply))
+        said = " ".join(reply).strip()
+        if said:  # a turn that ended at a call needing a yes may have said nothing
+            log.info("CARL [%s]: %s", turn.emotion or DEFAULT_EMOTION, said)
         await queue.put(None)
 
     def _note_emotion(self, turn: _Turn, emotion: str | None) -> None:
