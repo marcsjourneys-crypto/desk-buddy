@@ -19,7 +19,7 @@ from desk_buddy.config import Settings
 from desk_buddy.skills_store import TOOL_PREFIX as SKILL_TOOL_PREFIX
 from desk_buddy.tools.actions import publish_action
 from desk_buddy.tools.registry import ToolRegistry
-from desk_buddy.tools.urls import SearchResults
+from desk_buddy.tools.urls import SearchResults, plain_line
 
 log = logging.getLogger(__name__)
 
@@ -463,7 +463,7 @@ def _search(query: str, content: Any) -> Search:
     pages = []
     for result in content:
         url = _field(result, "url")
-        title = _plain(str(_field(result, "title") or ""))
+        title = plain_line(str(_field(result, "title") or ""))
         if len(title) > MAX_TITLE:
             title = title[:MAX_TITLE] + "..."
         pages.append((title or "Untitled", _site(str(url or "")), url))
@@ -472,25 +472,12 @@ def _search(query: str, content: Any) -> Search:
     return Search(query, ok=True, count=len(content), sources=sources, pages=kept)
 
 
-# Bidi controls: shown text from the web must not flip the dashboard's text direction.
-_BIDI = dict.fromkeys(
-    [*range(0x202A, 0x202F), *range(0x2066, 0x206A)],
-    " ",
-)
-
-
-def _plain(text: str) -> str:
-    """One line of plain text: bidi controls and every line break (including U+0085,
-    U+2028 and U+2029, which split() counts as whitespace) become single spaces."""
-    return " ".join(text.translate(_BIDI).split())
-
-
 def _site(url: str) -> str:
     try:
         host = urlsplit(url).hostname or ""
     except ValueError:
         return ""
-    return _plain(host.removeprefix("www."))
+    return plain_line(host.removeprefix("www."))
 
 
 def _search_args(search: Search) -> str:

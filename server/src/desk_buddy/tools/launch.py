@@ -48,7 +48,7 @@ SITE_FAILED = "I couldn't open {name}."
 BAD_SITE = "That website's address isn't allowed."
 NOT_A_RESULT = (
     "I can only open a page by its number from the latest list of pages from your last "
-    "search, or by the exact address of a result from a search in this question."
+    "search or skill, or by the exact address of a result from a search in this question."
 )
 MAX_PAGE_TEXT = MAX_URL  # characters of the page argument (an address at most)
 LOCAL_PAGE = "I can't open pages on this computer or the local network."
@@ -200,7 +200,8 @@ class LaunchTools:
                 Tool(
                     name="open_search_result",
                     description=(
-                        "Open a page from your web search results in the user's browser. "
+                        "Open a page from your web search results (or a page a skill "
+                        "listed) in the user's browser. "
                         "Call it as soon as the user asks to open such a page. It doesn't "
                         "open at once: after your reply the robot asks the user, and it "
                         "opens only if they say yes."
@@ -212,9 +213,9 @@ class LaunchTools:
                                 "type": "string",
                                 "description": (
                                     "The page's number from the latest list of pages from "
-                                    'your last search (like "3"), or the exact address of a '
-                                    "result from a search you ran in this question (at most "
-                                    f"{MAX_PAGE_TEXT} characters)."
+                                    'your last search or skill (like "3"), or the exact '
+                                    "address of a result from a search you ran in this "
+                                    f"question (at most {MAX_PAGE_TEXT} characters)."
                                 ),
                             }
                         },

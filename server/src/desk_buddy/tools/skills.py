@@ -21,6 +21,11 @@
 - One skill at a time; past its timeout the whole process tree is killed.
 - Exit 0: stdout (capped) as untrusted data for Claude. Otherwise Claude gets only the exit
   code; stderr only ever goes to the server log, on a failure.
+- A skill whose manifest says `pages` prints one JSON object instead,
+  {"text": str, "pages": [{"title": str, "url": str}, ...]}: the text goes to Claude as
+  above, and the pages (checked here: at most MAX_PAGES, public http(s) addresses only)
+  come back for SearchResults, so open_search_result can open them after a yes. Anything
+  else is "failed (bad output)"; the log gets a short reason, never the output.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from typing import Any
 
 from desk_buddy.skills_store import ENTRY, Skill, check_slug
 from desk_buddy.tools.untrusted import wrap
+from desk_buddy.tools.urls import Page, check_url, is_public_host, plain_line, site_name
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +76,9 @@ PROJECT_FILE = "pyproject.toml"
 
 STDOUT_LIMIT = 1000  # characters of the result Claude gets
 STDOUT_READ_LIMIT = 16_000  # bytes decoded at most (a skill can print a lot)
+PAGES_READ_LIMIT = 64_000  # bytes of a pages skill's JSON at most; more is bad output
+MAX_PAGES = 10  # pages a skill may hand back
+MAX_PAGE_TITLE = 120  # characters of each page's title
 STDERR_LOG_LIMIT = 500  # last characters of stderr logged on a failure
 REAP_TIMEOUT_S = 5.0
 KILL_TIMEOUT_S = 10.0
@@ -85,6 +94,10 @@ TIMED_OUT = "failed: timed out"
 NOT_STARTED = "failed: couldn't start"
 INVALID = "failed: not a valid skill"
 INSIDE_PROJECT = "failed: inside another uv project"
+BAD_OUTPUT = "failed (bad output)"
+
+OUTPUT_KEYS = frozenset({"text", "pages"})
+PAGE_KEYS = frozenset({"title", "url"})
 
 Popen = Callable[..., Any]
 Killer = Callable[[int], None]
@@ -92,11 +105,14 @@ Killer = Callable[[int], None]
 
 @dataclass(frozen=True)
 class SkillResult:
-    """`text` is for Claude; `summary` is short, for the log and the Live tab."""
+    """`text` is for Claude; `summary` is short, for the log and the Live tab; `pages`
+    (only from a skill with `pages` in its manifest, already checked) are what
+    open_search_result may open afterwards."""
 
     ok: bool
     text: str
     summary: str
+    pages: tuple[Page, ...] = ()
 
 
 # --- the commands and the environment ---
@@ -448,7 +464,22 @@ class SkillRunner:
             summary = f"failed (exit {code})"
             self._log_stderr(slug, summary, err)
             return SkillResult(False, f"The skill {summary}.", summary)
+        if skill.manifest.pages:
+            return self._pages_result(slug, out)
         return SkillResult(True, self._result_text(slug, out), "ok")
+
+    def _pages_result(self, slug: str, out: bytes | None) -> SkillResult:
+        """A pages skill's JSON output: its text (capped and wrapped as for plain output)
+        and its checked pages; or failed (bad output), with only a short reason logged."""
+        try:
+            text, raw_pages = parse_pages_output(out or b"")
+        except BadOutput as exc:
+            self._log.warning("Skills: %s gave bad output (%s)", slug, exc)
+            return SkillResult(False, f"The skill {BAD_OUTPUT}.", BAD_OUTPUT)
+        pages, dropped = check_pages(raw_pages)
+        if dropped:
+            self._log.warning("Skills: %s dropped %d pages", slug, dropped)
+        return SkillResult(True, self._wrap_text(slug, text), "ok", pages)
 
     def _log_stderr(self, slug: str, what: str, err: bytes | None) -> None:
         tail = _decode(err)[-STDERR_LOG_LIMIT:].strip() if err else ""
@@ -459,7 +490,12 @@ class SkillRunner:
 
     @staticmethod
     def _result_text(slug: str, out: bytes | None) -> str:
-        text = _decode((out or b"")[:STDOUT_READ_LIMIT]).replace("\r\n", "\n").strip()
+        return SkillRunner._wrap_text(slug, _decode((out or b"")[:STDOUT_READ_LIMIT]))
+
+    @staticmethod
+    def _wrap_text(slug: str, text: str) -> str:
+        """Text for Claude: wrapped as untrusted and capped, or "Done." when empty."""
+        text = text.replace("\r\n", "\n").strip()
         if not text:
             return DONE
         source = f"skill:{slug}"
@@ -467,6 +503,62 @@ class SkillRunner:
         # The cap is on the escaped body, so anything past STDOUT_LIMIT characters (or
         # past it once escaped) is cut and marked "(and more)".
         return wrap(source, text, limit=STDOUT_LIMIT + overhead)
+
+
+class BadOutput(ValueError):
+    """A pages skill's stdout isn't the JSON it must be; the message is a short reason for
+    the log (never any of the output)."""
+
+
+def parse_pages_output(out: bytes) -> tuple[str, list[dict[str, str]]]:
+    """A pages skill's stdout: (text, [{"title", "url"}, ...]) as given, or BadOutput.
+    The shape is strict: one object with exactly "text" (a string) and "pages" (a list,
+    maybe empty, of objects with exactly a "title" and a "url" string)."""
+    if len(out) > PAGES_READ_LIMIT:
+        raise BadOutput(f"over {PAGES_READ_LIMIT} bytes")
+    try:
+        raw = json.loads(_decode(out).removeprefix("\ufeff"))
+    except RecursionError:
+        raise BadOutput("not valid JSON (nested too deeply)") from None
+    except ValueError:
+        raise BadOutput("not valid JSON") from None
+    if not isinstance(raw, dict):
+        raise BadOutput("not a JSON object")
+    if set(raw) != OUTPUT_KEYS:
+        raise BadOutput('needs exactly the keys "text" and "pages"')
+    text, pages = raw["text"], raw["pages"]
+    if not isinstance(text, str):
+        raise BadOutput('"text" is not a string')
+    if not isinstance(pages, list):
+        raise BadOutput('"pages" is not a list')
+    for page in pages:
+        if not isinstance(page, dict) or set(page) != PAGE_KEYS:
+            raise BadOutput('each page needs exactly "title" and "url"')
+        if not isinstance(page["title"], str) or not isinstance(page["url"], str):
+            raise BadOutput("a page's title and url must be strings")
+    return text, pages
+
+
+def check_pages(pages: list[dict[str, str]]) -> tuple[tuple[Page, ...], int]:
+    """The pages that may be opened, in order, as (title, site, address), and how many
+    were dropped: a bad or non-public address, one already listed, or any past MAX_PAGES.
+    Titles are cleaned like search results' titles and cut to MAX_PAGE_TITLE."""
+    kept: list[Page] = []
+    seen: set[str] = set()
+    for page in pages:
+        url = page["url"]
+        if len(kept) >= MAX_PAGES or url in seen:
+            continue
+        try:
+            check_url(url)
+        except ValueError:
+            continue
+        if not is_public_host(url):
+            continue
+        seen.add(url)
+        title = plain_line(page["title"])[:MAX_PAGE_TITLE].rstrip()
+        kept.append((title or "Untitled", site_name(url), url))
+    return tuple(kept), len(pages) - len(kept)
 
 
 def _decode(data: bytes) -> str:

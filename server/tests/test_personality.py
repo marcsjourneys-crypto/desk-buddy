@@ -113,7 +113,7 @@ def test_prompt_has_the_search_result_and_yes_rules_only_when_offered():
     rules = (
         "open_search_result",
         "call it immediately, with no text before it",
-        'the page\'s number from the latest "pages from your last search" list',
+        'the page\'s number from the latest "pages from your last search or skill" list',
         "numbers only ever mean the most recent list",
         "exact address of a result from a search you ran in this question",
         "Never make an address up",

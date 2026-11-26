@@ -505,6 +505,7 @@ class Brain:
             skills_dir=settings.skills_dir,
             runner=self.skill_runner,
             confirmations=self.confirmations,
+            search_results=self.search_results,
         )
 
     def _rebuild(self) -> None:

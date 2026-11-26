@@ -74,7 +74,7 @@ RESERVED_NAMES = frozenset(
 )
 
 MANIFEST_KEYS = frozenset(
-    {"name", "spoken_names", "description", "inputs", "needs_yes", "timeout_seconds"}
+    {"name", "spoken_names", "description", "inputs", "needs_yes", "pages", "timeout_seconds"}
 )
 INPUTS_KEYS = frozenset({"choices", "text"})
 CHOICE_KEYS = frozenset({"options", "description", "default"})
@@ -126,6 +126,8 @@ class Manifest:
     text: TextInput | None = None
     needs_yes: bool = False
     timeout_seconds: int = DEFAULT_TIMEOUT_S
+    # stdout is JSON: {"text": ..., "pages": [{"title", "url"}]} (pages CARL may open)
+    pages: bool = False
 
 
 @dataclass(frozen=True)
@@ -248,6 +250,7 @@ def check_manifest(raw: Mapping[str, Any]) -> tuple[Manifest | None, tuple[Skill
     description = _description(p, raw.get("description"))
     choices, text = _inputs(p, raw.get("inputs", {}))
     needs_yes = _bool(p, raw.get("needs_yes", False), "needs_yes")
+    pages = _bool(p, raw.get("pages", False), "pages")
     timeout = _int(
         p, raw.get("timeout_seconds", DEFAULT_TIMEOUT_S), "timeout_seconds", 1, MAX_TIMEOUT_S
     )
@@ -261,6 +264,7 @@ def check_manifest(raw: Mapping[str, Any]) -> tuple[Manifest | None, tuple[Skill
         text=text,
         needs_yes=needs_yes,
         timeout_seconds=timeout,
+        pages=pages,
     )
     return manifest, ()
 

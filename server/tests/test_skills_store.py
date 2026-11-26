@@ -331,6 +331,17 @@ def test_needs_yes_is_a_boolean(value, good):
 
 
 @pytest.mark.parametrize(
+    ("value", "good"), [(True, True), (False, True), (1, False), (0, False), ("true", False)]
+)
+def test_pages_is_a_real_boolean_and_off_by_default(value, good):
+    assert ok(manifest()).pages is False
+    if good:
+        assert ok(manifest(pages=value)).pages is value
+    else:
+        assert "pages" in errors_of(manifest(pages=value))
+
+
+@pytest.mark.parametrize(
     ("value", "good"),
     [(1, True), (120, True), (0, False), (121, False), (2.5, False), (True, False)],
 )

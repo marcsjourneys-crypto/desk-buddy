@@ -88,6 +88,7 @@ UTF-8 JSON (a BOM is fine), at most 16 KB. Unknown keys and keys given twice are
 | `inputs.text` | Optional: the one free-text input. `description` (required, 1-200 characters, one line), `max_length` (1-500, default 300), `required` (default `false`). |
 | `needs_yes` | Optional, default `false`. Use `true` for anything that sends, posts, deletes or spends: the robot reads the request back and it runs only after a spoken "yes". Such a skill takes at most 200 characters of text, on one line (all of it is read back; longer text is refused, never cut). |
 | `timeout_seconds` | Optional, 1-120, default 30. Past it the script and everything it started are killed. |
+| `pages` | Optional, default `false` (must be `true` or `false`, not `1` or `"true"`). With `true`, the script prints JSON with pages the user can open afterwards: see [Returning pages](#returning-pages). |
 
 ### Inputs, output and exit codes
 
@@ -111,6 +112,20 @@ sys.exit(0)
 - **stderr** never reaches CARL or the dashboard; on a failure its last 500 characters go to the server log, for you.
 - The log and the Live tab show the skill, its choices and the first 60 characters of the text, and "Ran <name>." as the result, never what the script printed. For a skill that needs a yes, the Live tab's `waiting` line shows the request as it is read back.
 - One skill runs at a time. A skill that needs a yes runs as soon as you say it, and CARL says its "contemplating" line if it takes more than 4 seconds.
+
+### Returning pages
+
+With `"pages": true` in the manifest, stdout must be exactly one JSON object (at most 64 KB) instead of plain text:
+
+```json
+{"text": "World: 1. Calm seas. 2. Robot wins.", "pages": [{"title": "Calm seas", "url": "https://news.example.com/a1"}, {"title": "Robot wins", "url": "https://news.example.com/a2"}]}
+```
+
+- `text` is what CARL reads, with the same 1000-character cap and untrusted marking as plain output (empty means "Done.").
+- `pages` (it may be empty) holds at most 10 pages, each exactly a `title` and a `url` string. A page whose address isn't `http`/`https`, has a user name or password, or points at this PC or the local network (`localhost`, `.local`, private or loopback IPs, single-label names) is dropped, as is a repeated address or any past the tenth; the log says "dropped N pages", never the address. Titles become one line and are cut to 120 characters.
+- Anything else (not JSON, a missing or extra key, a wrong type) makes the run `failed (bad output)`; the log gets a short reason, never the output.
+- The pages join the numbered list web search fills: at your next question CARL sees "1. Calm seas (news.example.com)…" and "open number 2" opens that page after your spoken "yes", exactly like a search result (opening needs web search on, as for search results). Number your `text` the same way as `pages`, and only list pages that pass the rules above, so the numbers you hear match the numbers that open. If CARL also searched the web in the same question, the search results come first.
+- The Live tab shows "Ran <name> (N links).", never the text or the addresses.
 
 ### Packages and secrets
 

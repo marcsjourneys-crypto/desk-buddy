@@ -1,6 +1,7 @@
-"""The one check every web address CARL may open goes through (bookmarks and web search
-results): http or https, a host, no user name or password, at most MAX_URL characters,
-and nothing invisible or ambiguous in it. Also the search results CARL may open."""
+"""The one check every web address CARL may open goes through (bookmarks, web search
+results and skills' pages): http or https, a host, no user name or password, at most
+MAX_URL characters, and nothing invisible or ambiguous in it. Also the search results
+(and skills' pages) CARL may open."""
 
 from __future__ import annotations
 
@@ -20,15 +21,31 @@ _PLAIN_HOST = re.compile(r"[a-z0-9.-]+")
 
 
 MAX_LISTED = 10  # pages from the last question's searches, numbered for Claude
-LIST_NOTE_START = "(System note: pages from your last search, for open_search_result by number:"
+LIST_NOTE_START = (
+    "(System note: pages from your last search or skill, for open_search_result by number:"
+)
 
-# One search result: (title, site, full address).
+# One search result (or a skill's page): (title, site, full address).
 Page = tuple[str, str, str]
+
+# Bidi controls: shown text from the web must not flip the dashboard's text direction.
+_BIDI = dict.fromkeys(
+    [*range(0x202A, 0x202F), *range(0x2066, 0x206A)],
+    " ",
+)
+
+
+def plain_line(text: str) -> str:
+    """One line of plain text: bidi controls and every line break (including U+0085,
+    U+2028 and U+2029, which split() counts as whitespace) become single spaces. How
+    search results' and skills' page titles are cleaned."""
+    return " ".join(text.translate(_BIDI).split())
 
 
 class SearchResults:
-    """CARL's own web search results: the only pages open_search_result may open. Kept on
-    the server side (the dashboard never gets the addresses).
+    """CARL's own web search results, and the pages skills hand back: the only pages
+    open_search_result may open. Kept on the server side (the dashboard never gets the
+    addresses).
 
     - This question's results can be opened by their exact address (Claude saw them in
       this turn).
@@ -55,8 +72,9 @@ class SearchResults:
             self._listed, self._now = [], []
 
     def add(self, pages: Iterable[Page | str]) -> None:
-        """Results of a search in this question: (title, site, address) each, or just an
-        address. An address already here is kept once, where it first came."""
+        """Results of a search (or a skill's pages) in this question, after the ones
+        already here: (title, site, address) each, or just an address. An address already
+        here is kept once, where it first came."""
         with self._lock:
             seen = {url for _, _, url in self._now}
             for page in pages:

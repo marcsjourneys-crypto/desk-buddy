@@ -17,7 +17,10 @@
   yes: "Shall I run <name> with: <text>?". Its text is at most SPOKEN_TEXT characters and
   is sent exactly as it is read back.
 - The log and the dashboard show the slug, the choices and the text cut to LOG_TEXT
-  characters; never the skill's output (only "Ran <name>.").
+  characters; never the skill's output (only "Ran <name>.", or "Ran <name> (N links).").
+- A skill with `pages` hands back pages (checked by the runner): they join this question's
+  SearchResults after anything already there, run directly or after a yes, so
+  open_search_result can open them (by number from the next question on).
 """
 
 from __future__ import annotations
@@ -46,6 +49,20 @@ MISSING_TEXT = "That skill needs its text."
 BAD_TEXT = "The text must be plain text."
 LONG_TEXT = "The text can be at most {limit} characters."
 CONTROL_TEXT = "The text can't hold control or invisible formatting characters."
+
+
+class SkillOutput(str):
+    """A skill's result for Claude, plus how many pages it handed back (for the log)."""
+
+    links: int = 0
+
+
+def shown_result(name: str, result: str) -> str:
+    """What the log line and the Live tab show of a run: never the output or addresses."""
+    links = getattr(result, "links", 0)
+    if links:
+        return f"Ran {name} ({links} link{'s' if links != 1 else ''})."
+    return f"Ran {name}."
 
 
 class SkillFailed(ToolError):
@@ -156,7 +173,8 @@ def _log_result(result: str) -> str:
 
 class SkillTools:
     """The skill tools over a snapshot of the usable skills (rebuilt between turns when
-    the approvals change). A needs_yes skill is offered only with `confirmations`."""
+    the approvals change). A needs_yes skill is offered only with `confirmations`.
+    Pages a skill hands back go into `search_results` (SearchResults), if given."""
 
     def __init__(
         self,
@@ -167,8 +185,10 @@ class SkillTools:
         skills_dir: str | Path,
         runner: Any,
         confirmations: Any = None,
+        search_results: Any = None,
     ) -> None:
         self._guard = guard
+        self._search_results = search_results
         self._store = store
         self._skills_dir = skills_dir
         self._runner = runner
@@ -218,10 +238,13 @@ class SkillTools:
         current = self._approved_now(skill)
         if current is None:
             self._guard.refuse(name, args, NOT_AVAILABLE.format(name=manifest.name))
-        done = f"Ran {manifest.name}."
+
+        def shown(result: str) -> str:
+            return shown_result(manifest.name, result)
+
         if not manifest.needs_yes:
             return self._guard.run(
-                name, args, lambda: self._run(current, payload), shown_result=lambda _r: done
+                name, args, lambda: self._run(current, payload), shown_result=shown
             )
         text = payload.get(TEXT_KEY)
         return self._guard.run_after_yes(
@@ -237,7 +260,7 @@ class SkillTools:
                 f"{manifest.name}. Result: {result})"
             ),
             failed_note=lambda exc: _failed_note(manifest.name, exc),
-            shown_result=lambda _r: done,
+            shown_result=shown,
         )
 
     def _check(
@@ -331,7 +354,13 @@ class SkillTools:
             raise SkillFailed("The skill failed unexpectedly.", "failed unexpectedly") from exc
         if not result.ok:
             raise SkillFailed(result.text, result.summary)
-        return result.text
+        output = SkillOutput(result.text)
+        pages = tuple(getattr(result, "pages", ()) or ())
+        if pages and self._search_results is not None:
+            # After this question's search results (and any earlier skill's pages).
+            self._search_results.add(pages)
+            output.links = len(pages)
+        return output
 
     def _run_confirmed(self, skill: Skill, payload: Mapping[str, Any]) -> str:
         """On the user's yes: check the files again at this moment, then run."""
