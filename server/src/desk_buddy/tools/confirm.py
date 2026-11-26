@@ -5,7 +5,8 @@
    one replaces the old), stamped with the question it was proposed in (QUESTION, a
    context variable the loop sets for each turn, which tool threads inherit).
 2. **Asked:** the chat ends the turn on the waiting tool result, and the loop itself
-   (never the model) speaks "Shall I open <it>?". The action is armed as soon as that
+   (never the model) speaks "Shall I open <it>?" ("run" for a skill: the action's
+   Verb names it in the question and every note). The action is armed as soon as that
    line starts playing, so the user may cut it off to answer. If the reply was cut off
    or failed before the question started, the action is cancelled.
 3. **Answered:** at the very next question with speech, before Claude sees it, the loop
@@ -93,22 +94,46 @@ def is_yes(text: str) -> bool:
 
 
 @dataclass(frozen=True)
+class Verb:
+    """How the question and the notes name an action: "Shall I {base} …?", "it {third}
+    only if …", "the pending action, {doing} …", "nothing was {done}", "never say it's
+    {state}"."""
+
+    base: str
+    third: str
+    doing: str
+    done: str
+    state: str
+
+
+OPEN = Verb("open", "opens", "opening", "opened", "open")
+RUN = Verb("run", "runs", "running", "run", "done")
+
+
+@dataclass(frozen=True)
 class PendingAction:
     """An action that has passed every check and waits for a yes."""
 
     tool: str
     log_args: str  # for the log line
     public_args: str  # for the dashboard
-    description: str  # what it does, to say and note: "the page on bbc.co.uk"
+    description: str  # what it acts on, to say and note: "the page on bbc.co.uk"
     run: Callable[[], str]  # raises ToolError if it fails
     question: int | None = None  # the question it was proposed in
     armed: bool = False  # the server's question about it has started playing
     at: float = 0.0  # when it was armed (Confirmations' clock)
+    verb: Verb = OPEN
+    # What Claude is told after a yes, given run()'s result (ok_note) or its ToolError
+    # (failed_note). None: "<description> was <done>" / "couldn't be <done>".
+    ok_note: Callable[[str], str] | None = None
+    failed_note: Callable[[ToolError], str] | None = None
+    # What the log line and the dashboard show of run()'s result (None: the result).
+    shown: Callable[[str], str] | None = None
 
     @property
     def ask(self) -> str:
         """The question the server speaks: "Shall I open the page on bbc.co.uk?"."""
-        return f"Shall I open {self.description}?"
+        return f"Shall I {self.verb.base} {self.description}?"
 
 
 class Confirmations:
@@ -199,38 +224,44 @@ class Confirmations:
             if is_yes(text):
                 return "(System note: nothing was waiting for a yes, so nothing was opened.)"
             return None
-        what = action.description
+        what, verb = action.description, action.verb
         if not action.armed:
             self._outcome(action, "cancelled", "It was never asked about.")
-            return cancelled_note(what, NOT_ASKED)
+            return cancelled_note(what, NOT_ASKED, verb)
         if action.question != question - 1 or self._clock() - action.at > self._expiry:
             self._outcome(action, "expired", "The user didn't answer in time.")
             return (
-                f"(System note: the pending action, opening {what}, expired before the "
-                "user answered; nothing was opened.)"
+                f"(System note: the pending action, {verb.doing} {what}, expired before the "
+                f"user answered; nothing was {verb.done}.)"
             )
         if not is_yes(text):
             self._outcome(action, "cancelled", "The user didn't say yes.")
             return (
-                f"(System note: the pending action, opening {what}, was cancelled; the "
+                f"(System note: the pending action, {verb.doing} {what}, was cancelled; the "
                 "user didn't say yes.)"
             )
         try:
             result = action.run()
         except ToolError as exc:
             self._outcome(action, "failed", str(exc))
-            return failed_note(what)
+            if action.failed_note is not None:
+                return action.failed_note(exc)
+            return failed_note(what, verb)
         except Exception:
             log.exception("Confirmed action %s crashed", action.tool)
             self._outcome(action, "failed", "The action failed unexpectedly.")
-            return failed_note(what)
-        self._outcome(action, "ok", result)
-        return f"(System note: the server asked and the user said yes; {what} was opened.)"
+            if action.failed_note is not None:
+                return action.failed_note(ToolError("failed unexpectedly"))
+            return failed_note(what, verb)
+        self._outcome(action, "ok", action.shown(result) if action.shown else result)
+        if action.ok_note is not None:
+            return action.ok_note(result)
+        return f"(System note: the server asked and the user said yes; {what} was {verb.done}.)"
 
     def expire(self, reason: str, why: str = "was dropped") -> None:
         """Drop the pending action (a forget command, computer control turned off).
         `why` finishes the note Claude gets: "the request to open … <why>; nothing was
-        opened"."""
+        opened" (by the action's Verb)."""
         with self._lock:
             action, self._pending = self._pending, None
         if action is not None:
@@ -246,16 +277,19 @@ class Confirmations:
         publish_action(self._bus, action.tool, action.public_args, result, outcome)
         if unreported is not None:
             with self._lock:
-                self._unreported.append(cancelled_note(action.description, unreported))
+                self._unreported.append(cancelled_note(action.description, unreported, action.verb))
 
 
 NOT_ASKED = "was cancelled before the user was asked"
 
 
-def cancelled_note(what: str, why: str) -> str:
+def cancelled_note(what: str, why: str, verb: Verb = OPEN) -> str:
     """(System note: the request to open <what> <why>; nothing was opened.)"""
-    return f"(System note: the request to open {what} {why}; nothing was opened.)"
+    return f"(System note: the request to {verb.base} {what} {why}; nothing was {verb.done}.)"
 
 
-def failed_note(what: str) -> str:
-    return f"(System note: the server asked and the user said yes, but {what} couldn't be opened.)"
+def failed_note(what: str, verb: Verb = OPEN) -> str:
+    return (
+        f"(System note: the server asked and the user said yes, but {what} couldn't be "
+        f"{verb.done}.)"
+    )

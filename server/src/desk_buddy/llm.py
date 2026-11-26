@@ -16,6 +16,7 @@ import anthropic
 from desk_buddy.brain.memory import merge_consecutive
 from desk_buddy.brain.personality import Personality, system_prompt
 from desk_buddy.config import Settings
+from desk_buddy.skills_store import TOOL_PREFIX as SKILL_TOOL_PREFIX
 from desk_buddy.tools.actions import publish_action
 from desk_buddy.tools.registry import ToolRegistry
 from desk_buddy.tools.urls import SearchResults
@@ -572,6 +573,7 @@ def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Pers
         youtube=tools is not None and "play_youtube" in tools,
         youtube_search=tools is not None and "youtube_search" in tools,
         media=tools is not None and "media_control" in tools,
+        skills=tools is not None and any(n.startswith(SKILL_TOOL_PREFIX) for n in tools.names()),
         computer_control=settings.computer_control,
         character=personality.character,
         about=personality.about,

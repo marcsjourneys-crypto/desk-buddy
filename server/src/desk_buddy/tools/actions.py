@@ -76,8 +76,17 @@ class ActionGuard:
         with self._lock:
             self._this_question = 0
 
-    def run(self, name: str, args: Mapping[str, Any], fn: Callable[[], str]) -> str:
-        """Run one action if allowed; raise ToolError (which CARL reads out) if not."""
+    def run(
+        self,
+        name: str,
+        args: Mapping[str, Any],
+        fn: Callable[[], str],
+        *,
+        shown_result: Callable[[str], str] | None = None,
+    ) -> str:
+        """Run one action if allowed; raise ToolError (which CARL reads out) if not.
+        `shown_result` maps the result to what the log line and the dashboard show (a
+        skill's output is never shown, only "ok")."""
         shown = _shown(args)
         described = f"{name} {shown}"
         self._admit(name, described, shown)
@@ -91,8 +100,9 @@ class ActionGuard:
             log.warning("Action: %s -> crashed: %s", described, _one_line(repr(exc)))
             self._publish(name, shown, "The tool failed unexpectedly.", "failed")
             raise
-        log.info("Action: %s -> %s", described, _one_line(result))
-        self._publish(name, shown, result, "ok")
+        public = shown_result(result) if shown_result is not None else result
+        log.info("Action: %s -> %s", described, _one_line(public))
+        self._publish(name, shown, public, "ok")
         return result
 
     def run_after_yes(
@@ -104,14 +114,22 @@ class ActionGuard:
         confirmations: Any,
         description: str,
         public_args: Mapping[str, Any] | None = None,
+        verb: Any = None,
+        ok_note: Callable[[str], str] | None = None,
+        failed_note: Callable[[ToolError], str] | None = None,
+        shown_result: Callable[[str], str] | None = None,
     ) -> str:
         """A powerful action: checked and counted now like run(), but not run. It waits
         in `confirmations` (tools.confirm.Confirmations) for the user's spoken yes at the
         next question, and runs then without being counted again (and only if computer
         control is still on). Returns what Claude is told (NotDone: not a success yet);
         raises ToolError if refused. `public_args` replace `args` on the dashboard (the
-        log shows `args`)."""
-        from desk_buddy.tools.confirm import PendingAction  # it imports this module
+        log shows `args`). `verb` (a confirm.Verb, default OPEN) names the action in the
+        question and the notes; `ok_note`/`failed_note` let the action write the note
+        Claude gets after a yes; `shown_result` is as in run()."""
+        from desk_buddy.tools.confirm import OPEN, PendingAction  # it imports this module
+
+        verb = verb or OPEN
 
         shown = _shown(args)
         public = _shown(public_args) if public_args is not None else shown
@@ -123,14 +141,26 @@ class ActionGuard:
             return fn()
 
         # First, so a request this one replaces is shown as cancelled before it waits.
-        confirmations.propose(PendingAction(name, shown, public, description, confirmed))
+        confirmations.propose(
+            PendingAction(
+                name,
+                shown,
+                public,
+                description,
+                confirmed,
+                verb=verb,
+                ok_note=ok_note,
+                failed_note=failed_note,
+                shown=shown_result,
+            )
+        )
         log.info("Action: %s %s -> waiting for a yes", name, shown)
         self._publish(name, public, f"Waiting for the user to say yes to {description}.", "waiting")
         # The chat ends the turn on this result; the robot then asks the question.
         return NotDone(
-            f"Not done yet: the robot is now asking the user whether to open {description}; "
-            "it opens only if their next words are a yes. Never say it's open unless a "
-            "system note says it was opened."
+            f"Not done yet: the robot is now asking the user whether to {verb.base} "
+            f"{description}; it {verb.third} only if their next words are a yes. Never say "
+            f"it's {verb.state} unless a system note says it was {verb.done}."
         )
 
     def refuse(

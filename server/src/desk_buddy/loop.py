@@ -283,7 +283,7 @@ class Orchestrator:
                 log.info("Memory cleared")
                 await self._say(self._line("forget"), token)
                 return
-            answered = await self._answer_pending(text, question)
+            answered = await self._answer_pending(text, question, token)
             # The last question's search results, numbered, so Claude can open one by
             # its number (it never sees earlier questions' raw results).
             listed = self._search_results.note() if self._search_results is not None else None
@@ -353,15 +353,26 @@ class Orchestrator:
             notes=[turn.note] if turn.note else [],
         )
 
-    async def _answer_pending(self, text: str, question: int) -> str | None:
+    async def _answer_pending(self, text: str, question: int, token: int) -> str | None:
         """Run, cancel or expire an action waiting for a yes, on the user's words only
         (the transcript: nothing Claude, a tool or a web page says). Returns the system
-        note that goes after the user's words, or None. Never raises into the turn."""
+        note that goes after the user's words, or None. Never raises into the turn. A
+        confirmed action that takes over PONDER_AFTER seconds (a slow skill) gets
+        PONDERING meanwhile (at most once every PONDER_EVERY seconds)."""
         if self._confirmations is None:
             return None
         try:
-            # Off the loop: a confirmed action may take a moment (opening a page).
-            return await asyncio.to_thread(self._confirmations.answer, text, question)
+            # Off the loop: a confirmed action may take a moment (opening a page, a skill).
+            answering = asyncio.ensure_future(
+                asyncio.to_thread(self._confirmations.answer, text, question)
+            )
+            try:
+                return await asyncio.wait_for(asyncio.shield(answering), PONDER_AFTER)
+            except TimeoutError:
+                pass
+            await self._ponder(_Turn(user=text), token)
+            self._set_state(State.THINKING)
+            return await answering
         except Exception:
             log.exception("Couldn't answer the pending action")
             return None

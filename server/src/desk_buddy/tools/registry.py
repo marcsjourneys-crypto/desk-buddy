@@ -86,6 +86,9 @@ class ToolRegistry:
         log.info("Tool %s -> %s", name, _preview(text))
         return ToolOutcome(str(text), done=not isinstance(text, NotDone))
 
+    def names(self) -> list[str]:
+        return list(self._tools)
+
     def __len__(self) -> int:
         return len(self._tools)
 

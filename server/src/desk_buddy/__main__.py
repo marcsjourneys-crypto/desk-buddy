@@ -34,7 +34,7 @@ from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.ptt import KeyWatcher, parse_key
 from desk_buddy.server import ServerStartError, create_app, start_server
 from desk_buddy.settings_store import LiveSettings, SettingsStore
-from desk_buddy.skills_store import SkillsStore
+from desk_buddy.skills_store import MAX_APPROVED, SkillsStore, taken_names
 from desk_buddy.stt import WhisperTranscriber
 from desk_buddy.tools import build_tools
 from desk_buddy.tools.actions import ActionGuard
@@ -42,6 +42,7 @@ from desk_buddy.tools.confirm import Confirmations
 from desk_buddy.tools.ducking import DUCK_TIMEOUT_S, MusicDucker, SessionDucker
 from desk_buddy.tools.launch import LaunchTools
 from desk_buddy.tools.media import MediaKeys
+from desk_buddy.tools.skill_tools import SkillTools
 from desk_buddy.tools.skills import SkillRunner, default_python, find_uv, python_ok
 from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tools.urls import SearchResults
@@ -459,6 +460,40 @@ class Brain:
         log.info("Media keys: on")
         return MediaKeys(self.guard)
 
+    def _skill_tools(self, settings: Settings) -> SkillTools | None:
+        """One tool per approved skill whose files still match, only when computer
+        control is on, SKILLS_DIR is set and uv was found. Otherwise CARL's prompt says
+        skills aren't set up. Scans (and fingerprints) SKILLS_DIR: between turns only."""
+        if self.skills is None:
+            return None
+        if not settings.skills_dir:
+            log.info("Skills: off (no SKILLS_DIR)")
+            return None
+        if not settings.computer_control:
+            log.info("Skills: off (COMPUTER_CONTROL is off)")
+            return None
+        if self.skill_runner is None:
+            log.info("Skills: off (uv.exe wasn't found)")
+            return None
+        apps: tuple[Any, ...] = ()
+        sites: tuple[Any, ...] = ()
+        if self._app_store is not None:
+            _, apps, sites = self._app_store.snapshot()
+        scan = self.skills.scan(settings.skills_dir, taken_names(apps, sites))
+        usable = scan.usable[:MAX_APPROVED]
+        if not usable:
+            log.info("Skills: off (none approved on the dashboard's Apps tab)")
+            return None
+        log.info("Skills: on (%s)", ", ".join(s.slug for s in usable))
+        return SkillTools(
+            self.guard,
+            usable,
+            store=self.skills,
+            skills_dir=settings.skills_dir,
+            runner=self.skill_runner,
+            confirmations=self.confirmations,
+        )
+
     def _rebuild(self) -> None:
         settings = self._settings
         if self.skills is not None:
@@ -469,6 +504,7 @@ class Brain:
             launch=self._launch_tools(settings),
             youtube=self._youtube_tools(settings),
             media=self._media_keys(settings),
+            skills=self._skill_tools(settings),
         )
         chat = create_chat(
             settings,
