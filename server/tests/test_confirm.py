@@ -147,7 +147,9 @@ def test_anything_else_is_not_yes(text):
 
 def test_a_yes_phrase_alone_is_yes_but_fillers_alone_are_not():
     assert is_yes("open it please")
-    assert not is_yes("please")
+    assert is_yes("Please.")  # a user check: "Please." to "Shall I open…?" was refused
+    assert is_yes("please carl")
+    assert not is_yes("please don't")
     assert not is_yes("it")
     assert not is_yes("thank you")
 

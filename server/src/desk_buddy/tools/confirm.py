@@ -43,7 +43,9 @@ log = logging.getLogger(__name__)
 
 EXPIRY_S = 60.0
 MAX_YES_WORDS = 6
-YES_WORDS = frozenset({"yes", "yeah", "yep", "yup", "sure", "ok", "okay"})
+# "please" counts on its own: answering "Shall I open…?" with "Please." was refused in a
+# user check (2026-11-26), and it is no riskier than "okay".
+YES_WORDS = frozenset({"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please"})
 YES_PHRASES = (("go", "ahead"), ("do", "it"), ("open", "it"), ("please", "do"))
 # Words a yes may also hold. Every word of a yes must be a yes word or one of these, so
 # "yeah, nah", "okay, never mind" and "sure, hang on" are not a yes.

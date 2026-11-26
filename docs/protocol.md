@@ -76,7 +76,7 @@ A `wake` while CARL isn't idle is ignored, and the robot drops its pre-roll if `
 
 ### Follow-up
 
-After a reply to a question that started with the wake word (or with a follow-up), the server sends `state listening` again about 0.5 s after the reply's audio ends, and the robot streams as usual: no new message is needed. If nobody speaks within 5 s (`FOLLOW_UP_SECONDS`), it goes back to `idle`; if speech starts, it is a new question, which may last up to 15 s. There are at most 3 follow-ups in a row; then only the wake word or the key starts a question. A reply that was cut off, failed, or refused gets no follow-up.
+After a reply to a question that started with the wake word (or with a follow-up), the server sends `state listening` again as soon as the reply's audio ends (each sentence already ends with 0.25 s of silence), and the robot streams as usual: no new message is needed. If nobody speaks within 5 s (`FOLLOW_UP_SECONDS`), it goes back to `idle`; if speech starts, it is a new question, which may last up to 15 s. There are at most 3 follow-ups in a row; then only the wake word or the key starts a question. A reply that was cut off, failed, or refused gets no follow-up.
 
 **Privacy:** audio leaves the robot only after the phrase is heard, while the key is held, or during a follow-up window after a hands-free reply (5 s of listening, up to 15 s if speech starts, at most 3 times in a row).
 

@@ -38,9 +38,11 @@ WAKE_END_SILENCE = 0.8  # a hands-free question ends after this much silence
 WAKE_NO_SPEECH = 4.0  # no speech this long after a wake: a false wake
 WAKE_MAX_SECONDS = 15.0  # a hands-free question is cut off here
 # The follow-up starts this long after the reply's last play() returns. The robot's
-# player returns about 0.2 s before its audio ends (it sends ahead), so this is about
-# 0.5 s after the robot falls silent.
-FOLLOW_UP_DELAY = 0.7
+# player returns about 0.2 s before its audio ends (it sends ahead), and every sentence
+# now ends with tts.SENTENCE_PAUSE_S (0.25 s) of silence, so the speaker is quiet by
+# then. Was 0.7: with the pause that opened the mic ~1 s after CARL stopped talking, and
+# a quick "yes" to "Shall I open…?" was lost (a user check, 2026-11-26).
+FOLLOW_UP_DELAY = 0.15
 # A wake recording starts with ~0.3 s from before the detection (the end of "CARL"):
 # speech there doesn't start a question. Follow-ups have no phrase.
 WAKE_IGNORE_FIRST = 0.3
