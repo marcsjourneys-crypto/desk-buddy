@@ -29,6 +29,9 @@ SVSF_IS_NOT_XML = 16  # SpeechVoiceSpeakFlags: never parse model text as SAPI XM
 CLOSE_TIMEOUT_S = 5.0
 
 OUTPUT_RATE = 16_000  # what the loop, the PC speaker and the robot all expect
+# Silence after each sentence. Piper's library returns one chunk per sentence with no gap
+# (its command-line tool adds 0.2 s by default), so lists such as headlines ran together.
+SENTENCE_PAUSE_S = 0.25
 CUTOFF_RATIO = 0.4625  # low-pass at 92.5 % of the lower Nyquist: 7.4 kHz for 16 kHz out
 KERNEL_HALF_WIDTH = 48  # input samples each side of an output sample (96 taps)
 _RESAMPLE_BLOCK = 4096  # output samples per vectorised step (bounds memory)
@@ -133,8 +136,12 @@ class PiperSynthesizer:
         rates = {chunk.sample_rate for chunk in chunks}
         if len(rates) != 1:
             raise ValueError(f"Piper returned chunks with mixed sample rates: {sorted(rates)}")
-        audio = np.concatenate([chunk.audio_float_array for chunk in chunks])
-        return to_pcm16(resample(audio, rates.pop(), OUTPUT_RATE))
+        rate = rates.pop()
+        pause = np.zeros(round(SENTENCE_PAUSE_S * rate), dtype=np.float32)
+        parts = []
+        for chunk in chunks:  # one per sentence, each followed by a short pause
+            parts += [chunk.audio_float_array, pause]
+        return to_pcm16(resample(np.concatenate(parts), rate, OUTPUT_RATE))
 
     def close(self) -> None:
         """Nothing to release (the model is freed with the object); safe to call twice."""

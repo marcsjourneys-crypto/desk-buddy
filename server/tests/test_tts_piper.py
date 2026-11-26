@@ -11,6 +11,7 @@ import pytest
 
 from desk_buddy.tts import (
     OUTPUT_RATE,
+    SENTENCE_PAUSE_S,
     PiperSynthesizer,
     VoiceError,
     find_voice,
@@ -112,9 +113,25 @@ def test_piper_returns_16_khz_int16_of_the_right_length():
     pcm = synth.synthesize("Hello there.")
     assert loaded == ["v.onnx"]
     assert voice.texts == ["Hello there."]
-    assert len(pcm) == 2 * (len(tone(1000, PIPER_RATE, 0.5)) * OUTPUT_RATE // PIPER_RATE)
+    pauses = 2 * round(SENTENCE_PAUSE_S * PIPER_RATE)  # one after each of the two chunks
+    expected = (len(tone(1000, PIPER_RATE, 0.5)) + pauses) * OUTPUT_RATE // PIPER_RATE
+    assert len(pcm) == 2 * expected
     samples = np.frombuffer(pcm, dtype="<i2")
     assert 0.4 * 32767 < np.max(np.abs(samples)) <= 0.51 * 32767
+
+
+def test_each_sentence_is_followed_by_a_pause():
+    # Piper yields one chunk per sentence: without a gap, headlines read in a list ran into
+    # each other (a user check). The fake's chunks are tone; the gaps must be near-silent.
+    synth, _, _ = make_synth()
+    samples = np.frombuffer(synth.synthesize("One. Two."), dtype="<i2").astype(float)
+    first = 5000 * OUTPUT_RATE // PIPER_RATE  # where the first chunk ends at 16 kHz
+    gap = round(SENTENCE_PAUSE_S * OUTPUT_RATE)
+    margin = 20  # the resampler's filter smears a few samples across each edge
+    between = samples[first + margin : first + gap - margin]
+    tail = samples[-gap + margin :]
+    assert np.max(np.abs(between)) < 50 and np.max(np.abs(tail)) < 50
+    assert np.max(np.abs(samples[first + gap + margin : first + gap + 500])) > 10_000
 
 
 @pytest.mark.parametrize(("speed", "length_scale"), [(1.0, 1.0), (1.25, 0.8), (0.5, 2.0)])
