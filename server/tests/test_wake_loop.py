@@ -859,3 +859,73 @@ def test_turning_the_wake_word_off_in_the_gap_skips_the_follow_up():
 
     assert states(asyncio.run(run())) == ["idle"]
     assert rig.of("follow_up") == []
+
+
+# --- Stop and Forget from the dashboard ---
+
+
+def test_stop_ends_a_wake_recording_unheard(caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(silence(0.5))
+            link = rig.switch.robot
+            rig.events.put_nowait("stop")
+            frames = await until(robot, IDLE)
+            await robot.send_audio(QUESTION)  # too late: nobody is listening
+            await asyncio.sleep(0.2)
+            return frames, link
+
+    frames, link = asyncio.run(run())
+    assert states(frames) == ["idle"]
+    assert rig.transcriber.heard == [] and rig.of("false_wake") == []
+    assert link.mic.on_frame is None
+    assert "Hands-free listening stopped: stopped from the dashboard" in caplog.messages
+    assert [e["action"] for e in rig.of("control")] == ["stop"]
+
+
+def test_stop_ends_a_follow_up_window(caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, LISTENING)  # the follow-up
+            rig.events.put_nowait("stop")
+            return await until(robot, IDLE, timeout=2)  # well before the 5 s window ends
+
+    assert states(asyncio.run(run())) == ["idle"]
+    assert "Hands-free listening stopped: stopped from the dashboard" in caplog.messages
+    assert len(rig.transcriber.heard) == 1
+    assert [(e["active"], e.get("heard")) for e in rig.of("follow_up")] == [
+        (True, None),
+        (False, False),
+    ]
+
+
+def test_stop_during_a_robot_key_recording_then_the_release_is_harmless():
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.press()
+            await until(robot, LISTENING)
+            await robot.send_audio(silence(0.5))
+            rig.events.put_nowait("stop")
+            first = await until(robot, IDLE)
+            await robot.release()  # let go after the stop: nothing happens
+            await asyncio.sleep(0.2)
+            assert rig.orch.state is State.IDLE and rig.transcriber.heard == []
+            await robot.press()  # the next press is a normal question, from scratch
+            await until(robot, LISTENING)
+            await robot.send_audio(silence(0.5))
+            await robot.release()
+            return first, await until(robot, IDLE)
+
+    first, second = asyncio.run(run())
+    assert states(first) == ["idle"]
+    assert states(second) == ["thinking", "speaking", "idle"]
+    assert rig.transcriber.heard == [0.5]

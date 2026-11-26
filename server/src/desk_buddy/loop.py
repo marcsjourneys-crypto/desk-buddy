@@ -202,8 +202,8 @@ class Orchestrator:
     # --- events ---
 
     async def run(self, events: asyncio.Queue[str]) -> None:
-        """Handle events from the queue forever: "down", "up", "reset", "greet" and
-        "wake <score>", plus the loop's own "endpoint <generation> <result>"."""
+        """Handle events from the queue forever: "down", "up", "reset", "greet", "stop",
+        "forget" and "wake <score>", plus the loop's own "endpoint <generation> <result>"."""
         self._events = events
         while True:
             event = await events.get()
@@ -217,7 +217,9 @@ class Orchestrator:
         detached) interrupts any turn, stops the mic if it was listening, and goes idle;
         "greet" (startup, or a robot connected) says GREETING unless it was said in the
         last GREET_GAP seconds; "wake <score>" (the robot heard the wake word) starts a
-        hands-free question when idle. The key always wins over hands-free listening."""
+        hands-free question when idle; "stop" (the dashboard) ends whatever is going on
+        and goes idle, and "forget" does the same, then forgets like the spoken "forget
+        that" and says FORGET_LINE. The key always wins over hands-free listening."""
         if event == "down":
             # The robot's mic already dropped the tap when the key began its recording
             # (RobotMic.begin), so no frame after the press reaches the detector. One
@@ -248,6 +250,42 @@ class Orchestrator:
                 self._set_state(State.IDLE)
         elif event == "greet":
             self._greet()
+        elif event in ("stop", "forget"):
+            await self._stop()
+            if event == "forget":
+                self._forget_everything()
+                self.say(self._line("forget"))
+            self._publish("control", action=event)
+
+    async def _stop(self) -> None:
+        """Stop from the dashboard: end any hands-free listening, interrupt a turn (a
+        reply, PONDERING, the yes question, a canned line), drop a recording in progress
+        without transcribing it, and go idle. A pending yes is left to expire as usual.
+        A later "up" finds CARL idle and does nothing."""
+        log.info("Stopped from the dashboard")
+        self._follow_ups = 0
+        self._stop_hands_free(why="stopped from the dashboard")
+        await self._interrupt()
+        try:
+            if self.state is State.LISTENING:
+                self.mic.stop()  # the clip is dropped
+        finally:
+            self._set_state(State.IDLE)
+
+    def _forget_everything(self) -> None:
+        """A fresh start (the spoken forget, or the dashboard's): expire a pending yes,
+        clear the search results, the conversation and the smart model's stay."""
+        if self._confirmations is not None:
+            self._confirmations.expire(
+                "Forgotten (a fresh start).",
+                "was dropped when the user asked for a fresh start",
+            )
+        if self._search_results is not None:
+            self._search_results.clear()
+        self.conversation.forget()
+        if self._smart is not None:
+            self._smart.forget()
+        log.info("Memory cleared")
 
     def _end_question(self, kind: str | None) -> None:
         """The recording is over (key release, or end of speech): start the turn."""
@@ -606,17 +644,7 @@ class Orchestrator:
             if self._search_results is not None:
                 self._search_results.new_question(question)
             if is_forget_command(text):
-                if self._confirmations is not None:
-                    self._confirmations.expire(
-                        "Forgotten (a fresh start).",
-                        "was dropped when the user asked for a fresh start",
-                    )
-                if self._search_results is not None:
-                    self._search_results.clear()
-                self.conversation.forget()
-                if self._smart is not None:
-                    self._smart.forget()
-                log.info("Memory cleared")
+                self._forget_everything()
                 await self._say(self._line("forget"), token)
                 replied = True
                 return

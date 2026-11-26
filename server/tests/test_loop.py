@@ -1934,3 +1934,176 @@ def test_a_smart_turn_that_ends_at_the_yes_question_keeps_the_stay():
 
     asyncio.run(scenario())
     assert chat.routes == [ASKED, FOLLOW_ON]
+
+
+# --- Stop and Forget from the dashboard ---
+
+
+def test_stop_when_idle_does_nothing_but_log_and_publish(caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.loop")
+    bus = RecordingBus()
+    orch, parts, states = make(bus=bus)
+    asyncio.run(orch.handle("stop"))
+    assert parts["mic"].stops == 0 and parts["speaker"].stops == 0
+    assert states == [] and orch.state is State.IDLE
+    assert "Stopped from the dashboard" in caplog.messages
+    assert bus.of("control") == [{"type": "control", "action": "stop"}]
+
+
+def test_stop_while_listening_on_the_key_drops_the_clip_unheard():
+    orch, parts, states = make()
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("stop")
+        await orch.handle("up")  # the key (or the page) lets go later: harmless
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["mic"].stops == 1
+    assert parts["transcriber"].calls == 0 and parts["chat"].prompts == []
+    assert states == [State.LISTENING, State.IDLE]
+
+
+def test_stop_while_thinking_interrupts_and_goes_idle():
+    async def scenario():
+        chat = SlowChat()
+        orch, parts, states = make(chat=chat)
+        await orch.handle("down")
+        await orch.handle("up")
+        await asyncio.wait_for(chat.called.wait(), 2)
+        await orch.handle("stop")
+        return orch, parts, states
+
+    orch, parts, states = asyncio.run(scenario())
+    assert orch.state is State.IDLE
+    assert states == [State.LISTENING, State.THINKING, State.IDLE]
+    assert len(parts["conversation"]) == 0
+
+
+def test_stop_while_speaking_interrupts_and_goes_idle():
+    speaker = FakeSpeaker(block=True)
+    bus = RecordingBus()
+    orch, _, states = make(speaker=speaker, bus=bus)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("stop")
+
+    asyncio.run(scenario())
+    assert speaker.stops == 1
+    assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE]
+    assert len(bus.of("interrupted")) == 1
+    assert len(orch.conversation) == 1  # what was heard is remembered, as interrupted
+
+
+def test_stop_interrupts_a_greeting():
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("greet")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("stop")
+
+    asyncio.run(scenario())
+    assert speaker.stops == 1 and orch.state is State.IDLE
+
+
+def test_stop_during_the_yes_question_leaves_the_pending_action():
+    rig = YesRig()
+    speaker = AskBlockingSpeaker()
+    orch, _, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)  # the question is playing
+        await orch.handle("stop")
+
+    asyncio.run(scenario())
+    assert orch.state is State.IDLE
+    assert rig.confirmations.pending is not None and rig.confirmations.pending.armed
+    assert rig.outcomes() == ["waiting"]
+
+
+def test_forget_during_the_yes_question_expires_it_and_says_the_line():
+    rig = YesRig()
+    speaker = AskBlockingSpeaker()
+    orch, parts, _ = rig.orchestrator(chat=ProposingChat(rig), speaker=speaker)
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("up")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("forget")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert rig.confirmations.pending is None
+    assert rig.outcomes() == ["waiting", "expired"]
+    assert rig.opener.calls == []
+    assert PAGE not in rig.results
+    assert parts["speaker"].played[-1] == FORGET_LINE.text
+    assert orch.state is State.IDLE
+
+
+def test_forget_clears_memory_the_page_list_and_the_smart_stay_and_says_the_line(caplog):
+    caplog.set_level(logging.INFO, logger="desk_buddy.loop")
+    rig = YesRig()
+    chat = SmartChat()
+    transcriber = FakeTranscriber("Think hard about it")
+    orch, parts, _ = rig.orchestrator(
+        chat=chat, transcriber=transcriber, smart_router=SmartRouter(clock=FakeClock(1000.0))
+    )
+
+    async def scenario():
+        await talk(orch)
+        assert len(orch.conversation) == 1 and PAGE in rig.results
+        await orch.handle("forget")
+        await orch.wait_idle()
+        transcriber.text = "and then?"
+        await talk(orch)
+
+    asyncio.run(scenario())
+    assert chat.routes == [ASKED, None]  # the stay ended
+    assert PAGE not in rig.results
+    assert len(orch.conversation) == 1  # only the question after the forget
+    assert chat.histories[-1] == []
+    assert FORGET_LINE.text in parts["speaker"].played
+    assert "Memory cleared" in caplog.messages
+    assert rig.bus.of("control") == [{"type": "control", "action": "forget"}]
+    assert {"type": "line", "text": FORGET_LINE.text, "emotion": FORGET_LINE.emotion} in (
+        rig.bus.of("line")
+    )
+
+
+def test_forget_while_listening_drops_the_clip_and_says_the_line():
+    orch, parts, _ = make()
+
+    async def scenario():
+        await orch.handle("down")
+        await orch.handle("forget")
+        await orch.wait_idle()
+
+    asyncio.run(scenario())
+    assert parts["transcriber"].calls == 0
+    assert parts["speaker"].played == [FORGET_LINE.text]
+    assert orch.state is State.IDLE
+
+
+def test_a_key_press_interrupts_the_forget_line():
+    speaker = FakeSpeaker(block=True)
+    orch, _, _ = make(speaker=speaker)
+
+    async def scenario():
+        await orch.handle("forget")
+        assert await asyncio.to_thread(speaker.started.wait, 2)
+        await orch.handle("down")
+
+    asyncio.run(scenario())
+    assert speaker.played == [FORGET_LINE.text]
+    assert speaker.stops == 1
+    assert orch.state is State.LISTENING
