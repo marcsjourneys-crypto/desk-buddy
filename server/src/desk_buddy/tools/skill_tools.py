@@ -117,7 +117,10 @@ def input_schema(manifest: Manifest) -> dict[str, Any]:
         }
     if manifest.text is not None:
         spec = manifest.text
-        about = f"{spec.description} At most {text_limit(manifest)} characters."
+        about = (
+            f'{spec.description} The user\'s own words as they said them (keep "I"; '
+            f"add nothing). At most {text_limit(manifest)} characters."
+        )
         if not spec.required:
             about += ' Use "" if the user gave none.'
         properties[TEXT_KEY] = {"type": "string", "description": about}
