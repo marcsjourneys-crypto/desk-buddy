@@ -6,6 +6,7 @@ spoken name."""
 import asyncio
 import contextlib
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -244,8 +245,11 @@ def test_scan_approve_change_and_disable(tmp_path):
             assert skills["hello-time"]["approved"] is True
             status, view, _ = await d.post("hello-time")
             assert status == 200 and by_slug(view)["hello-time"]["status"] == "approved"
-            status, body, _ = await d.post("hello-time")  # on already: nothing to do
-            assert status == 400 and body["error"] == "It's already on."
+            # On already: no setup, but CARL is told to look again.
+            version = d.skills.version
+            status, view, _ = await d.post("hello-time")
+            assert status == 200 and by_slug(view)["hello-time"]["status"] == "approved"
+            assert d.skills.version == version + 1
 
             # Turn it off.
             status, view, _ = await d.post("hello-time", "disable")
@@ -378,15 +382,24 @@ def test_the_21st_approval_is_refused(tmp_path):
     async def run():
         async with running(tmp_path) as d:
             for i in range(MAX_APPROVED):
+                make_skill(d.root, f"other-{i}", manifest(f"Other {i}", (f"other {i}",)))
                 d.skills.approve(f"other-{i}", "a" * 64)
             make_skill(d.root, "hello-time")
             status, body, _ = await d.post("hello-time")
             assert status == 400 and f"At most {MAX_APPROVED}" in body["error"]
             assert "hello-time" not in d.skills.approvals()
             # Re-approving one that's on but changed is fine.
-            make_skill(d.root, "other-0", manifest("Other", ("other",)))
             status, body, _ = await d.post("other-0")
             assert status == 200, body
+            # A folder that's gone doesn't count: its approval makes room.
+            for i in range(3):
+                for f in (d.root / f"other-{i}").iterdir():
+                    f.unlink()
+                (d.root / f"other-{i}").rmdir()
+            status, body, _ = await d.post("hello-time")
+            assert status == 200, body
+            approvals = d.skills.approvals()
+            assert "hello-time" in approvals and len(approvals) == MAX_APPROVED
 
     asyncio.run(run())
 
@@ -418,6 +431,23 @@ def test_one_approval_at_a_time_and_no_disable_meanwhile(tmp_path):
             assert set(d.skills.approvals()) == {"send-note", "other"}
             status, body, _ = await d.post("other", "disable")  # free again
             assert status == 200, body
+
+    asyncio.run(run())
+
+
+def test_a_failed_reapproval_leaves_the_skill_off(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            make_skill(d.root, "send-note", project=True)
+            assert (await d.post("send-note"))[0] == 200
+            (d.root / "send-note" / "main.py").write_text("print(2)\n", encoding="utf-8")
+            assert by_slug((await d.get())[1])["send-note"]["status"] == "changed"
+            d.sync.ok = False  # the sync rewrote its environment, then failed
+            status, body, _ = await d.post("send-note")
+            assert status == 400
+            assert d.skills.approvals() == {}
+            skill = by_slug((await d.get())[1])["send-note"]
+            assert skill["status"] == "available" and skill["approved"] is False
 
     asyncio.run(run())
 
@@ -618,5 +648,29 @@ def test_apps_and_bookmarks_cant_take_an_approved_skills_name(tmp_path):
             assert any("already used by an app" in e["reason"] for e in skill["errors"])
             status, _, _ = await d.post("order-check")
             assert status == 400
+
+    asyncio.run(run())
+
+
+def test_the_clash_hook_doesnt_log_the_same_problems_again(tmp_path, caplog):
+    async def run():
+        async with running(tmp_path) as d:
+            make_skill(d.root, "hello-time")
+            make_skill(d.root, "browser", manifest("Browser", ("browser",)))
+            assert (await d.post("hello-time"))[0] == 200
+            assert d.apps.update_bookmarks([{"name": "browser", "url": "https://b.example"}]) == {}
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                await d.get()
+                status, _, body = await call(
+                    "PUT",
+                    d.base + "/api/bookmarks",
+                    body={"bookmarks": [{"name": "browser", "url": "https://b.example"}]},
+                    headers=d.headers(),
+                )
+                assert status == 200, body
+                await d.get()
+            clash = [r for r in caplog.records if "already used by an app" in r.getMessage()]
+            assert len(clash) == 1
 
     asyncio.run(run())

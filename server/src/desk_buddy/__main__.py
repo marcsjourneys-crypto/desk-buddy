@@ -485,7 +485,12 @@ class Brain:
         # is redone only when the approvals, SKILLS_DIR or the app names changed, not at
         # every rebuild. Files edited since are caught by the check before every run.
         key = (self.skills.version, settings.skills_dir, apps_version)
-        if self._skills_scan is None or self._skills_scan[0] != key:
+        # An approved skill missing from the cached list (it was changed, and maybe its
+        # files were restored since) is looked for again: only ever after a change.
+        missing = self._skills_scan is not None and bool(
+            set(self.skills.approvals()) - {s.slug for s in self._skills_scan[1]}
+        )
+        if self._skills_scan is None or self._skills_scan[0] != key or missing:
             scan = self.skills.scan(settings.skills_dir, taken_names(apps, sites))
             self._skills_scan = (key, scan.usable[:MAX_APPROVED])
         usable = self._skills_scan[1]

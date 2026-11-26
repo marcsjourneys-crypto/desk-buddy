@@ -576,11 +576,36 @@ def test_the_version_goes_up_with_each_change(tmp_path):
     store = SkillsStore(approvals_file(tmp_path))
     store.approve("hello", "a" * 64)
     assert store.version == 1
-    store.approve("hello", "a" * 64)  # no change
-    assert store.version == 1
+    store.approve("hello", "a" * 64)  # the same again: still a rescan for CARL
+    assert store.version == 2
     store.approve("hello", "b" * 64)
     store.disable("hello")
-    assert store.version == 3
+    assert store.version == 4
+    store.disable("hello")  # nothing to turn off
+    assert store.version == 4
+    store.touch()
+    assert store.version == 5
+    assert store.approvals() == {}
+
+
+def test_only_present_skills_count_toward_the_limit(tmp_path):
+    path = approvals_file(tmp_path)
+    store = SkillsStore(path)
+    for i in range(MAX_APPROVED):
+        store.approve(f"gone-{i}", "a" * 64)
+    with pytest.raises(ValueError, match=f"At most {MAX_APPROVED}"):
+        store.approve("hello", "b" * 64)  # no idea what's present: all count
+    present = {"hello", "gone-5"}
+    store.approve("hello", "b" * 64, present)
+    approvals = store.approvals()
+    assert len(approvals) == MAX_APPROVED  # the file never passes the limit
+    assert "gone-0" not in approvals  # the oldest orphan made room
+    assert approvals["hello"] == "b" * 64 and "gone-5" in approvals
+    assert SkillsStore(path).approvals() == approvals
+    # Present ones do count.
+    full = {f"gone-{i}" for i in range(1, MAX_APPROVED)} | {"hello"}
+    with pytest.raises(ValueError, match=f"At most {MAX_APPROVED}"):
+        store.approve("new", "c" * 64, full | {"new"})
 
 
 @pytest.mark.parametrize(

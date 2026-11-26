@@ -243,7 +243,7 @@ def create_dashboard(
         """Errors for apps or bookmarks that take an approved skill's spoken name."""
         if skills is None:
             return {}
-        owners = skills_setup.approved_names(skills, live.latest.skills_dir)
+        owners = skills_setup.approved_names(skills, live.latest.skills_dir, other_names())
         return skills_setup.name_clashes(items, names_of, prefix, owners)
 
     if apps is not None:

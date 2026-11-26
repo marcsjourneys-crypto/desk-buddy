@@ -132,5 +132,5 @@ sys.exit(0)
 - **What the fingerprint can't do:** it catches edits and updates, but not a live attacker on this PC who swaps files between the check and the run. A skill that executes data files or downloads code is beyond it.
 - **Process trees:** at the timeout the whole process tree is killed, but a process that detached itself from the tree may survive.
 - **Output** is read into memory until the script ends or its timeout, so don't print megabytes.
-- **Restoring files:** after you put a changed skill's files back exactly, it may stay off until you tick it again.
+- **Restoring files:** if you put a changed skill's files back exactly, it shows as on again, and CARL offers it again the next time it rebuilds its tools (after any change on the dashboard). To bring it back at once, untick it and tick it again (or approve it again through the API: a skill that's already on needs no setup, and CARL looks at the skills again at the next question).
 - **Approving trusts the files as they are when you tick.** Edits made while the setup runs are checked again afterwards, but you aren't shown them: look at the folder before ticking.

@@ -144,17 +144,26 @@ def _approve(
     skill = scan.get(slug)
     if skill is None:
         return Outcome(404, {"error": "There's no such skill in SKILLS_DIR."})
+    present = frozenset(s.slug for s in scan.skills)
     if skill.status == INVALID:
         return _invalid(skill)
-    if skill.status == APPROVED:
-        return Outcome(400, {"error": "It's already on."})
-    approvals = store.approvals()
-    if slug not in approvals and len(approvals) >= MAX_APPROVED:
+    if skill.status == APPROVED and skill.fingerprint is not None:
+        # Its files match the approval, so there's nothing to set up; saving it again
+        # bumps the version so CARL rescans (say, after its files were restored).
+        store.approve(slug, skill.fingerprint, present)
+        return Outcome(200, skills_view(store, skills_dir, other_names(), uv_found=True))
+    # Only approvals of skills in this SKILLS_DIR count, not orphans.
+    counted = [k for k in store.approvals() if k in present]
+    if slug not in counted and len(counted) >= MAX_APPROVED:
         return Outcome(400, {"error": f"At most {MAX_APPROVED} skills can be on. Turn one off."})
     if has_project(skill.folder):
         reason = outside_project(skill.folder)
         if reason is not None:
             return Outcome(400, {"error": reason})
+        if skill.approved:
+            # The sync rewrites its environment before the checks below can fail: off
+            # until it's approved again, so a failed re-approval leaves nothing on.
+            store.disable(slug)
         log.info("Skills: setting up %s (uv sync)", slug)
         result = runner.sync(skill.folder, slug, sync=sync)
         if result.busy:
@@ -174,7 +183,7 @@ def _approve(
     if now.status == INVALID or now.fingerprint is None:
         return _invalid(now)
     try:
-        store.approve(slug, now.fingerprint)
+        store.approve(slug, now.fingerprint, present)
     except ValueError as exc:
         return Outcome(400, {"error": str(exc)})
     return Outcome(200, skills_view(store, skills_dir, other_names(), uv_found=True))
@@ -208,14 +217,17 @@ def _invalid(skill: Skill) -> Outcome:
     return Outcome(400, {"error": f"The skill isn't valid: {reasons or 'unknown problem'}"})
 
 
-def approved_names(store: SkillsStore, skills_dir: str) -> dict[str, str]:
+def approved_names(
+    store: SkillsStore, skills_dir: str, other_names: Iterable[str]
+) -> dict[str, str]:
     """The spoken names approved skills hold (approved, or changed and waiting to be
-    approved again): {name: "<skill name> (<slug>)"}. Apps and bookmarks can't take them."""
+    approved again): {name: "<skill name> (<slug>)"}. Apps and bookmarks can't take them.
+    It scans with the app and bookmark names of now, like every other scan, so the
+    scan's problems (and so its log lines) don't flip back and forth."""
     if not skills_dir or not store.approvals():
         return {}
     owners: dict[str, str] = {}
-    # No other names: an app's name mustn't hide which skill holds it.
-    for s in store.scan(skills_dir).skills:
+    for s in store.scan(skills_dir, other_names).skills:
         if s.status in (APPROVED, CHANGED) and s.manifest is not None:
             for name in s.manifest.spoken_names:
                 owners.setdefault(name, f"{s.manifest.name} ({s.slug})")

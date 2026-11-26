@@ -585,19 +585,34 @@ class SkillsStore:
         with self._lock:
             return dict(self._approved)
 
-    def approve(self, slug: str, fp: str) -> None:
+    def approve(self, slug: str, fp: str, present: Iterable[str] | None = None) -> None:
         """Save `slug` as approved with this fingerprint (computed after any uv sync).
-        Raises ValueError for a bad slug or fingerprint, or past MAX_APPROVED."""
+        With `present` (the slugs in SKILLS_DIR now), only approvals of present skills
+        count toward MAX_APPROVED: orphans (a folder that's gone, or another SKILLS_DIR's)
+        are dropped, oldest first, when the file would pass the limit. Saving the same
+        approval again still bumps `version`, so CARL rescans. Raises ValueError for a bad
+        slug or fingerprint, or past MAX_APPROVED."""
         check_slug(slug)
         if not isinstance(fp, str) or not FINGERPRINT.fullmatch(fp):
             raise ValueError("That isn't a fingerprint.")
+        here = None if present is None else frozenset(present)
         with self._lock:
-            if slug not in self._approved and len(self._approved) >= MAX_APPROVED:
-                raise ValueError(f"At most {MAX_APPROVED} skills can be on.")
             new = dict(self._approved)
+            if slug not in new:
+                counted = [k for k in new if here is None or k in here]
+                if len(counted) >= MAX_APPROVED:
+                    raise ValueError(f"At most {MAX_APPROVED} skills can be on.")
+                orphans = [k for k in new if here is not None and k not in here]
+                while len(new) >= MAX_APPROVED and orphans:
+                    del new[orphans.pop(0)]
             new[slug] = fp
-            self._save(new)
+            self._save(new, bump=True)
         log.info("Skills: %s approved", slug)
+
+    def touch(self) -> None:
+        """Bump `version` without a change, so CARL rescans the skills."""
+        with self._lock:
+            self.version += 1
 
     def disable(self, slug: str) -> bool:
         """Forget the approval of `slug`. False if it wasn't approved."""
@@ -690,11 +705,11 @@ class SkillsStore:
 
     # --- internals ---
 
-    def _save(self, new: dict[str, str]) -> None:
+    def _save(self, new: dict[str, str], *, bump: bool = False) -> None:
         """Called with the lock held."""
         data = [{"slug": slug, "fingerprint": fp} for slug, fp in new.items()]
         write_json_atomic(self.approvals_file, data)
-        if new != self._approved:
+        if bump or new != self._approved:
             self.version += 1
         self._approved, self.error = new, None
 

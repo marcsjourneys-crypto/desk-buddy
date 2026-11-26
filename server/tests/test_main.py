@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import threading
 import time
 
 import pytest
@@ -677,6 +679,56 @@ def test_an_approval_change_rebuilds_the_tools_at_the_next_question_only(monkeyp
     store.disable("hello-time")
     brain.before_question()
     assert len(built) == 3
+
+
+def test_restored_files_bring_a_skill_back_to_carl(monkeypatch, tmp_path):
+    from desk_buddy.skills_setup import approve
+    from desk_buddy.skills_store import SkillsStore
+    from desk_buddy.tools.skills import SkillRunner
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    root = tmp_path / "skills"
+    folder = root / "hello-time"
+    folder.mkdir(parents=True)
+    (folder / "skill.json").write_text(
+        json.dumps({"name": "Hello", "spoken_names": ["hello"], "description": "Hi."}),
+        encoding="utf-8",
+    )
+    (folder / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    registries = []
+    monkeypatch.setattr(
+        entry, "create_chat", lambda s, tools=None, **_: registries.append(tools) or object()
+    )
+    store = SkillsStore(tmp_path / "skills.json")
+    runner = SkillRunner(r"C:\Tools\uv.exe", tmp_path / "appdata")
+    settings = Settings(anthropic_api_key="k", computer_control=True, skills_dir=str(root))
+    lock = threading.Lock()
+
+    def tick():
+        return approve(store, runner, str(root), "hello-time", frozenset, lock=lock)
+
+    assert tick().status == 200
+    brain = entry.Brain(settings, bus=entry.EventBus(), skills=store, skill_runner=runner)
+
+    def offered():
+        return "skill_hello_time" in [s["name"] for s in registries[-1].schemas()]
+
+    assert offered()
+    (folder / "main.py").write_text("print('changed')\n", encoding="utf-8")
+    store.touch()  # any rescan while it's changed (say, another skill ticked)...
+    brain.before_question()
+    assert not offered()  # ...caches a list without it
+    (folder / "main.py").write_text("print('hi')\n", encoding="utf-8")  # restored
+    # The next rebuild looks for the approved skill missing from the cached list.
+    brain._rebuild()
+    assert offered()
+    # And ticking it again (it's already on) is a rescan, not a refusal.
+    version = store.version
+    assert tick().status == 200
+    assert store.version == version + 1
+    built = len(registries)
+    brain.before_question()
+    assert len(registries) == built + 1 and offered()
 
 
 def test_the_brain_and_the_dashboard_share_one_skills_store_and_runner(
