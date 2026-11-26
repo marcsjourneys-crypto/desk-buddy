@@ -517,3 +517,36 @@ def test_server_host_and_port_are_read():
 def test_server_port_must_be_valid(port):
     with pytest.raises(ConfigError, match="SERVER_PORT"):
         load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SERVER_PORT": port})
+
+
+def test_smart_model_defaults_to_sonnet():
+    s = load_settings(env_path=None, environ={"ANTHROPIC_API_KEY": "k"})
+    assert s.smart_model == "claude-sonnet-5-5"
+
+
+def test_a_blank_smart_model_means_the_default(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_API_KEY=k\nSMART_MODEL=\n")
+    assert load_settings(env_path=env, environ={}).smart_model == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize("raw", ["off", "OFF", " off "])
+def test_smart_model_off_turns_it_off(raw):
+    s = load_settings(
+        env_path=None, environ={"ANTHROPIC_API_KEY": "k"}, dashboard={"SMART_MODEL": raw}
+    )
+    assert s.smart_model == ""
+
+
+def test_a_valid_smart_model_id_is_kept():
+    s = load_settings(
+        env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SMART_MODEL": "claude-opus-5-5"}
+    )
+    assert s.smart_model == "claude-opus-5-5"
+
+
+def test_a_bad_smart_model_is_a_clear_error():
+    with pytest.raises(ConfigError, match="SMART_MODEL"):
+        load_settings(
+            env_path=None, environ={"ANTHROPIC_API_KEY": "k", "SMART_MODEL": "bad model!"}
+        )

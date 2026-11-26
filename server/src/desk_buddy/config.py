@@ -22,6 +22,7 @@ ENV_KEYS = (
     "LLM_PROVIDER",
     "LLM_MODEL",
     "LLM_EFFORT",
+    "SMART_MODEL",
     "STT_MODEL",
     "STT_DEVICE",
     "STT_COMPUTE_TYPE",
@@ -66,6 +67,7 @@ DASHBOARD_KEYS = frozenset(
         "OBSIDIAN_IDEAS_FOLDER",
         "LLM_MODEL",
         "LLM_EFFORT",
+        "SMART_MODEL",
         "STT_MODEL",
         "STT_DEVICE",
         "STT_COMPUTE_TYPE",
@@ -129,6 +131,7 @@ class Settings:
     llm_provider: str = "anthropic"
     llm_model: str = "claude-haiku-5-5"
     llm_effort: str = "low"
+    smart_model: str = "claude-sonnet-5-5"  # for hard questions; "" = off (Haiku only)
     stt_model: str = "base.en"
     stt_device: str = "cpu"
     stt_compute_type: str = "int8"
@@ -299,6 +302,7 @@ def _load(
         llm_provider=provider,
         llm_model=_matching(get, "LLM_MODEL", Settings.llm_model, _LLM_MODEL),
         llm_effort=effort,
+        smart_model=_smart_model(get),
         stt_model=_stt_model(get),
         stt_device=device,
         stt_compute_type=_choice(
@@ -460,6 +464,13 @@ def _matching(
     if not pattern.fullmatch(raw):
         raise ConfigError(f"{key} doesn't look like a model name: {raw!r}")
     return raw
+
+
+def _smart_model(get: Callable[[str, str], str]) -> str:
+    """The model for hard questions: "off" gives "" (Haiku only); blank, the default."""
+    if get("SMART_MODEL", Settings.smart_model).lower() == "off":
+        return ""
+    return _matching(get, "SMART_MODEL", Settings.smart_model, _LLM_MODEL)
 
 
 def _stt_model(get: Callable[[str, str], str]) -> str:

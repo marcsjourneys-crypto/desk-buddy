@@ -209,3 +209,20 @@ def test_a_failing_hook_never_raises_or_stops_the_others(caplog):
     live.apply()
     assert seen == [5]
     assert "Live setting hook failed" in caplog.text
+
+
+def test_the_smart_model_is_in_the_thinking_group_right_after_brain(store):
+    item = entry(store, "SMART_MODEL")
+    assert (item["group"], item["kind"], item["applies"]) == ("Thinking", "text", "next question")
+    assert item["value"] == "claude-sonnet-5-5"
+    groups = list(dict.fromkeys(e["group"] for e in store.view()))
+    assert groups[groups.index("Brain") + 1] == "Thinking"
+
+
+def test_the_smart_model_can_be_turned_off_on_the_dashboard(store):
+    settings, errors = store.update({"SMART_MODEL": "off"})
+    assert errors == {}
+    assert settings.smart_model == ""
+    assert entry(store, "SMART_MODEL")["value"] == "off"  # not blank, which means the default
+    settings, errors = store.update({"SMART_MODEL": "bad model!"})
+    assert settings is None and "SMART_MODEL" in errors

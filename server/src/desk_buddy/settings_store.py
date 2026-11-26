@@ -75,6 +75,13 @@ EDITABLE: tuple[Editable, ...] = (
     Editable("OBSIDIAN_IDEAS_FOLDER", "Notes", NEXT_QUESTION, "text", "Ideas folder"),
     Editable("LLM_MODEL", "Brain", NEXT_QUESTION, "text", "Claude model"),
     Editable("LLM_EFFORT", "Brain", NEXT_QUESTION, "choice", "Thinking effort", EFFORT_LEVELS),
+    Editable(
+        "SMART_MODEL",
+        "Thinking",
+        NEXT_QUESTION,
+        "text",
+        "Model for hard questions (off = Haiku only)",
+    ),
     Editable("WEB_SEARCH", "Web", NEXT_QUESTION, "switch", "Web search"),
     Editable("WEB_SEARCH_MAX", "Web", NEXT_QUESTION, "int", "Searches per question (1-5)"),
     Editable("SKILLS_DIR", "Skills", NEXT_QUESTION, "path", "Skills folder (blank: off)"),
@@ -186,13 +193,16 @@ class SettingsStore:
                 source = "env"
             else:
                 source = "default"
+            value = getattr(settings, item.attr)
+            if item.key == "SMART_MODEL" and not value:
+                value = "off"  # shown as typed: a blank box would mean the default
             entry: dict[str, Any] = {
                 "key": item.key,
                 "label": item.label,
                 "group": item.group,
                 "kind": item.kind,
                 "choices": list(item.choices),
-                "value": getattr(settings, item.attr),
+                "value": value,
                 "source": source,
                 "applies": item.applies,
             }
