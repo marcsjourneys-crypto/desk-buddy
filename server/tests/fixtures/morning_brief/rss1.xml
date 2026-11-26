@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/">
+  <channel rdf:about="https://ai.example.net/">
+    <title>Sample AI (RSS 1.0, namespaced)</title>
+    <link>https://ai.example.net/</link>
+  </channel>
+  <item rdf:about="https://ai.example.net/n1">
+    <title>Models learn to say &#8220;I don&#8217;t know&#8221;</title>
+    <link>https://ai.example.net/n1</link>
+  </item>
+  <item rdf:about="https://ai.example.net/n2">
+    <title>Chips get cheaper &amp;amp; faster</title>
+    <link>https://ai.example.net/n2</link>
+  </item>
+  <item rdf:about="https://ai.example.net/n3">
+    <title>Why 42 is still the answer</title>
+    <link>https://ai.example.net/n3</link>
+  </item>
+</rdf:RDF>

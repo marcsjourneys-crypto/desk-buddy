@@ -1,0 +1,17 @@
+{
+  "name": "Morning brief",
+  "spoken_names": ["morning brief", "the news"],
+  "description": "Today's weather and the newest world, AI and robotics headlines, numbered. Use it when the user asks for the morning brief, the news, the headlines or today's weather; pick a section when they ask for only one. The user can then open a headline by its number.",
+  "inputs": {
+    "choices": {
+      "section": {
+        "options": ["all", "weather", "world", "ai", "robotics"],
+        "description": "all unless the user asks for only the weather or only one kind of news.",
+        "default": "all"
+      }
+    }
+  },
+  "needs_yes": false,
+  "pages": true,
+  "timeout_seconds": 30
+}

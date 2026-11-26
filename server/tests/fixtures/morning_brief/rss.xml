@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Sample World News</title>
+    <link>https://news.example.com/</link>
+    <atom:link href="https://news.example.com/feed.xml" rel="self" type="application/rss+xml"/>
+    <item>
+      <title><![CDATA[Calm seas  &amp; clear
+        skies forecast]]></title>
+      <link>https://news.example.com/world/a1</link>
+      <dc:creator>A. Writer</dc:creator>
+    </item>
+    <item>
+      <title>Leaders meet &amp;amp; agree on &lt;b&gt;fish&lt;/b&gt; quotas</title>
+      <link>https://news.example.com/world/a2</link>
+    </item>
+    <item>
+      <title>A story on this PC</title>
+      <link>http://localhost:8080/a3</link>
+    </item>
+    <item>
+      <title>Same address again</title>
+      <link>https://news.example.com/world/a1</link>
+    </item>
+    <item>
+      <title>Robot wins chess match</title>
+      <link>https://news.example.com/world/a4</link>
+    </item>
+    <item>
+      <title>Too many</title>
+      <link>https://news.example.com/world/a5</link>
+    </item>
+  </channel>
+</rss>

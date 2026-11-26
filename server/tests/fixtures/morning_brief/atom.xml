@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Sample Robotics</title>
+  <link rel="self" href="https://robots.example.org/atom.xml"/>
+  <entry>
+    <title type="html">Arms &amp;amp; legs: a new walker</title>
+    <link rel="self" href="https://robots.example.org/api/e1"/>
+    <link rel="alternate" type="text/html" href="https://robots.example.org/e1"/>
+    <updated>2026-11-26T08:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Gripper with user:pass link</title>
+    <link href="https://user:pass@robots.example.org/e2"/>
+  </entry>
+  <entry>
+    <title>Non-ASCII host</title>
+    <link href="https://rob&#246;ts.example.org/e3"/>
+  </entry>
+  <entry>
+    <title>Private address</title>
+    <link href="http://192.168.1.20/e4"/>
+  </entry>
+  <entry>
+    <title>   Tiny   drones learn to fly   </title>
+    <link href="https://robots.example.org/e5"/>
+  </entry>
+  <entry>
+    <title>Servo smoothness explained</title>
+    <link rel="enclosure" href="https://robots.example.org/e6.mp3"/>
+    <link href="https://robots.example.org/e6"/>
+  </entry>
+</feed>

@@ -1,0 +1,10 @@
+{
+  "place": {"name": "", "latitude": null, "longitude": null},
+  "units": "fahrenheit",
+  "feeds": {
+    "world": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "ai": "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "robotics": "https://spectrum.ieee.org/feeds/topic/robotics.rss"
+  },
+  "per_feed": 3
+}
