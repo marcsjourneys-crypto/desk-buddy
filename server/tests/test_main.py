@@ -1309,3 +1309,61 @@ def test_the_key_with_a_robot_attached_mid_press():
 
     asyncio.run(run())
     assert log == ["down", "end", "up"]
+
+
+# --- the dashboard's controls ---
+
+
+def test_the_dashboards_talk_goes_through_the_key_handler_with_a_robot():
+    log = []
+
+    async def run():
+        switch, events, on_key = key_setup(log)
+        switch.attach(KeyRobot(log))
+        control = entry.dashboard_control(on_key, events)
+        control("down")
+        control("up")
+        assert log == ["begin", "down"]  # the release delay applies, as for the key
+        await until(lambda: "up" in log)
+
+    asyncio.run(run())
+    assert log == ["begin", "down", "end", "up"]
+
+
+def test_the_dashboards_stop_and_forget_go_onto_the_queue():
+    log = []
+
+    async def run():
+        switch, events, on_key = key_setup(log)
+        switch.attach(KeyRobot(log))
+        control = entry.dashboard_control(on_key, events)
+        control("stop")
+        control("forget")
+        return drain(events)
+
+    assert asyncio.run(run()) == ["stop", "forget"]
+    assert log == ["stop", "forget"]  # never through the key handler: the mic is untouched
+
+
+def test_the_dashboards_control_refuses_anything_else():
+    async def run():
+        switch, events, on_key = key_setup([])
+        control = entry.dashboard_control(on_key, events)
+        with pytest.raises(ValueError):
+            control("reset")
+        return drain(events)
+
+    assert asyncio.run(run()) == []
+
+
+def test_main_gives_the_dashboard_its_control(monkeypatch, fakes, calls):
+    made = {}
+    real = entry.create_dashboard
+
+    def spy_dashboard(**kwargs):
+        made.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(entry, "create_dashboard", spy_dashboard)
+    entry.main()
+    assert callable(made["control"])

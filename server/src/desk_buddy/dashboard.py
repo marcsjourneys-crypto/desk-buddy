@@ -53,6 +53,9 @@ STATIC_FILES = {"app.js": "text/javascript; charset=utf-8", "style.css": "text/c
 TOKEN_PLACEHOLDER = "__CARL_TOKEN__"
 MAX_BODY = 64 * 1024
 CHANGES = ("PUT", "POST", "DELETE", "PATCH")
+# A Talk held on the page longer than this is let go by the server (a lost release).
+TALK_MAX_HOLD = 60.0
+TALK_ACTIONS = ("down", "up")
 
 
 def build_status(
@@ -100,10 +103,15 @@ def create_dashboard(
     skills: SkillsStore | None = None,
     skill_runner: SkillRunner | None = None,
     skill_sync: skills_setup.Sync = run_sync,
+    control: Callable[[str], None] | None = None,
+    talk_max_hold: float = TALK_MAX_HOLD,
 ) -> FastAPI:
     """The dashboard app. Without `apps`, there is no Apps API; without `skills`, no
     Skills API. `skill_runner` is None when uv wasn't found (skills can't be approved);
-    `skill_sync` runs `uv sync` (a fake in tests)."""
+    `skill_sync` runs `uv sync` (a fake in tests). `control` takes the Live tab's buttons
+    as events ("stop", "forget", and the talk button's "down" and "up"), on the event
+    loop; without it the controls answer 503. A talk held longer than `talk_max_hold`
+    seconds is released by the server."""
     app = FastAPI(title="CARL dashboard", docs_url=None, redoc_url=None, openapi_url=None)
     hosts = {f"{HOST}:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
@@ -372,6 +380,56 @@ def create_dashboard(
             except OSError as exc:
                 return _store_failed(exc)
             return JSONResponse(outcome.body, status_code=outcome.status)
+
+    # --- the controls: Stop, Forget and Talk (not computer-control actions) ---
+
+    hold: list[asyncio.TimerHandle] = []  # the pending release of a held talk, if any
+
+    def cancel_hold() -> None:
+        while hold:
+            hold.pop().cancel()
+
+    def release_held() -> None:
+        hold.clear()
+        log.warning("Dashboard: Talk held too long (%.0f s); released", talk_max_hold)
+        try:
+            control("up")  # type: ignore[misc]
+        except Exception:
+            log.exception("Dashboard: couldn't release the talk button")
+
+    def send(event: str) -> Response:
+        if control is None:
+            return JSONResponse({"error": "The controls aren't available."}, status_code=503)
+        try:
+            control(event)
+        except Exception:
+            log.exception("Dashboard: the %s control failed", event)
+            return JSONResponse({"error": "That didn't work."}, status_code=503)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/control/stop")
+    async def control_stop(request: Request) -> Response:
+        await _read_capped(request)  # no body is needed; read it, so it closes cleanly
+        return send("stop")
+
+    @app.post("/api/control/forget")
+    async def control_forget(request: Request) -> Response:
+        await _read_capped(request)
+        return send("forget")
+
+    @app.post("/api/control/talk")
+    async def control_talk(request: Request) -> Response:
+        body = await _json_object(request)
+        if isinstance(body, Response):
+            return body
+        action = body.get("action")
+        if not isinstance(action, str) or action not in TALK_ACTIONS:
+            return JSONResponse({"error": 'Send {"action": "down"} or "up".'}, status_code=400)
+        cancel_hold()  # the page's next press or release replaces the cap
+        response = send(action)
+        if action == "down" and control is not None and response.status_code == 200:
+            hold.append(asyncio.get_running_loop().call_later(talk_max_hold, release_held))
+        return response
 
     # --- live events ---
 

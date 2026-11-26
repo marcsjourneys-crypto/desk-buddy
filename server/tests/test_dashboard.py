@@ -61,7 +61,7 @@ class Dash:
 
 
 @contextlib.asynccontextmanager
-async def running(tmp_path):
+async def running(tmp_path, **extra):
     env = tmp_path / ".env"
     env.write_text(
         f"ANTHROPIC_API_KEY={SECRETS[0]}\nROBOT_TOKEN={SECRETS[1]}\n"
@@ -92,6 +92,7 @@ async def running(tmp_path):
         ),
         preview=lambda: "THE PROMPT " + personality.current().character,
         apps=apps,
+        **extra,
     )
     server = await start_dashboard(app, port)
     assert server is not None
@@ -774,3 +775,147 @@ def test_a_busy_port_is_not_fatal(tmp_path, caplog):
 
     assert asyncio.run(run()) is None
     assert "Dashboard: off" in caplog.text
+
+
+# --- the controls: Stop, Forget and Talk ---
+
+CONTROLS = (
+    ("/api/control/stop", None, "stop"),
+    ("/api/control/forget", None, "forget"),
+    ("/api/control/talk", {"action": "down"}, "down"),
+    ("/api/control/talk", {"action": "up"}, "up"),
+)
+
+
+@pytest.mark.parametrize(("path", "body", "event"), CONTROLS)
+def test_each_control_calls_back_with_its_event(tmp_path, path, body, event):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append) as d:
+            status, _, text = await call(
+                "POST", d.base + path, body=body, headers=change_headers(d)
+            )
+            assert (status, json.loads(text)) == (200, {"ok": True})
+
+    asyncio.run(run())
+    assert calls == [event]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"X-CARL-Token": TOKEN},  # no Origin
+        {"Origin": "ORIGIN"},  # no token
+        {"Origin": "ORIGIN", "X-CARL-Token": "wrong"},
+        {"Origin": "http://evil.example", "X-CARL-Token": TOKEN},
+        {"Origin": "ORIGIN", "X-CARL-Token": TOKEN, "Host": "evil.example:HOSTPORT"},
+    ],
+)
+def test_the_controls_need_our_host_origin_and_token(tmp_path, headers):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append) as d:
+            sent = {
+                k: (d.origin if v == "ORIGIN" else v.replace("HOSTPORT", str(d.port)))
+                for k, v in headers.items()
+            }
+            statuses = [
+                (await call("POST", d.base + path, body=body, headers=sent))[0]
+                for path, body, _ in CONTROLS
+            ]
+            assert statuses == [403] * len(CONTROLS)
+
+    asyncio.run(run())
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "body", [None, {}, {"action": "hold"}, {"action": "DOWN"}, {"action": 1}, ["down"]]
+)
+def test_a_bad_talk_action_is_a_400(tmp_path, body):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append) as d:
+            status, _, _ = await call(
+                "POST", d.base + "/api/control/talk", body=body, headers=change_headers(d)
+            )
+            assert status == 400
+
+    asyncio.run(run())
+    assert calls == []
+
+
+def test_without_a_control_callback_the_controls_are_a_503(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            for path, body, _ in CONTROLS:
+                status, _, _ = await call(
+                    "POST", d.base + path, body=body, headers=change_headers(d)
+                )
+                assert status == 503
+
+    asyncio.run(run())
+
+
+def test_a_failing_control_callback_is_a_json_503(tmp_path):
+    def broken(event):
+        raise RuntimeError("boom")
+
+    async def run():
+        async with running(tmp_path, control=broken) as d:
+            status, _, text = await call(
+                "POST", d.base + "/api/control/stop", headers=change_headers(d)
+            )
+            assert status == 503 and "error" in json.loads(text)
+
+    asyncio.run(run())
+
+
+def test_a_held_talk_is_released_by_the_server_after_the_cap(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append, talk_max_hold=0.2) as d:
+            talk = d.base + "/api/control/talk"
+            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
+            await asyncio.sleep(0.5)
+
+    asyncio.run(run())
+    assert calls == ["down", "up"]
+    assert any("held too long" in m for m in caplog.messages)
+
+
+def test_the_pages_release_cancels_the_cap(tmp_path):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append, talk_max_hold=0.3) as d:
+            talk = d.base + "/api/control/talk"
+            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
+            await call("POST", talk, body={"action": "up"}, headers=change_headers(d))
+            await asyncio.sleep(0.6)
+
+    asyncio.run(run())
+    assert calls == ["down", "up"]
+
+
+def test_a_second_press_restarts_the_cap(tmp_path):
+    calls = []
+
+    async def run():
+        async with running(tmp_path, control=calls.append, talk_max_hold=0.4) as d:
+            talk = d.base + "/api/control/talk"
+            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
+            await asyncio.sleep(0.25)
+            await call("POST", talk, body={"action": "down"}, headers=change_headers(d))
+            await asyncio.sleep(0.25)  # past the first press's cap, not the second's
+            assert calls == ["down", "down"]
+            await asyncio.sleep(0.4)
+
+    asyncio.run(run())
+    assert calls == ["down", "down", "up"]

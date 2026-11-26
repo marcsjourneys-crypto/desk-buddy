@@ -215,6 +215,8 @@ async def _run(settings: Settings) -> None:
             log.info("Robot link: off (no ROBOT_TOKEN)")
 
         voice = "sapi" if settings.tts_engine == "sapi" else f"piper {settings.tts_voice}"
+        # The key's handler, shared with the dashboard's Talk button.
+        on_key = key_handler(switch, events)
         dashboard_app = create_dashboard(
             port=settings.dashboard_port,
             token=secrets.token_urlsafe(32),  # put into the page: changes must carry it
@@ -235,6 +237,7 @@ async def _run(settings: Settings) -> None:
             apps=apps,
             skills=skills,
             skill_runner=skill_runner,
+            control=dashboard_control(on_key, events),
         )
         dashboard = await start_dashboard(dashboard_app, settings.dashboard_port)
         if dashboard is not None:  # never fatal: CARL runs without it
@@ -245,7 +248,6 @@ async def _run(settings: Settings) -> None:
             stack.callback(skill_runner.stop)
 
         loop = asyncio.get_running_loop()
-        on_key = key_handler(switch, events)
         watcher = KeyWatcher(
             parse_key(settings.ptt_key),
             lambda event: loop.call_soon_threadsafe(on_key, event),
@@ -775,6 +777,24 @@ def key_handler(
             pending.append((handle, robot))
 
     return on_key
+
+
+def dashboard_control(
+    on_key: Callable[[str], None], events: asyncio.Queue[str]
+) -> Callable[[str], None]:
+    """The Live tab's buttons (on the event loop): Talk's "down" and "up" go through the
+    key's handler, so a robot's release delay applies exactly as for the key; "stop" and
+    "forget" go straight onto the orchestrator's queue. Anything else is a ValueError."""
+
+    def control(event: str) -> None:
+        if event in ("down", "up"):
+            on_key(event)
+        elif event in ("stop", "forget"):
+            events.put_nowait(event)
+        else:
+            raise ValueError(f"Unknown control {event!r}")
+
+    return control
 
 
 if __name__ == "__main__":
