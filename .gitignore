@@ -25,3 +25,6 @@ Thumbs.db
 # Wake word model: trained on personal-use-only datasets, kept off GitHub
 firmware/models/*.tflite
 firmware/models/*_model.h
+
+# Your own skills folder (SKILLS_DIR), kept out of git: skills may hold their own secrets
+/carl-skills/
