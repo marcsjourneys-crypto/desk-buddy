@@ -2,11 +2,15 @@
 run with CARL's Python through the real SkillRunner."""
 
 import html
+import http.server
 import importlib.util
 import io
 import json
 import re
 import shutil
+import threading
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -460,6 +464,235 @@ def test_main_prints_one_json_object(brief, fake_net, monkeypatch, capsys):
 def test_load_config_refuses_bad_values(brief, change):
     with pytest.raises(ValueError):
         brief.load_config_dict({**config(), **change})
+
+
+def test_clean_title_strips_tags_before_unescaping(brief):
+    assert brief.clean_title("5 &lt; 6 and 7 &gt; 3, <b>bold</b>") == "5 < 6 and 7 > 3, bold"
+
+
+def test_item_links_rel_case_and_permalink_guid(brief):
+    feed = b"""<rss><channel>
+      <item><title>Guid only</title><guid isPermaLink="true">https://e.com/g1</guid></item>
+      <item><title>Guid not a link</title><guid isPermaLink="false">abc-123</guid></item>
+      <item><title>Link wins</title><link>https://e.com/l3</link>
+        <guid isPermaLink="true">https://e.com/g3</guid></item>
+    </channel></rss>"""
+    assert brief.parse_feed(feed) == [
+        ("Guid only", "https://e.com/g1"),
+        ("Guid not a link", ""),
+        ("Link wins", "https://e.com/l3"),
+    ]
+    atom = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Caps</title>
+      <link rel="SELF" href="https://e.com/self"/>
+      <link rel=" Alternate " href="https://e.com/alt"/></entry></feed>"""
+    assert brief.parse_feed(atom) == [("Caps", "https://e.com/alt")]
+
+
+@pytest.mark.parametrize("encoding", ["shift_jis", "gb2312", "x-no-such-encoding"])
+def test_feeds_in_unreadable_encodings_fail_alone(brief, monkeypatch, encoding):
+    data = f'<?xml version="1.0" encoding="{encoding}"?><rss><channel/></rss>'.encode()
+    with pytest.raises(brief.SourceFailed):
+        brief.parse_feed(data)
+    monkeypatch.setattr(brief, "fetch", lambda url: data)
+    assert brief.get_feed("ai", AI_URL, 3) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"daily": {"temperature_2m_max": [NaN], "temperature_2m_min": [40]}}',
+        b'{"daily": {"temperature_2m_max": [Infinity], "temperature_2m_min": [40]}}',
+        b'{"daily": {"temperature_2m_max": [50], "temperature_2m_min": [-Infinity]}}',
+        b'{"daily": {"temperature_2m_max": [1e400], "temperature_2m_min": [40]}}',
+        b'{"daily": {"temperature_2m_max": [1' + b"0" * 400 + b'], "temperature_2m_min": [4]}}',
+        b"[" * 100_000,
+        b"not json",
+    ],
+)
+def test_bad_weather_numbers_or_json_fail_alone(brief, monkeypatch, body):
+    monkeypatch.setattr(brief, "fetch", lambda url: body)
+    cfg = brief.load_config_dict(config(name="Leeds", latitude=53.8, longitude=-1.55))
+    assert brief.get_weather(cfg) == (brief.NO_WEATHER, False)
+
+
+def test_odd_optional_weather_numbers_are_left_out(brief):
+    data = json.loads(sample("forecast.json"))
+    data["daily"]["precipitation_probability_max"] = [float("nan")]
+    data["daily"]["weather_code"] = [10**400]
+    assert brief.describe_weather(data, "Leeds") == "Weather in Leeds: high 54, low 41."
+
+
+def test_an_unexpected_error_fails_only_its_source(brief, monkeypatch, capsys):
+    def boom(url):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(brief, "fetch", boom)
+    assert brief.get_feed("ai", AI_URL, 3) is None
+    cfg = brief.load_config_dict(config(name="Leeds", latitude=53.8, longitude=-1.55))
+    assert brief.get_weather(cfg) == (brief.NO_WEATHER, False)
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err and "secret detail" not in err
+
+
+def test_a_stuck_source_is_given_up_at_the_deadline(brief, fake_net, monkeypatch):
+    release = threading.Event()
+    real_fetch = brief.fetch
+
+    def fetch(url):
+        if url == AI_URL:
+            release.wait(5)  # stuck, say in DNS, far past the deadline
+        return real_fetch(url)
+
+    monkeypatch.setattr(brief, "fetch", fetch)
+    monkeypatch.setattr(brief, "RUN_DEADLINE_S", 0.3)
+    try:
+        start = time.monotonic()
+        out, code = run_brief(brief, "all", config(name="Leeds"))
+        assert time.monotonic() - start < 2
+    finally:
+        release.set()
+    assert code == 0
+    assert "(I couldn't reach the AI feed.)" in out["text"]
+    assert out["text"].startswith("Weather in Leeds: high 54")
+    assert "World: 1. " in out["text"] and "Robotics: 4. " in out["text"]
+    assert len(out["pages"]) == 6
+    assert_numbered_like_pages(out["text"], out["pages"])
+
+
+def test_a_very_long_weather_line_drops_whole_headlines(brief):
+    weather = "Weather in Leeds: " + "a long and windy note, " * 40
+    sections = [
+        (label, [(f"{label} headline number {i} " * 3, f"https://e.com/{label}/{i}")])
+        for label, i in (("World", 1), ("AI", 2), ("Robotics", 3))
+    ]
+    out = brief.build_output(weather, sections)
+    escaped = out["text"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    assert len(escaped) <= 1000
+    assert 0 < len(out["pages"]) < 3
+    assert_numbered_like_pages(out["text"], out["pages"])
+    assert "had no headlines" not in out["text"]
+    huge = brief.build_output("x" * 2000, sections)
+    assert huge == {"text": "x" * 1000, "pages": []}
+
+
+def test_config_needs_both_coordinates_or_neither(brief, tmp_path, monkeypatch, capsys):
+    for place in ({"latitude": 53.8}, {"longitude": -1.55}, {"latitude": "", "longitude": 2}):
+        with pytest.raises(ValueError, match="both"):
+            brief.load_config_dict(config(**place))
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config(latitude=53.8)), encoding="utf-8")
+    real_load = brief.load_config
+    monkeypatch.setattr(brief, "load_config", lambda _: real_load(path))
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert brief.main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert 'set both "latitude" and "longitude"' in captured.err
+
+
+# --- the morning brief's fetch against a local server ---
+
+
+class _FeedHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        port = self.server.server_address[1]
+        if self.path == "/feed":
+            body = sample("rss.xml")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/big":
+            self.send_response(200)
+            self.send_header("Content-Length", "300000")
+            self.end_headers()
+            self.wfile.write(b"x" * 300_000)
+        elif self.path == "/drip":
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            try:
+                for _ in range(40):  # a byte every 0.1 s: never idle long enough to time out
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.1)
+            except OSError:
+                pass
+        elif self.path == "/to-local":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}/feed")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_error(404)
+
+
+@pytest.fixture
+def feed_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FeedHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_reads_a_feed(brief, feed_server):
+    assert brief.fetch(f"{feed_server}/feed") == sample("rss.xml")
+
+
+def test_fetch_stops_past_the_size_cap(brief, feed_server, monkeypatch):
+    monkeypatch.setattr(brief, "MAX_BYTES", 100_000)
+    with pytest.raises(brief.SourceFailed, match="over"):
+        brief.fetch(f"{feed_server}/big")
+
+
+def test_fetch_stops_a_dripping_server_at_its_deadline(brief, feed_server, monkeypatch):
+    monkeypatch.setattr(brief, "TIMEOUT_S", 0.5)
+    start = time.monotonic()
+    with pytest.raises(brief.SourceFailed, match="too slow"):
+        brief.fetch(f"{feed_server}/drip")
+    assert time.monotonic() - start < 2
+
+
+def test_fetch_refuses_a_redirect_to_a_local_address(brief, feed_server):
+    with pytest.raises(brief.SourceFailed, match="redirect refused"):
+        brief.fetch(f"{feed_server}/to-local")
+
+
+def test_fetch_fails_on_a_404(brief, feed_server):
+    with pytest.raises(brief.SourceFailed, match="HTTPError"):
+        brief.fetch(f"{feed_server}/nothing")
+
+
+@pytest.mark.parametrize(
+    ("start", "target", "allowed"),
+    [
+        ("https://feeds.example.com/a", "https://cdn.example.com/a", True),
+        ("http://feeds.example.com/a", "https://feeds.example.com/a", True),
+        ("http://feeds.example.com/a", "http://feeds.example.org/a", True),
+        ("https://feeds.example.com/a", "http://feeds.example.com/a", False),
+        ("https://feeds.example.com/a", "https://localhost/a", False),
+        ("https://feeds.example.com/a", "https://10.0.0.1/a", False),
+        ("https://feeds.example.com/a", "file:///C:/secret.txt", False),
+    ],
+)
+def test_redirects_only_to_safe_addresses(brief, start, target, allowed):
+    handler = brief.SafeRedirects()
+    request = urllib.request.Request(start)
+    if allowed:
+        new = handler.redirect_request(request, None, 302, "Found", {}, target)
+        assert new.full_url == target
+    else:
+        with pytest.raises(brief.SourceFailed):
+            handler.redirect_request(request, None, 302, "Found", {}, target)
+    assert handler.max_redirections == 3
 
 
 # --- running them for real ---

@@ -15,18 +15,24 @@ Python and needs no setup. Warnings go to stderr (CARL's log), never stdout.
 import html
 import ipaddress
 import json
+import math
+import os
 import re
 import sys
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from xml.etree import ElementTree
 
 USER_AGENT = "desk-buddy-morning-brief"
-TIMEOUT_S = 8  # per request
+TIMEOUT_S = 8  # per request: each socket operation, and the whole body read
+RUN_DEADLINE_S = 20  # for everything; a source not done by then counts as failed
 MAX_BYTES = 2_000_000  # read at most this much of any response
+MAX_REDIRECTS = 3
+CHUNK = 65536
 TEXT_LIMIT = 1000  # characters CARL reads (counted after CARL escapes & < >)
 MAX_PAGES = 10
 MAX_URL = 500
@@ -90,10 +96,11 @@ def _local(tag):
 
 
 def clean_title(text, limit=TITLE_LIMIT):
-    """One plain line: HTML entities unescaped, tags and invisible characters removed,
-    whitespace collapsed, cut at a word to `limit` characters."""
-    text = html.unescape(text or "")
-    text = re.sub(r"<[^>]*>", " ", text)
+    """One plain line: tags removed, then HTML entities unescaped (so "a &lt; b" stays
+    "a < b"), invisible characters removed, whitespace collapsed, cut at a word to
+    `limit` characters."""
+    text = re.sub(r"<[^>]*>", " ", text or "")
+    text = html.unescape(text)
     text = "".join(" " if unicodedata.category(c)[0] in "CZ" else c for c in text)
     text = " ".join(text.split())
     return cut(text, limit)
@@ -109,8 +116,8 @@ def cut(text, limit):
 
 
 def _item_link(item):
-    """RSS: the <link> text (or an atom:link's href). Atom: the href of the
-    <link rel="alternate"> or the <link> with no rel."""
+    """RSS: the <link> text (or an atom:link's href), else a <guid isPermaLink="true">.
+    Atom: the href of the <link rel="alternate"> (any case) or the <link> with no rel."""
     for child in item:
         if _local(child.tag) != "link":
             continue
@@ -118,8 +125,12 @@ def _item_link(item):
         if text:
             return text
         href = (child.get("href") or "").strip()
-        if href and child.get("rel", "alternate") == "alternate":
+        rel = (child.get("rel") or "alternate").strip().lower()
+        if href and rel == "alternate":
             return href
+    for child in item:
+        if _local(child.tag) == "guid" and child.get("isPermaLink", "").lower() == "true":
+            return (child.text or "").strip()
     return ""
 
 
@@ -138,6 +149,9 @@ def parse_feed(data):
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError as exc:
         raise SourceFailed(f"not XML ({exc})") from None
+    except (ValueError, LookupError, RecursionError) as exc:
+        # A multi-byte (ValueError) or unknown (LookupError) encoding, and the like.
+        raise SourceFailed(f"unreadable XML ({type(exc).__name__})") from None
     if _local(root.tag) not in ("rss", "feed", "RDF"):
         raise SourceFailed(f"not a feed (<{_local(root.tag)}>)")
     items = []
@@ -183,12 +197,22 @@ def sky_word(code):
     return ""
 
 
+MAX_WEATHER_NUMBER = 100_000  # bigger (or NaN, or infinite) isn't a real reading
+
+
 def _first(daily, key):
+    """The first value of a daily list, if it's a sane finite number; else None."""
     values = daily.get(key)
-    if isinstance(values, list) and values and isinstance(values[0], int | float):
-        if not isinstance(values[0], bool):
-            return values[0]
-    return None
+    if not isinstance(values, list) or not values:
+        return None
+    value = values[0]
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        ok = math.isfinite(value) and abs(value) < MAX_WEATHER_NUMBER
+    except OverflowError:  # an int too big for a float
+        return None
+    return value if ok else None
 
 
 def describe_weather(data, place, units="fahrenheit"):
@@ -291,37 +315,76 @@ def build_output(weather, sections):
             seen.update(u for _, u in items)
             budget -= len(items)
         kept.append((label, items))
-    pages = [{"title": title, "url": url} for _, items in kept if items for title, url in items]
     for limit in (TITLE_LIMIT, 90, 75, 60, 45, 30):
         text = _compose(weather, kept, limit)
         if _escaped_len(text) <= TEXT_LIMIT:
             break
-    while _escaped_len(text) > TEXT_LIMIT:  # only with a very long place name or labels
+    # Still too long (only with a very long weather line): drop whole headlines from the
+    # end, from the text and the pages alike, so no number is ever cut off.
+    while _escaped_len(text) > TEXT_LIMIT and any(items for _, items in kept):
+        i = max(j for j, (_, items) in enumerate(kept) if items)
+        label, items = kept[i]
+        kept[i] = (label, items[:-1])
+        if not kept[i][1]:
+            del kept[i]  # trimmed away, not "had no headlines"
+        text = _compose(weather, kept, 30)
+    while _escaped_len(text) > TEXT_LIMIT:  # no headlines left in it to cut
         text = text[:-1]
+    pages = [{"title": title, "url": url} for _, items in kept if items for title, url in items]
     return {"text": text, "pages": pages}
 
 
 # --- fetching ---
 
 
+class SafeRedirects(urllib.request.HTTPRedirectHandler):
+    """At most MAX_REDIRECTS, only to an address CARL would accept as a page, and never
+    from https down to http."""
+
+    max_redirections = MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not safe_link(newurl):
+            raise SourceFailed("redirect refused")
+        was_https = urllib.parse.urlsplit(req.full_url).scheme.lower() == "https"
+        if was_https and urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise SourceFailed("redirect refused (https to http)")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(SafeRedirects())
+
+
 def fetch(url):
-    """The response body, at most MAX_BYTES; SourceFailed on any error or if it's
-    bigger."""
+    """The response body, at most MAX_BYTES, read within TIMEOUT_S; SourceFailed on any
+    error, if it's bigger, or if it's too slow. (urllib's timeout is per socket
+    operation, so a server dripping bytes would never trip it: the deadline does.)"""
+    deadline = time.monotonic() + TIMEOUT_S
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            data = response.read(MAX_BYTES + 1)
+        with _OPENER.open(request, timeout=TIMEOUT_S) as response:
+            chunks, size = [], 0
+            while True:
+                if time.monotonic() > deadline:
+                    raise SourceFailed("too slow")
+                chunk = response.read1(CHUNK)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    raise SourceFailed("over 2 MB")
+                chunks.append(chunk)
+    except SourceFailed:
+        raise
     except Exception as exc:  # any network failure is just "couldn't reach"
         raise SourceFailed(type(exc).__name__) from None
-    if len(data) > MAX_BYTES:
-        raise SourceFailed("over 2 MB")
-    return data
+    return b"".join(chunks)
 
 
 def fetch_json(url):
     try:
         return json.loads(fetch(url))
-    except ValueError:
+    except (ValueError, RecursionError):
         raise SourceFailed("not JSON") from None
 
 
@@ -342,6 +405,9 @@ def get_weather(config):
     except SourceFailed as exc:
         print(f"weather: {exc}", file=sys.stderr)
         return NO_WEATHER, False
+    except Exception as exc:  # a last resort: one source never sinks the brief
+        print(f"weather: {type(exc).__name__}", file=sys.stderr)
+        return NO_WEATHER, False
 
 
 def get_feed(section, url, count):
@@ -349,6 +415,9 @@ def get_feed(section, url, count):
         return newest(parse_feed(fetch(url)), count)
     except SourceFailed as exc:
         print(f"{section} feed: {exc}", file=sys.stderr)
+        return None
+    except Exception as exc:  # a last resort: one source never sinks the brief
+        print(f"{section} feed: {type(exc).__name__}", file=sys.stderr)
         return None
 
 
@@ -375,7 +444,10 @@ def load_config_dict(raw):
     lat, lon = place.get("latitude"), place.get("longitude")
     if not isinstance(name, str):
         raise ValueError('"place.name" must be a string')
-    if lat in ("", None) or lon in ("", None):
+    lat_blank, lon_blank = lat in ("", None), lon in ("", None)
+    if lat_blank != lon_blank:
+        raise ValueError('set both "latitude" and "longitude", or leave both blank')
+    if lat_blank:
         lat = lon = None
     elif not (_number(lat) and _number(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError('"latitude" and "longitude" must be numbers (or both blank)')
@@ -399,19 +471,39 @@ def load_config_dict(raw):
     }
 
 
+def _outcome(job, done, what, failed):
+    """A job's result, or `failed` if it didn't finish in time (or raised)."""
+    if job not in done:
+        print(f"{what}: too slow", file=sys.stderr)
+        return failed
+    try:
+        return job.result()
+    except Exception as exc:
+        print(f"{what}: {type(exc).__name__}", file=sys.stderr)
+        return failed
+
+
 def run(section, config):
     """(output dict, exit code). Exit 1 only when every source that was tried failed."""
     want_weather = section in ("all", "weather")
     feeds = [s for s in SECTIONS if section in ("all", s)]
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    pool = ThreadPoolExecutor(max_workers=4)
+    try:
         weather_job = pool.submit(get_weather, config) if want_weather else None
         jobs = {
             s: pool.submit(get_feed, s, config["feeds"][s], config["per_feed"])
             for s in feeds
             if config["feeds"][s]
         }
-        weather, weather_ok = weather_job.result() if weather_job else (None, None)
-        results = {s: job.result() for s, job in jobs.items()}
+        everything = [*jobs.values(), *([weather_job] if weather_job else [])]
+        done, _ = wait(everything, timeout=RUN_DEADLINE_S)
+    finally:
+        # Never wait for a stuck source (and the script exits without joining threads).
+        pool.shutdown(wait=False, cancel_futures=True)
+    weather, weather_ok = None, None
+    if weather_job is not None:
+        weather, weather_ok = _outcome(weather_job, done, "weather", (NO_WEATHER, False))
+    results = {s: _outcome(job, done, f"{s} feed", None) for s, job in jobs.items()}
     sections, notes = [], []
     for s in feeds:
         if s in results:
@@ -446,4 +538,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)  # a stuck fetch thread (say, in DNS) can't hold the process
