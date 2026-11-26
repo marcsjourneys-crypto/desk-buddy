@@ -39,15 +39,22 @@ class RobotMic:
     alone, so a fast re-press (the link has already begun the next clip when the
     orchestrator handles the previous "up") keeps the start of the next clip.
     begin(), end(), feed() and stop() are all called on the event-loop thread.
+
+    on_frame, if set, sees every frame that is recorded (the loop's end-of-speech tap
+    after a wake word; set after begin()). It runs on the event loop and must be quick.
     """
 
     def __init__(self, max_seconds: float = MAX_RECORD_SECONDS) -> None:
         self._buffer = PcmBuffer(max_seconds)
         self._recording = False
+        self.on_frame: Callable[[bytes], None] | None = None
 
     def begin(self) -> None:
+        """A new recording. It also drops the hands-free tap at once: a key press takes
+        over from the end-of-speech detector before the loop even sees the press."""
         self._buffer.take()
         self._recording = True
+        self.on_frame = None
 
     def end(self) -> None:
         self._recording = False
@@ -59,6 +66,11 @@ class RobotMic:
             log.debug("Dropped odd-length audio frame (%d bytes)", len(data))
             return
         self._buffer.append(data)
+        if self.on_frame is not None:
+            try:
+                self.on_frame(data)
+            except Exception:
+                log.exception("Robot mic tap failed")
 
     def start(self) -> None:
         """No-op: recording already began when the button went down."""

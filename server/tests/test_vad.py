@@ -313,3 +313,35 @@ def test_a_possible_start_at_the_timeout_delays_no_speech_by_end_silence_at_most
     endpointer = Endpointer(model=model)
     events = feed_chunks(endpointer, 165)
     assert events.index(Event.NO_SPEECH) == 149  # 4.8 s: the timeout plus end_silence
+
+
+# --- ignore_first: the end of "CARL" in a wake recording's pre-roll ---
+
+
+def test_speech_in_the_ignored_start_never_counts():
+    # 0.3 s is 4800 samples: chunks starting before it (0-9) are ignored. Nine speech
+    # chunks there, then silence: no speech.
+    model = ScriptedModel([0.9] * 9 + [0.1] * 200)
+    endpointer = Endpointer(model=model, ignore_first=0.3)
+    events = feed_chunks(endpointer, 200)
+    assert Event.SPEECH_START not in events
+    assert events.index(Event.NO_SPEECH) == 124  # still at 4 s
+
+
+def test_speech_that_runs_on_past_the_ignored_start_counts_from_there():
+    model = ScriptedModel([0.9] * 30)
+    endpointer = Endpointer(model=model, ignore_first=0.3)
+    events = feed_chunks(endpointer, 30)
+    assert events.index(Event.SPEECH_START) == 17  # chunks 10-17: 8 chunks, 256 ms
+
+
+def test_a_one_breath_question_after_the_phrase_still_ends_normally():
+    pcm = speech() + silence(3)
+    events = run(Endpointer(ignore_first=0.3), pcm)
+    assert [e for e, _ in events] == [Event.SPEECH_START, Event.END]
+    assert events[1][0] is Event.END and events[1][1] == dict(run(Endpointer(), pcm))[Event.END]
+
+
+def test_ignore_first_must_not_be_negative():
+    with pytest.raises(ValueError):
+        Endpointer(ignore_first=-0.1)

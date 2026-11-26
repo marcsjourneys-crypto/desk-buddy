@@ -48,6 +48,7 @@ from desk_buddy.tools.spotify import MusicTools, create_control
 from desk_buddy.tools.urls import SearchResults
 from desk_buddy.tools.youtube import YouTubeClient, YouTubeTools
 from desk_buddy.tts import PiperSynthesizer, SapiSynthesizer, VoiceError, load_piper
+from desk_buddy.vad import load_model as load_vad_model
 
 log = logging.getLogger("desk_buddy")
 
@@ -172,6 +173,8 @@ async def _run(settings: Settings) -> None:
 
         events: asyncio.Queue[str] = asyncio.Queue()
         if settings.robot_token:
+            # The wake word's end-of-speech detector: loaded now, off the event loop.
+            await asyncio.to_thread(_load_vad)
             app = create_app(
                 token=settings.robot_token,
                 switch=switch,
@@ -180,6 +183,7 @@ async def _run(settings: Settings) -> None:
                 # Queued after the connect's "reset", so the greeting follows it.
                 on_connect=lambda: events.put_nowait("greet"),
                 bus=bus,
+                on_wake=lambda score: events.put_nowait(f"wake {score}"),
             )
             try:
                 server = await start_server(app, settings.server_host, settings.server_port)
@@ -602,6 +606,14 @@ def _apps_ducker(settings: Settings) -> SessionDucker | None:
         return None
     log.info("Ducking other apps: %s", "on" if settings.music_duck else "off (MUSIC_DUCK is off)")
     return ducker
+
+
+def _load_vad() -> None:
+    """Never fatal: if it fails, each wake fails safely (and logs) instead."""
+    try:
+        load_vad_model()
+    except Exception as exc:
+        log.warning("Couldn't load the end-of-speech model (the wake word won't work): %s", exc)
 
 
 async def _load_whisper(settings: Settings) -> WhisperTranscriber:

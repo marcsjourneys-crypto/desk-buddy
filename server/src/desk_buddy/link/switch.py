@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from desk_buddy.link import protocol
@@ -14,6 +15,8 @@ log = logging.getLogger(__name__)
 
 class LinkMic(Mic, Protocol):
     """A robot's mic: begin()/end() follow the talk button, start()/stop() the loop."""
+
+    on_frame: Callable[[bytes], None] | None
 
     def begin(self) -> None: ...
     def end(self) -> None: ...
@@ -61,6 +64,27 @@ class SwitchedMic:
 
     def start(self) -> None:
         self._active().start()
+
+    def begin_hands_free(self, on_frame: Callable[[bytes], None]) -> bool:
+        """Start recording the robot's mic with no key held (after a wake word), with
+        every frame also passed to on_frame. False (and nothing happens) without a robot:
+        the PC mic has no wake word."""
+        robot = self._switch.robot
+        if robot is None:
+            return False
+        robot.mic.begin()
+        robot.mic.on_frame = on_frame
+        return True
+
+    def end_hands_free(self, *, keep_recording: bool = False) -> None:
+        """Stop passing frames on, and end the recording unless the key has taken it
+        over (keep_recording). The loop then takes the clip with stop()."""
+        robot = self._switch.robot
+        if robot is None:
+            return
+        robot.mic.on_frame = None
+        if not keep_recording:
+            robot.mic.end()
 
     def stop(self) -> bytes:
         active = self._active()

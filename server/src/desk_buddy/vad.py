@@ -74,6 +74,7 @@ class Endpointer:
         threshold: float = 0.5,
         min_speech: float = 0.25,
         *,
+        ignore_first: float = 0.0,
         model: Any = None,
     ) -> None:
         if not 0 < threshold <= 1:
@@ -86,6 +87,11 @@ class Endpointer:
         ):
             if not value > 0:  # NaN too
                 raise ValueError(f"{name} must be more than 0")
+        if not ignore_first >= 0:
+            raise ValueError("ignore_first must be 0 or more")
+        # After a wake word the robot sends ~0.3 s from before the detection, which holds
+        # the end of "CARL": speech there never counts (the model still hears it).
+        self._ignore_first = round(ignore_first * SAMPLE_RATE)
         self._min_speech = round(min_speech * SAMPLE_RATE)
         self._end_silence = round(end_silence * SAMPLE_RATE)
         self._no_speech = round(no_speech_timeout * SAMPLE_RATE)
@@ -138,6 +144,8 @@ class Endpointer:
         start = self.samples
         self.samples += CHUNK_SAMPLES
         event: Event | None = None
+        if start < self._ignore_first:
+            p = 0.0
         if p >= self._threshold:
             self.silence_from = None
             self.speaking = True
