@@ -199,6 +199,40 @@ def test_outside_project(tmp_path):
     assert str(tmp_path) in skills.outside_project(folder)
 
 
+def test_outside_project_sees_through_a_junctioned_skills_dir(tmp_path):
+    _winapi = pytest.importorskip("_winapi")
+    project = tmp_path / "project"  # a uv project with the real skills folder inside
+    real = project / "skills"
+    (real / "hello-time").mkdir(parents=True)
+    (project / "pyproject.toml").write_text('[tool.uv.workspace]\nmembers = ["skills/*"]\n')
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = elsewhere / "skills"
+    _winapi.CreateJunction(str(real), str(link))
+    folder = link / "hello-time"
+    # As given, no parent of the junction holds a project; its real place does.
+    assert not any((p / "pyproject.toml").is_file() for p in Path(os.path.abspath(folder)).parents)
+    message = skills.outside_project(folder)
+    assert message is not None and str(project) in message
+
+
+def test_the_runner_refuses_a_project_skill_inside_another_project(tmp_path, caplog):
+    popen = FakePopen(FakeProc(out=b"hi"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "pyproject.toml").write_text('[tool.uv.workspace]\nmembers=["*"]\n')
+    skill = make_skill(tmp_path / "home" / "skills" / "hello-time", project=True)
+    with caplog.at_level(logging.WARNING):
+        result = runner(tmp_path, popen).run(skill, {})
+    assert not result.ok
+    assert result.summary == skills.INSIDE_PROJECT == "failed: inside another uv project"
+    assert popen.calls == []  # nothing started
+    assert "inside another uv project" in caplog.text
+    # A skill without a project of its own runs with CARL's python, not uv: allowed.
+    script = make_skill(tmp_path / "home" / "skills2" / "plain")
+    assert runner(tmp_path, popen).run(script, {}).ok
+    assert popen.calls[0][0] == [PY, "-s", "main.py"]
+
+
 # --- the environment ---
 
 SECRETS = {

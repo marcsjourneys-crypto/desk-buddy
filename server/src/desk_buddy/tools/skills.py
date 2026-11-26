@@ -82,6 +82,7 @@ REFUSED_BUSY = "refused: another skill is running"
 TIMED_OUT = "failed: timed out"
 NOT_STARTED = "failed: couldn't start"
 INVALID = "failed: not a valid skill"
+INSIDE_PROJECT = "failed: inside another uv project"
 
 Popen = Callable[..., Any]
 Killer = Callable[[int], None]
@@ -133,10 +134,19 @@ def outside_project(folder: Path) -> str | None:
     """None if no folder above `folder` (up to the drive root) holds a pyproject.toml;
     otherwise why the skill can't be synced or run: uv would treat that project (maybe a
     workspace naming this skill as a member) as the one to install, with code from outside
-    the skill's folder. Check it before `uv sync` and before running a project skill."""
-    for parent in Path(os.path.abspath(folder)).parents:
-        if (parent / PROJECT_FILE).is_file():
-            return f"The skill is inside another uv project ({parent})."
+    the skill's folder. Check it before `uv sync` and before running a project skill.
+
+    Both the folder as given and its real location (links and junctions resolved) are
+    checked, so a junctioned SKILLS_DIR can't hide a parent project."""
+    places = [Path(os.path.abspath(folder))]
+    try:
+        places.append(Path(folder).resolve())
+    except (OSError, RuntimeError):
+        pass
+    for place in places:
+        for parent in place.parents:
+            if (parent / PROJECT_FILE).is_file():
+                return f"The skill is inside another uv project ({parent})."
     return None
 
 
@@ -263,6 +273,12 @@ class SkillRunner:
             env = self.clean_env(slug)
         except ValueError:
             return SkillResult(False, "That skill isn't available.", INVALID)
+        if has_project(skill.folder):
+            # The runner is the single checkpoint: nothing starts inside another project.
+            reason = outside_project(skill.folder)
+            if reason is not None:
+                self._log.warning("Skills: %s not run: %s", slug, reason)
+                return SkillResult(False, "That skill isn't available.", INSIDE_PROJECT)
         stdin = json.dumps(dict(inputs), ensure_ascii=False).encode("utf-8")
         try:
             proc = self._popen(
