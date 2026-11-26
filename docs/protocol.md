@@ -68,8 +68,8 @@ If `ROBOT_TOKEN` is blank, the server doesn't listen at all and logs `Robot link
 
 The robot runs the detector only while the state is `idle`. On a detection:
 
-1. The robot's eyes open at once, and it sends `{"type": "wake", "score": 0.99}`. It keeps buffering its mic from the moment of detection (a pre-roll of up to 1.5 s, in PSRAM).
-2. If the server accepts the wake (CARL is idle), it sends `state listening`. The robot then streams **the buffered audio after the phrase first**, then live audio, as 20 ms binary frames as usual. Nothing is sent before `state listening`, and the phrase itself is never sent.
+1. The robot's eyes open at once, and it sends `{"type": "wake", "score": 0.99}`. It keeps buffering its mic from about 300 ms before the moment of detection (a pre-roll of up to 3 s, in PSRAM).
+2. If the server accepts the wake (CARL is idle), it sends `state listening`. The robot then streams **the buffered audio first**, then live audio, as 20 ms binary frames as usual. The buffer starts 300 ms before the detection, so a question said in one breath keeps its first word; its first ~300 ms may therefore contain the end of the phrase, which the server handles. Nothing is sent before `state listening`, and nothing after the state leaves `listening`.
 3. The server ends the question itself when the speech ends (about 0.8 s of silence), after 4 s with no speech (a false wake: back to `idle`), or after 15 s at most. It sends `state thinking` (or `idle`) and the robot stops streaming, exactly as after a key release.
 
 A `wake` while CARL isn't idle is ignored, and the robot drops its pre-roll if `state listening` doesn't come. Pressing the PC key during a wake recording takes over as push-to-talk. No audio leaves the robot until the phrase is heard or the key is pressed.

@@ -19,7 +19,6 @@
 #include <freertos/task.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <string.h>
 
 #include <atomic>
 #include <new>
@@ -114,10 +113,10 @@ constexpr size_t kMaxArenaBytes = 256 * 1024;  // the arena doubles up to this i
 constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr uint32_t kPsramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 
-// What was used, plus 1/8 (at least 512 bytes) for alignment and TFLM's own slack,
-// rounded up to 16 bytes.
+// What was used, plus a quarter (at least 2 KB) for alignment and TFLM's own slack, rounded
+// up to 16 bytes.
 constexpr size_t withMargin(size_t used) {
-  return (used + (used / 8 > 512 ? used / 8 : 512) + 15) & ~static_cast<size_t>(15);
+  return (used + (used / 4 > 2048 ? used / 4 : 2048) + 15) & ~static_cast<size_t>(15);
 }
 
 constexpr UBaseType_t kTaskPriority = 4;  // below Wi-Fi (23) and lwIP (18) on core 0
@@ -263,16 +262,10 @@ const char* measure() {
       freeArena(varArena);
       return fail("Wake: no PSRAM for a %u-byte arena", static_cast<unsigned>(size));
     }
-    if (build()) {
-      // One step on silence, so whatever the first Invoke() sets up (CALL_ONCE fills the
-      // streaming state) is counted too.
-      TfLiteTensor* in = interpreter->input(0);
-      if (in != nullptr && in->data.raw != nullptr) memset(in->data.raw, 0, in->bytes);
-      interpreter->Invoke();
-      arena.used = interpreter->arena_used_bytes();
-      varArena.used = varAlloc->used_bytes();
-      return nullptr;
-    }
+    // build() reads the use right after AllocateTensors: the resource variables' buffers
+    // are allocated in Prepare (ASSIGN_VARIABLE), so that is all of it; CALL_ONCE's first
+    // Invoke() only writes their initial values into them.
+    if (build()) return nullptr;
     dropInterpreter();
     Serial.printf("Wake: AllocateTensors failed with a %u-byte arena (message above)\n",
                   static_cast<unsigned>(size));

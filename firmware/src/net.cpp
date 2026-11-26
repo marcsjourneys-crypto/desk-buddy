@@ -82,7 +82,7 @@ constexpr uint32_t kWifiReportMs = 10000;
 constexpr uint32_t kWifiRejoinMs = 30000;
 constexpr uint32_t kWifiRestartGapMs = 200;  // between WiFi.disconnect() and begin()
 constexpr int kMaxFramesPerPass = 4;
-// While the wake word's pre-roll is waiting (it can be ~1.5 s), more per pass, so it catches
+// While the wake word's pre-roll is waiting (up to ~3 s), more per pass, so it catches
 // up a few times faster than real time. 8 frames (5 KB) stay within lwIP's TCP send buffer,
 // so a pass doesn't wait on the network; the server takes frames as fast as they come.
 constexpr int kMaxBacklogFramesPerPass = 8;
@@ -351,6 +351,8 @@ void stopWifi() {
 void serviceWake() {
   const uint32_t now = millis();
   if (wakeOn() && wake::haveModel() && !wakeBegun) {
+    // Only when the wake word is turned on after boot (setup() starts it otherwise): this
+    // pass then blocks while the model is built twice (tens of ms), once per boot.
     wakeBegun = true;  // begin() runs once anyway; report a failure once
     if (const char* e = wake::begin()) Serial.printf("Wake word off: %s\n", e);
   }
@@ -370,9 +372,10 @@ void serviceWake() {
     wakesIgnored++;
     return;
   }
-  // Keep the audio from just after the detection; the mic goes to Hold (the engine pauses)
-  // until the server's `state listening` turns it into the stream.
-  audio::keepPreRollFrom(seq + 1);
+  // Keep the audio from 300 ms before the detecting step (so a question said in one breath
+  // keeps its first word); the mic goes to Hold (the engine pauses) until the server's
+  // `state listening` turns it into the stream.
+  audio::keepPreRollFrom(microute::keepFromSeq(seq));
   applyMic();
   eyes::show("listening");
   char msg[48];

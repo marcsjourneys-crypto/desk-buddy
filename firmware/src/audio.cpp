@@ -137,7 +137,9 @@ namespace {
 
 constexpr size_t kRingSamples = dsp::kRate;  // 1 s; the server paces only ~200 ms ahead
 constexpr size_t kMicQueueDepth = 8;         // 160 ms of frames
-constexpr size_t kPreRollFrames = 75;        // 1.5 s of 20 ms frames, in PSRAM
+// 3 s of 20 ms frames (96 KB of PSRAM): the 300 ms lead, a 2 s wait for the server's answer
+// and the backlog's drain all fit without overwriting audio that is still to be sent.
+constexpr size_t kPreRollFrames = 150;
 constexpr UBaseType_t kPlaybackPriority = 5;
 constexpr UBaseType_t kMicPriority = 4;
 constexpr BaseType_t kAudioCore = 1;
@@ -200,30 +202,23 @@ void playbackTask(void*) {
   }
 }
 
-// One frame to whoever the mode says (see audio.h).
+// One frame to whoever the mode says (rules in mic_route.h).
 void deliver(audio::MicMode m, const int16_t* frame) {
-  using audio::MicMode;
-  bool toQueue = false;
   bool lost = false;
   uint32_t seq = 0;
   portENTER_CRITICAL(&preMux);
-  if (m == MicMode::Stream) {
-    if (backlog && preRoll != nullptr && preRoll->count() > 0) {
-      preRoll->push(frame, &lost);  // behind the kept audio, in order
-    } else {
-      backlog = false;  // drained: live frames go straight to the queue from now on
-      toQueue = true;
-    }
-  } else if (preRoll != nullptr) {
+  const microute::Dest d =
+      microute::route(m, preRoll != nullptr, preRoll ? preRoll->count() : 0, backlog);
+  if (d == microute::Dest::History || d == microute::Dest::Keep) {
     seq = preRoll->push(frame, &lost);
-    if (m == MicMode::Wake) lost = false;  // in Wake mode it's history: overwriting is normal
-  } else {
+    if (d == microute::Dest::History) lost = false;  // overwriting history is normal
+  } else if (preRoll == nullptr) {
     seq = noRingSeq++;
   }
   portEXIT_CRITICAL(&preMux);
   if (lost) micDrops++;
-  if (toQueue && xQueueSend(micQueue, frame, 0) != pdTRUE) micDrops++;
-  if (m == MicMode::Wake) {
+  if (d == microute::Dest::Queue && xQueueSend(micQueue, frame, 0) != pdTRUE) micDrops++;
+  if (microute::feedsEngine(m)) {
     const audio::MicSink sink = wakeSink.load();
     if (sink != nullptr) sink(frame, kBlock, seq);
   }
@@ -362,13 +357,12 @@ void setMicMode(MicMode m) {
   if (!micOn) return;
   const MicMode was = mode.load();
   if (m == was) return;
+  const microute::Change c = microute::onModeChange(was, m);
   portENTER_CRITICAL(&preMux);
-  // A stream that follows a held wake sends the kept pre-roll first; any other stream starts
-  // now, and no other mode ever sends the pre-roll.
-  backlog = m == MicMode::Stream && was == MicMode::Hold;
-  if (m == MicMode::Stream && !backlog && preRoll != nullptr) preRoll->clear();
+  backlog = c.backlog;
+  if (c.clearRing && preRoll != nullptr) preRoll->clear();
   portEXIT_CRITICAL(&preMux);
-  if (m == MicMode::Stream) xQueueReset(micQueue);  // no stale frames from last time
+  if (c.resetQueue) xQueueReset(micQueue);
   mode = m;
 }
 
@@ -404,6 +398,9 @@ bool micBacklog() {
 }
 
 bool popMicFrame(uint8_t out[kFrameBytes]) {
+  // Only while streaming: a frame the reader queued just as `listening` ended stays put (and
+  // the next stream empties the queue first).
+  if (!microute::mayPop(mode.load())) return false;
   bool got = false;
   int16_t frame[kBlock];
   portENTER_CRITICAL(&preMux);

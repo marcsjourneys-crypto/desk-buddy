@@ -43,7 +43,7 @@ Then:
 | `net` | Wi-Fi status, IP and signal strength; the link state (`NoConfig`, `WifiConnecting`, `Connecting`, `WaitingWelcome`, `Linked`, `Backoff`, `Refused`); reconnects; mic frames sent and dropped; wake mode (see below); free heap. |
 | `forget` | Wipes the Wi-Fi, server and token (not the wake word settings). |
 
-What to expect in the monitor: `Wi-Fi: joining …`, `Wi-Fi connected <ip>`, then `Linked to <server>`, and the eyes wake up. CARL greets the robot unless it only just started. Hold Right Ctrl in the CARL window on the PC to talk.
+What to expect in the monitor: `Wi-Fi: joining …`, `Wi-Fi connected <ip>`, then `Linked to <server>`, and the eyes wake up. At boot the firmware also prints `Last reset:` (power-on, software restart, or a crash such as `PANIC`), so a crash reboot can be told from a power-on. CARL greets the robot unless it only just started. Hold Right Ctrl in the CARL window on the PC to talk.
 
 **Never paste the `wifi` or `token` lines into a chat, an issue or a screenshot.** The firmware never prints them back in full.
 
@@ -70,7 +70,7 @@ Without the header the firmware still builds; `wake test` then says there's no m
 While the robot is linked and CARL is **idle**, the robot listens for "Hey CARL" by itself:
 
 1. **It hears the phrase:** the eyes switch to `listening` at once, and the robot sends `{"type": "wake", "score": 0.99}` to the server. `net` counts it under "wakes sent".
-2. **The server answers `state listening`:** the robot streams the audio recorded since the moment of the detection first (up to 1.5 s, faster than real time), then live audio, as with the PC key.
+2. **The server answers `state listening`:** the robot streams the audio kept since the detection first, starting 300 ms before the detecting step so a question said in one breath keeps its first word (that start may hold the end of "CARL"; the server handles it). It goes out faster than real time, then live audio follows, as with the PC key. The pre-roll holds 3 s (96 KB of PSRAM).
 3. **No answer within 2 s** (the server ignored it, e.g. it wasn't idle): the audio is dropped, the eyes go back to the state's look, and listening resumes after 2 s ("unanswered").
 
 - **When it listens:** only while linked, the server's state is `idle`, and the wake word is on. It pauses while listening, thinking and speaking, and ignores detections for **2 s after any state change** (and after each restart of the engine): "ignored" in `net`.
@@ -96,7 +96,7 @@ While the robot is linked and CARL is **idle**, the robot listens for "Hey CARL"
 
 - `wake test` and `wake raw` are refused while the robot link is connected (wake mode owns the engine and the mic then). Nothing fires for 2 s after a start or a detection.
 - The eyes play the animated "thinking" look during the test, so the fps shows what detection costs them (the cap is ~30 fps; the target is ≥ 20).
-- **Memory:** both arenas (the tensors, and the model's streaming state) are in internal RAM, after one unexplained "Cache error, MMU entry fault" crash with them in PSRAM in Phase 0. At start the engine builds the model once on roomy PSRAM arenas to measure what it really uses (one step included), then rebuilds it on internal arenas of that size plus 1/8 (at least 512 bytes). If internal RAM is short, an arena stays in PSRAM and a `WARNING` is printed. In the measuring pass the tensor arena starts at the manifest's `tensor_arena_size` and doubles up to 256 KB if `AllocateTensors` fails; set it to a bit over what `wake info` says is used.
+- **Memory:** both arenas (the tensors, and the model's streaming state) are in internal RAM, after one unexplained "Cache error, MMU entry fault" crash with them in PSRAM in Phase 0. At start the engine builds the model once on roomy PSRAM arenas to measure what `AllocateTensors` really uses (the streaming state's buffers are allocated there too), then rebuilds it on internal arenas of that size plus a quarter (at least 2 KB). If internal RAM is short, an arena stays in PSRAM and a `WARNING` is printed. In the measuring pass the tensor arena starts at the manifest's `tensor_arena_size` and doubles up to 256 KB if `AllocateTensors` fails; set it to a bit over what `wake info` says is used.
 
 ### Feature check (design note, not built yet)
 

@@ -9,10 +9,12 @@
 // Who reads the mic (W2): while the reader runs (any mode but Off) it is the I2S mic's only
 // reader, and it hands each DC-blocked 20 ms frame to whoever the mode says:
 // - Off:    nobody reads; the blocking tests (mic, rec) may.
-// - Wake:   the wake engine (setWakeSink), and the 1.5 s pre-roll ring as history.
+// - Wake:   the wake engine (setWakeSink), and the 3 s pre-roll ring as history.
 // - Hold:   only the pre-roll: a wake was sent, the server hasn't said `listening` yet.
 // - Stream: the link (popMicFrame). Coming from Hold, the pre-roll's kept frames go first
-//           and live frames queue behind them in the ring until it has drained.
+//           and live frames queue behind them in the ring until it has drained. The link
+//           takes frames only in Stream mode, so nothing goes out after `listening` ends.
+// The rules are pure, in include/mic_route.h.
 // So the wake engine and the link never read the mic themselves, and switching between them
 // loses no audio (no flush, the DC blocker keeps running). Only a start from Off flushes.
 // The pre-roll's audio is sent only in that Hold -> Stream backlog, never in Wake mode.
@@ -23,6 +25,8 @@
 // is audio to play.
 #include <stddef.h>
 #include <stdint.h>
+
+#include "mic_route.h"
 
 namespace audio {
 
@@ -53,7 +57,7 @@ void streamStop();  // audio_stop: clear, fade out the block in hand, drop until
 
 // Mic -> wake engine / server.
 constexpr size_t kFrameSamples = kFrameBytes / 2;
-enum class MicMode : uint8_t { Off, Wake, Hold, Stream };
+using MicMode = microute::Mode;
 using MicSink = void (*)(const int16_t* pcm, size_t n, uint32_t seq);
 
 bool startMic();              // the reader task and the pre-roll ring, once; true if running

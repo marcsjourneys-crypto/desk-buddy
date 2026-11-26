@@ -1,5 +1,6 @@
 // Desk Buddy firmware: the robot link (M6) plus the serial test menu from the M5 bring-up.
 #include <Arduino.h>
+#include <esp_system.h>
 
 #include <algorithm>
 #include <iterator>
@@ -31,8 +32,30 @@ void blinkLed() {
   }
 }
 
+const char* resetReason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "reset pin";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "PANIC (crash)";
+    case ESP_RST_INT_WDT: return "interrupt watchdog (crash)";
+    case ESP_RST_TASK_WDT: return "task watchdog (crash)";
+    case ESP_RST_WDT: return "other watchdog (crash)";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT: return "brownout (power dip)";
+    case ESP_RST_SDIO: return "SDIO";
+    case ESP_RST_USB: return "USB";
+    case ESP_RST_JTAG: return "JTAG";
+    case ESP_RST_EFUSE: return "eFuse error";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup (crash)";
+    default: return "unknown";
+  }
+}
+
 void printInfo() {
   Serial.printf("Desk Buddy firmware %s\n", kFwVersion);
+  Serial.printf("Last reset: %s\n", resetReason());
   Serial.printf("Chip: %s rev %d, %d cores @ %lu MHz\n", ESP.getChipModel(),
                 ESP.getChipRevision(), ESP.getChipCores(),
                 static_cast<unsigned long>(ESP.getCpuFreqMHz()));

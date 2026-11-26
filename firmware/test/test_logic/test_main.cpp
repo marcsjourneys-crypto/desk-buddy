@@ -12,6 +12,7 @@
 #include "link_msg.h"
 #include "link_policy.h"
 #include "looks.h"
+#include "mic_route.h"
 #include "pre_roll.h"
 #include "ring_buffer.h"
 #include "servo_math.h"
@@ -889,6 +890,85 @@ void test_build_wake() {
   TEST_ASSERT_EQUAL_STRING("", out);
 }
 
+void test_mic_route_by_mode() {
+  using microute::Dest;
+  using microute::Mode;
+  bool backlog = false;
+  TEST_ASSERT_TRUE(microute::route(Mode::Off, true, 5, backlog) == Dest::Drop);
+  TEST_ASSERT_TRUE(microute::route(Mode::Wake, true, 5, backlog) == Dest::History);
+  TEST_ASSERT_TRUE(microute::route(Mode::Hold, true, 5, backlog) == Dest::Keep);
+  TEST_ASSERT_TRUE(microute::route(Mode::Stream, true, 5, backlog) == Dest::Queue);  // no backlog
+  // Without a pre-roll (no PSRAM): Wake and Hold have nowhere to keep audio.
+  TEST_ASSERT_TRUE(microute::route(Mode::Wake, false, 0, backlog) == Dest::Drop);
+  TEST_ASSERT_TRUE(microute::route(Mode::Hold, false, 0, backlog) == Dest::Drop);
+  TEST_ASSERT_TRUE(microute::feedsEngine(Mode::Wake));
+  TEST_ASSERT_FALSE(microute::feedsEngine(Mode::Hold));
+  TEST_ASSERT_FALSE(microute::feedsEngine(Mode::Stream));
+  TEST_ASSERT_FALSE(microute::feedsEngine(Mode::Off));
+  TEST_ASSERT_TRUE(microute::mayPop(Mode::Stream));
+  TEST_ASSERT_FALSE(microute::mayPop(Mode::Off));
+  TEST_ASSERT_FALSE(microute::mayPop(Mode::Wake));
+  TEST_ASSERT_FALSE(microute::mayPop(Mode::Hold));
+}
+
+void test_mic_route_backlog_drains_once() {
+  using microute::Dest;
+  using microute::Mode;
+  bool backlog = true;
+  // Kept audio waiting: live frames go behind it in the ring.
+  TEST_ASSERT_TRUE(microute::route(Mode::Stream, true, 3, backlog) == Dest::Keep);
+  TEST_ASSERT_TRUE(backlog);
+  // Drained: to the queue, and the backlog is over for good.
+  TEST_ASSERT_TRUE(microute::route(Mode::Stream, true, 0, backlog) == Dest::Queue);
+  TEST_ASSERT_FALSE(backlog);
+  TEST_ASSERT_TRUE(microute::route(Mode::Stream, true, 2, backlog) == Dest::Queue);
+  backlog = true;
+  TEST_ASSERT_TRUE(microute::route(Mode::Stream, false, 0, backlog) == Dest::Queue);  // no ring
+  TEST_ASSERT_FALSE(backlog);
+}
+
+void test_mic_mode_change() {
+  using microute::Mode;
+  microute::Change c = microute::onModeChange(Mode::Hold, Mode::Stream);  // an answered wake
+  TEST_ASSERT_TRUE(c.backlog);
+  TEST_ASSERT_FALSE(c.clearRing);
+  TEST_ASSERT_TRUE(c.resetQueue);
+  c = microute::onModeChange(Mode::Wake, Mode::Stream);  // the PC key from idle
+  TEST_ASSERT_FALSE(c.backlog);
+  TEST_ASSERT_TRUE(c.clearRing);  // wake history is never sent
+  TEST_ASSERT_TRUE(c.resetQueue);
+  c = microute::onModeChange(Mode::Off, Mode::Stream);
+  TEST_ASSERT_FALSE(c.backlog);
+  TEST_ASSERT_TRUE(c.clearRing);
+  c = microute::onModeChange(Mode::Stream, Mode::Off);  // listening ended
+  TEST_ASSERT_FALSE(c.backlog);
+  TEST_ASSERT_TRUE(c.resetQueue);  // no late frames
+  c = microute::onModeChange(Mode::Wake, Mode::Hold);  // a detection: keep the ring
+  TEST_ASSERT_FALSE(c.backlog);
+  TEST_ASSERT_FALSE(c.clearRing);
+  TEST_ASSERT_FALSE(c.resetQueue);
+  c = microute::onModeChange(Mode::Hold, Mode::Wake);  // unanswered
+  TEST_ASSERT_FALSE(c.backlog);
+  TEST_ASSERT_FALSE(c.resetQueue);
+}
+
+void test_mic_keep_from_lead() {
+  TEST_ASSERT_EQUAL_UINT32(100 + 1 - microute::kWakeLeadFrames, microute::keepFromSeq(100));
+  TEST_ASSERT_EQUAL_UINT32(0xFFFFFFF6u, microute::keepFromSeq(4));  // 5 - 15, wrapped
+  // With the ring: a detection while frame 40 was processed keeps 26 on (15 before 41).
+  int16_t store[50 * 2];
+  FrameRing r(store, 50, 2);
+  for (int16_t v = 0; v < 45; v++) pushFrame(r, v);
+  r.keepFrom(microute::keepFromSeq(40));
+  TEST_ASSERT_EQUAL_UINT32(26, r.oldestSeq());
+  TEST_ASSERT_EQUAL_UINT32(19u, r.count());
+  // Right after a start, fewer frames than the lead: all are kept.
+  FrameRing r2(store, 50, 2);
+  for (int16_t v = 0; v < 5; v++) pushFrame(r2, v);
+  r2.keepFrom(microute::keepFromSeq(3));
+  TEST_ASSERT_EQUAL_UINT32(5u, r2.count());
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -967,6 +1047,10 @@ void setup() {
   RUN_TEST(test_wake_parse_threshold);
   RUN_TEST(test_parse_wake_config);
   RUN_TEST(test_build_wake);
+  RUN_TEST(test_mic_route_by_mode);
+  RUN_TEST(test_mic_route_backlog_drains_once);
+  RUN_TEST(test_mic_mode_change);
+  RUN_TEST(test_mic_keep_from_lead);
   UNITY_END();
 }
 
