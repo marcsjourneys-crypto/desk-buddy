@@ -35,18 +35,35 @@ _STATE_SHAPE = (1, 1, 128)
 
 _lock = threading.Lock()
 _session: Any = None
+_failed = False  # a load failed: never tried again (it would block whoever asks)
+
+
+class ModelUnavailable(RuntimeError):
+    """The model failed to load earlier in this process."""
 
 
 def load_model() -> Any:
     """The model's onnxruntime session, loaded once per process (thread-safe). It is the
-    same session faster-whisper's own VAD filter uses, with its options (one thread)."""
-    global _session
+    same session faster-whisper's own VAD filter uses, with its options (one thread).
+    If loading fails, it raises, and every later call raises ModelUnavailable at once."""
+    global _session, _failed
     with _lock:
+        if _failed:
+            raise ModelUnavailable("the end-of-speech model failed to load earlier")
         if _session is None:
-            from faster_whisper.vad import get_vad_model
+            try:
+                from faster_whisper.vad import get_vad_model
 
-            _session = get_vad_model().session
+                _session = get_vad_model().session
+            except Exception:
+                _failed = True
+                raise
         return _session
+
+
+def model_failed() -> bool:
+    """True once a load has failed (the wake word can't work until a restart)."""
+    return _failed
 
 
 class Event(enum.Enum):

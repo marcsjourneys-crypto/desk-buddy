@@ -15,6 +15,7 @@ from desk_buddy.brain.memory import Conversation
 from desk_buddy.events import EventBus
 from desk_buddy.fake_robot import FakeRobot
 from desk_buddy.link.switch import DeviceSwitch
+from desk_buddy.llm import LLMError, LLMRefusal
 from desk_buddy.loop import HandsFree, Orchestrator, State, strip_wake_phrase
 from desk_buddy.server import create_app, start_server
 from desk_buddy.tools.actions import ActionGuard
@@ -369,7 +370,8 @@ class ProposingChat(Chat):
             yield "[happy] It's open."
 
 
-def test_a_yes_in_the_follow_up_window_opens_the_page():
+def yes_rig(words):
+    """A rig whose first question proposes open_search_result (the server then asks)."""
     bus = EventBus()
     guard = ActionGuard(True, bus=bus)
     results = SearchResults()
@@ -379,11 +381,17 @@ def test_a_yes_in_the_follow_up_window_opens_the_page():
     tools = LaunchTools(guard, results=results, confirmations=confirmations, opener=opened.append)
     rig = Rig(
         chat=ProposingChat(tools),
-        transcriber=Transcriber(["Open the first one.", "Yes please."]),
+        transcriber=Transcriber(words),
         confirmations=confirmations,
         search_results=results,
         on_question=guard.new_question,
     )
+    return rig, bus, confirmations, opened
+
+
+def test_a_yes_in_the_follow_up_window_opens_the_page_and_says_so(caplog):
+    caplog.set_level(logging.INFO)
+    rig, bus, confirmations, opened = yes_rig(["Open the first one.", "Yes please."])
 
     async def run():
         async with rig.running() as robot:
@@ -396,6 +404,32 @@ def test_a_yes_in_the_follow_up_window_opens_the_page():
     asyncio.run(run())
     assert opened == [PAGE]
     assert rig.chat.prompts[1].startswith("Yes please. (System note: the server asked")
+    ok = [e for e in bus.recent() if e["type"] == "action" and e["outcome"] == "ok"]
+    assert len(ok) == 1 and ok[0]["result"].endswith("(yes in follow-up)")
+    assert any(
+        m.startswith("Action: open_search_result") and m.endswith("(yes in follow-up)")
+        for m in caplog.messages
+    )
+
+
+def test_a_yes_after_a_wake_is_labelled_too():
+    rig, bus, confirmations, opened = yes_rig(["Open the first one.", "Carl, yes."])
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.press()  # the key asks first
+            await robot.send_audio(silence(0.5))
+            await robot.release()
+            await until(robot, IDLE)  # a key question: no follow-up
+            assert confirmations.pending is not None and confirmations.pending.armed
+            await robot.wake_and_stream(QUESTION)  # "Carl, yes."
+            await until(robot, LISTENING)
+
+    asyncio.run(run())
+    assert opened == [PAGE]
+    assert rig.chat.prompts[1].startswith("yes. (System note: the server asked")
+    ok = [e for e in bus.recent() if e["type"] == "action" and e["outcome"] == "ok"]
+    assert ok[0]["result"].endswith("(yes after wake)")
 
 
 def test_a_wake_with_no_robot_owning_the_mic_is_ignored():
@@ -510,7 +544,233 @@ def test_the_wake_phrase_is_stripped_from_a_wake_question_but_not_a_follow_up():
         ("Carl's book is on the shelf.", "Carl's book is on the shelf."),
         ("Carlos called.", "Carlos called."),
         ("What time is it, Carl?", "What time is it, Carl?"),
+        ("Hi Carl, play some music.", "play some music."),
+        ("Okay, Karl. Pause.", "Pause."),
+        ("OK carl", ""),
+        ("Call.", ""),
+        ("Hey, cal!", ""),
+        ("Call my mum.", "Call my mum."),
+        ("Karl Marx wrote what?", "Marx wrote what?"),  # documented: a real name is lost
     ],
 )
 def test_strip_wake_phrase(heard, question):
     assert strip_wake_phrase(heard) == question
+
+
+# --- bounds and guards ---
+
+
+def test_no_audio_from_the_robot_ends_hands_free_listening(caplog):
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake()
+            await until(robot, LISTENING)
+            return await until(robot, IDLE, timeout=4)  # FRAME_GAP is 1.5 s
+
+    asyncio.run(run())
+    assert "Hands-free listening stopped: no audio from the robot" in caplog.messages
+
+
+def test_hands_free_listening_has_a_wall_clock_limit(caplog):
+    # A limit of 0.1 + 0.1 + 0.1 + 2 s, with no audio and the gap watchdog out of reach.
+    rig = Rig(
+        hands_free=HandsFree(no_speech_timeout=0.1, end_silence=0.1, max_seconds=0.1, frame_gap=100)
+    )
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake()
+            await until(robot, LISTENING)
+            started = asyncio.get_running_loop().time()
+            await until(robot, IDLE, timeout=5)
+            return asyncio.get_running_loop().time() - started
+
+    elapsed = asyncio.run(run())
+    assert 2.0 < elapsed < 3.5
+    assert "Hands-free listening stopped: no audio from the robot" in caplog.messages
+
+
+def test_at_most_three_follow_ups_in_a_row_then_a_wake_starts_again(caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            for _ in range(3):
+                await until(robot, LISTENING)  # follow-ups 1, 2, 3
+                await robot.send_audio(QUESTION)
+            last = await until(robot, IDLE)  # no fourth
+            await asyncio.sleep(2.1)  # past the link's wake limit
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, LISTENING)  # the count was reset: a follow-up again
+            return last
+
+    assert states(asyncio.run(run())) == ["thinking", "speaking", "idle"]
+    assert len(rig.chat.prompts) == 5
+    assert "No follow-up: 3 in a row" in caplog.messages
+    assert len([e for e in rig.of("follow_up") if e["active"]]) == 4
+
+
+class FailingChat(Chat):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    async def stream_reply(self, history, text):
+        self.prompts.append(text)
+        if self.error is not None:
+            raise self.error
+        yield ""
+
+
+@pytest.mark.parametrize("error", [LLMError("down"), LLMRefusal("no")])
+def test_no_follow_up_after_an_error_line_or_a_refusal(error):
+    rig = Rig(chat=FailingChat(error))
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            return await until(robot, IDLE)
+
+    assert states(asyncio.run(run())) == ["thinking", "speaking", "idle"]
+    assert rig.of("follow_up") == []
+
+
+class BrokenTranscriber(Transcriber):
+    def transcribe(self, pcm):
+        raise RuntimeError("whisper fell over")
+
+
+def test_no_follow_up_after_a_turn_that_raised():
+    rig = Rig(transcriber=BrokenTranscriber())
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            return await until(robot, IDLE)
+
+    assert states(asyncio.run(run())) == ["thinking", "idle"]
+    assert rig.of("follow_up") == []
+
+
+def test_broken_settings_ignore_a_wake_and_skip_a_follow_up(caplog):
+    calls = []
+
+    def settings():
+        calls.append(1)
+        if len(calls) == 2:
+            return QUICK
+        raise RuntimeError("bad settings")
+
+    rig = Rig()
+    rig.orch._hands_free = settings
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake()  # the settings can't be read: ignored
+            await poll(lambda: len(calls) == 1)
+            await asyncio.sleep(2.1)
+            await robot.wake_and_stream(QUESTION)
+            return await until(robot, IDLE)  # the follow-up's read fails: idle
+
+    assert states(asyncio.run(run())) == ["thinking", "speaking", "idle"]
+    assert caplog.messages.count("Couldn't read the wake word settings") == 2
+
+
+def test_wakes_are_refused_once_the_model_failed_to_load(monkeypatch, caplog):
+    from desk_buddy import vad
+
+    monkeypatch.setattr(vad, "_failed", True)
+    rig = Rig()
+
+    async def run():
+        async with rig.running():
+            for _ in range(2):
+                await rig.orch.handle("wake 0.99")
+            assert rig.orch.state is State.IDLE
+
+    asyncio.run(run())
+    assert caplog.messages.count("Ignored a wake: the end-of-speech model didn't load") == 1
+
+
+def test_a_failed_model_load_is_never_retried(monkeypatch):
+    import faster_whisper.vad
+
+    from desk_buddy import vad
+
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise OSError("no model file")
+
+    monkeypatch.setattr(vad, "_session", None)
+    monkeypatch.setattr(vad, "_failed", False)
+    monkeypatch.setattr(faster_whisper.vad, "get_vad_model", broken)
+    with pytest.raises(OSError):
+        vad.load_model()
+    with pytest.raises(vad.ModelUnavailable):
+        vad.load_model()
+    assert calls == [1] and vad.model_failed()
+
+
+# --- the robot going away, and the key at other moments ---
+
+
+def test_a_disconnect_mid_wake_goes_idle_and_clears_the_tap():
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(silence(0.5))
+            link = rig.switch.robot
+            assert link.mic.on_frame is not None
+            await robot.close()
+            await poll(lambda: rig.switch.robot is None and rig.orch.state is State.IDLE)
+            return link
+
+    link = asyncio.run(run())
+    assert link.mic.on_frame is None  # through the remembered robot
+    assert rig.transcriber.heard == []
+
+
+def test_a_disconnect_mid_follow_up_goes_idle_and_clears_the_tap():
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, LISTENING)
+            link = rig.switch.robot
+            assert link.mic.on_frame is not None
+            await robot.close()
+            await poll(lambda: rig.switch.robot is None and rig.orch.state is State.IDLE)
+            return link
+
+    link = asyncio.run(run())
+    assert link.mic.on_frame is None
+    assert [(e["active"], e.get("heard")) for e in rig.of("follow_up")] == [
+        (True, None),
+        (False, False),
+    ]
+
+
+def test_a_key_press_in_the_gap_before_the_follow_up_cancels_it():
+    rig = Rig(hands_free=HandsFree(follow_up_delay=1.0))
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, SPEAKING)
+            await asyncio.sleep(0.5)  # the reply (0.1 s) is over; the gap is 1 s
+            await robot.press()
+            await robot.send_audio(silence(0.5))
+            await robot.release()
+            return await until(robot, IDLE)
+
+    frames = asyncio.run(run())
+    assert states(frames) == ["listening", "thinking", "speaking", "idle"]
+    assert rig.of("follow_up") == []  # the key's question gets none either

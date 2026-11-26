@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from desk_buddy import vad
 from desk_buddy.audio import duration_seconds
 from desk_buddy.brain.emotion import DEFAULT_EMOTION, EmotionParser
 from desk_buddy.brain.memory import Conversation, is_forget_command
@@ -43,13 +44,28 @@ FOLLOW_UP_DELAY = 0.7
 # A wake recording starts with ~0.3 s from before the detection (the end of "CARL"):
 # speech there doesn't start a question. Follow-ups have no phrase.
 WAKE_IGNORE_FIRST = 0.3
+MAX_FOLLOW_UPS = 3  # follow-ups in a row; then only a wake or the key
+# Hands-free listening stops if the robot sends no audio for this long, or if it
+# lasts EXTRA_SECONDS longer than the detector could ever take (wall clock).
+FRAME_GAP = 1.5
+EXTRA_SECONDS = 2.0
+# How a yes heard with no key held is labelled on the action (log and dashboard).
+_YES_VIA = {"wake": "yes after wake", "follow_up": "yes in follow-up"}
 # The wake phrase (or the end of it) at the start of a wake-started transcript.
-_WAKE_PHRASE = re.compile(r"^\W*(?:hey\W+)?(?:carl|karl)(?![\w'])\W*", re.IGNORECASE)
+_GREETING = r"(?:(?:hey|hi|okay|ok)\W+)?"
+_WAKE_PHRASE = re.compile(rf"^\W*{_GREETING}(?:carl|karl)(?![\w'])\W*", re.IGNORECASE)
+# A transcript that is only the phrase, as Whisper may hear it ("Call.").
+_ONLY_PHRASE = re.compile(rf"^\W*{_GREETING}(?:carl|karl|call|cal)\W*$", re.IGNORECASE)
 
 
 def strip_wake_phrase(text: str) -> str:
-    """The transcript of a wake-started question without a leading "Hey CARL", "Carl"
-    or "Karl" (any case, with the punctuation after it)."""
+    """The transcript of a wake-started question without a leading "Carl" or "Karl",
+    optionally after "hey", "hi", "okay" or "ok" (any case, with the punctuation after
+    it). Empty if it was only the phrase (also "Call." or "Cal"). A real name at the
+    start is lost too: "Karl Marx wrote..." becomes "Marx wrote...". Only wake-started
+    questions are stripped."""
+    if _ONLY_PHRASE.match(text):
+        return ""
     return _WAKE_PHRASE.sub("", text, count=1).strip()
 
 
@@ -74,14 +90,17 @@ class HandsFreeMic(Mic, Protocol):
 
 @dataclass(frozen=True)
 class HandsFree:
-    """The wake word and follow-up timings, read at each wake and each follow-up."""
+    """The wake word and follow-up settings, read once at each wake and follow-up."""
 
+    enabled: bool = True  # WAKE_WORD: off ignores wakes (and starts no follow-ups)
     follow_up_seconds: float = FOLLOW_UP_SECONDS
     end_silence: float = WAKE_END_SILENCE
     no_speech_timeout: float = WAKE_NO_SPEECH
     max_seconds: float = WAKE_MAX_SECONDS
     follow_up_delay: float = FOLLOW_UP_DELAY
     ignore_first: float = WAKE_IGNORE_FIRST
+    frame_gap: float = FRAME_GAP
+    max_follow_ups: int = MAX_FOLLOW_UPS
 
 
 class Player(Protocol):
@@ -167,6 +186,11 @@ class Orchestrator:
         self._hands_free_gen = 0
         self._events: asyncio.Queue[str] | None = None
         self._posting: set[asyncio.Task[None]] = set()
+        self._settings = HandsFree()  # read at each hands-free start, kept until it ends
+        self._timers: list[asyncio.TimerHandle] = []  # the time limit and the watchdog
+        self._last_frame = 0.0  # loop time of the last robot mic frame
+        self._follow_ups = 0  # follow-up windows in a row
+        self._warned_no_model = False
 
     # --- events ---
 
@@ -188,6 +212,13 @@ class Orchestrator:
         last GREET_GAP seconds; "wake <score>" (the robot heard the wake word) starts a
         hands-free question when idle. The key always wins over hands-free listening."""
         if event == "down":
+            # The robot's mic already dropped the tap when the key began its recording
+            # (RobotMic.begin), so no frame after the press reaches the detector. One
+            # narrow race is left: if the detector ended the question in the same moment
+            # (its "endpoint" is queued before this "down"), the key's begin() emptied
+            # that clip, so the wake question is dropped as a tap and the key's question
+            # goes on as usual. The key still wins.
+            self._follow_ups = 0
             self._stop_hands_free(keep_recording=True, why="the key took over")
             await self._interrupt()
             self.mic.start()
@@ -230,16 +261,34 @@ class Orchestrator:
         if self.state is not State.IDLE or (self._turn and not self._turn.done()):
             log.debug("Ignored a wake (score %.2f): CARL is %s", score, self.state)
             return
-        settings = self._hands_free()
+        if vad.model_failed():
+            if not self._warned_no_model:
+                self._warned_no_model = True
+                log.warning("Ignored a wake: the end-of-speech model didn't load")
+            return
+        settings = self._read_hands_free()
+        if settings is None or not settings.enabled:
+            log.debug("Ignored a wake (score %.2f): the wake word is off", score)
+            return
         if not self._start_hands_free("wake", settings, settings.no_speech_timeout):
             log.debug("Ignored a wake (score %.2f): no robot owns the mic", score)
             return
+        self._follow_ups = 0
         log.info("Wake (score %.2f): listening", score)
         self._publish("wake", score=score)
 
+    def _read_hands_free(self) -> HandsFree | None:
+        try:
+            return self._hands_free()
+        except Exception:
+            log.exception("Couldn't read the wake word settings")
+            return None
+
     def _start_hands_free(self, kind: str, settings: HandsFree, no_speech: float) -> bool:
         """Open the robot's mic with the end-of-speech tap, then go to `listening` (in
-        that order, so the robot's pre-roll isn't dropped). False if it can't."""
+        that order, so the robot's pre-roll isn't dropped). False if it can't. Two
+        wall-clock guards end it if the robot stops sending audio (FRAME_GAP) or it
+        lasts longer than the detector ever could."""
         begin = getattr(self.mic, "begin_hands_free", None)
         if begin is None:
             return False
@@ -260,8 +309,38 @@ class Orchestrator:
             self._endpointer = None
             return False
         self._listening_kind = kind
+        self._settings = settings
+        loop = asyncio.get_running_loop()
+        self._last_frame = loop.time()
+        limit = no_speech + settings.end_silence + settings.max_seconds + EXTRA_SECONDS
+        self._timers = [
+            loop.call_later(limit, self._time_out, gen),
+            loop.call_later(settings.frame_gap, self._watch_frames, gen),
+        ]
         self._set_state(State.LISTENING)
         return True
+
+    def _watch_frames(self, gen: int) -> None:
+        if gen != self._hands_free_gen or self._endpointer is None:
+            return
+        loop = asyncio.get_running_loop()
+        quiet = loop.time() - self._last_frame
+        if quiet >= self._settings.frame_gap:
+            self._time_out(gen)
+        else:
+            self._timers.append(
+                loop.call_later(self._settings.frame_gap - quiet, self._watch_frames, gen)
+            )
+
+    def _time_out(self, gen: int) -> None:
+        if gen != self._hands_free_gen or self._endpointer is None:
+            return
+        self._finish_recording(gen, "timeout")
+
+    def _cancel_timers(self) -> None:
+        timers, self._timers = self._timers, []
+        for timer in timers:
+            timer.cancel()
 
     def _on_frame(self, gen: int, pcm: bytes) -> None:
         """Each recorded robot mic frame, on the event loop. Never raises. A result that
@@ -270,6 +349,7 @@ class Orchestrator:
         endpointer = self._endpointer
         if gen != self._hands_free_gen or endpointer is None:
             return
+        self._last_frame = asyncio.get_running_loop().time()
         try:
             event = endpointer.feed(pcm)
         except Exception:
@@ -281,9 +361,14 @@ class Orchestrator:
             if event not in TERMINAL:
                 return
             name = event.value
-        # The clip ends here, at the frame that ended it (frames that arrive before the
-        # queue gets to the result, such as the rest of a pre-roll burst, aren't added).
+        self._finish_recording(gen, name)
+
+    def _finish_recording(self, gen: int, name: str) -> None:
+        """The clip ends here, at the frame (or moment) that ended it: frames arriving
+        before the queue gets to the result, such as the rest of a pre-roll burst, aren't
+        added. The result goes through the queue, in order with the key's events."""
         self._endpointer = None
+        self._cancel_timers()
         try:
             self.mic.end_hands_free()  # type: ignore[attr-defined]
         except Exception:
@@ -305,7 +390,7 @@ class Orchestrator:
         self._stop_hands_free()
         if name in (Event.END.value, Event.MAX.value):
             if name == Event.MAX.value:
-                log.info("Question cut off at the %.0f s cap", self._hands_free().max_seconds)
+                log.info("Question cut off at the %.0f s cap", self._settings.max_seconds)
             if kind == "follow_up":
                 self._publish("follow_up", active=False, heard=True)
             self._end_question(kind)
@@ -318,6 +403,8 @@ class Orchestrator:
                 self._publish("false_wake")
             elif name == Event.NO_SPEECH.value:
                 log.info("Follow-up ended: no speech")
+            elif name == "timeout":
+                log.warning("Hands-free listening stopped: no audio from the robot")
             else:
                 log.warning("Hands-free listening stopped: end-of-speech detection failed")
             if kind == "follow_up":
@@ -333,6 +420,7 @@ class Orchestrator:
         self._listening_kind = None
         self._endpointer = None
         self._hands_free_gen += 1
+        self._cancel_timers()
         try:
             self.mic.end_hands_free(keep_recording=keep_recording)  # type: ignore[attr-defined]
         except Exception:
@@ -346,17 +434,30 @@ class Orchestrator:
         """After a reply to a hands-free question, listen again for a short while, after
         a short gap. Runs at the end of the turn's task, so a key press (an interrupt)
         cancels it like the reply."""
-        settings = self._hands_free()
-        seconds = settings.follow_up_seconds
-        if seconds <= 0:
+        try:
+            settings = self._read_hands_free()
+            if (
+                settings is None
+                or not settings.enabled
+                or settings.follow_up_seconds <= 0
+                or self._follow_ups >= settings.max_follow_ups
+            ):
+                if settings is not None and self._follow_ups >= settings.max_follow_ups > 0:
+                    log.info("No follow-up: %d in a row", self._follow_ups)
+                self._set_state(State.IDLE)
+                return
+            seconds = settings.follow_up_seconds
+            await asyncio.sleep(settings.follow_up_delay)
+            if not self._start_hands_free("follow_up", settings, seconds):
+                self._set_state(State.IDLE)
+                return
+            self._follow_ups += 1
+            log.info("Follow-up: listening for %.0f s", seconds)
+            self._publish("follow_up", active=True, seconds=seconds)
+        except Exception:
+            log.exception("Couldn't start the follow-up")
+            self._stop_hands_free()
             self._set_state(State.IDLE)
-            return
-        await asyncio.sleep(settings.follow_up_delay)
-        if not self._start_hands_free("follow_up", settings, seconds):
-            self._set_state(State.IDLE)
-            return
-        log.info("Follow-up: listening for %.0f s", seconds)
-        self._publish("follow_up", active=True, seconds=seconds)
 
     async def wait_idle(self) -> None:
         if self._turn:
@@ -494,7 +595,7 @@ class Orchestrator:
                 await self._say(self._line("forget"), token)
                 replied = True
                 return
-            answered = await self._answer_pending(text, question, token)
+            answered = await self._answer_pending(text, question, token, kind)
             # The last question's search results, numbered, so Claude can open one by
             # its number (it never sees earlier questions' raw results).
             listed = self._search_results.note() if self._search_results is not None else None
@@ -518,7 +619,7 @@ class Orchestrator:
                 and self._random() < TASK_DONE_CHANCE
             ):
                 await self._say_extra(self._line("task_done"), token)
-            replied = True
+            replied = not turn.failed  # no follow-up after an error line or a refusal
         except Exception:
             # A TaskGroup failure arrives as an ExceptionGroup, which is an Exception.
             log.exception("Turn failed")
@@ -568,7 +669,9 @@ class Orchestrator:
             notes=[turn.note] if turn.note else [],
         )
 
-    async def _answer_pending(self, text: str, question: int, token: int) -> str | None:
+    async def _answer_pending(
+        self, text: str, question: int, token: int, kind: str | None = None
+    ) -> str | None:
         """Run, cancel or expire an action waiting for a yes, on the user's words only
         (the transcript: nothing Claude, a tool or a web page says). Returns the system
         note that goes after the user's words, or None. Never raises into the turn. A
@@ -578,7 +681,10 @@ class Orchestrator:
         if confirmations is None:
             return None
         # Off the loop: a confirmed action may take a moment (opening a page, a skill).
-        answering = asyncio.ensure_future(asyncio.to_thread(confirmations.answer, text, question))
+        via = _YES_VIA.get(kind) if kind else None
+        answering = asyncio.ensure_future(
+            asyncio.to_thread(confirmations.answer, text, question, via)
+        )
         try:
             try:
                 return await asyncio.wait_for(asyncio.shield(answering), PONDER_AFTER)

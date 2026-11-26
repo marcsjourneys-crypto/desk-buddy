@@ -309,3 +309,13 @@ Plan: `docs/plans/2026-11-26-morning-brief.md`. Where the code ended up differin
 - **Question stamping (review):** every add to `SearchResults` is stamped with its question (`confirm.QUESTION`, inherited by tool threads), and an add from a question that has moved on is dropped, so a late tool thread can't slip pages into the next list. The skill is told its pages can no longer be opened.
 - **`plain_line` drops Cc and Cf characters (review):** besides bidi controls and line breaks, titles (from searches and skills) lose control and format characters such as zero-width spaces, direction marks and BOMs before they reach a note, and a host with no plain site name is dropped.
 - **Privacy is unchanged:** the log and Live tab say "Ran <name> (N links).", and "dropped N pages", never the text or an address.
+
+## 2026-11-26 — Wake word, server side (Phase 1, S1–S3)
+
+Plan: `docs/plans/2026-11-25-wake-word.md`.
+
+- **End of speech: our own streaming endpointer (`vad.py`) on the Silero model faster-whisper ships,** one 32 ms chunk at a time, with Silero's own hysteresis. A question needs 0.25 s of real speech; the first 0.3 s of a wake recording (the end of "CARL" in the robot's pre-roll) never counts. · Alternatives: a new VAD package (a dependency), an energy threshold (noise and tones would count).
+- **A wake-started transcript loses a leading "(hey|hi|okay|ok) Carl/Karl"; only the phrase (or "Call.") is a false wake.** The cost: a question that really starts with the name "Karl" loses it. Follow-ups aren't stripped.
+- **Follow-ups: at most 3 in a row (the user's decision),** none after a failed, refused or interrupted reply; a wake or a key question resets the count.
+- **A yes with no key held stays valid (the user's decision).** A bare "yes" in the follow-up window (or after the wake word) answers a pending `open_search_result`; the action's log line and Live event say `(yes in follow-up)` / `(yes after wake)`. Risk: a TV saying "yes" in the 5 s window opens the page. Acceptable for opening a public page; **revisit before any more powerful yes-action** (scripts, sleep, shutdown). · Alternatives: only a key-held yes; a longer phrase ("yes, open it").
+- **Hands-free listening has wall-clock bounds:** no audio for 1.5 s, or longer than the detector could ever take (timeout + end silence + 15 s + 2 s), ends it.

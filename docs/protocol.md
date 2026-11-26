@@ -72,7 +72,13 @@ The robot runs the detector only while the state is `idle`. On a detection:
 2. If the server accepts the wake (CARL is idle), it sends `state listening`. The robot then streams **the buffered audio first**, then live audio, as 20 ms binary frames as usual. The buffer starts 300 ms before the detection, so a question said in one breath keeps its first word; its first ~300 ms may therefore contain the end of the phrase, which the server handles. Nothing is sent before `state listening`, and nothing after the state leaves `listening`.
 3. The server ends the question itself when the speech ends (about 0.8 s of silence), after 4 s with no speech (a false wake: back to `idle`), or after 15 s at most. It sends `state thinking` (or `idle`) and the robot stops streaming, exactly as after a key release.
 
-A `wake` while CARL isn't idle is ignored, and the robot drops its pre-roll if `state listening` doesn't come. Pressing the PC key during a wake recording takes over as push-to-talk. No audio leaves the robot until the phrase is heard or the key is pressed.
+A `wake` while CARL isn't idle is ignored, and the robot drops its pre-roll if `state listening` doesn't come. Pressing the PC key during a wake recording takes over as push-to-talk. If the robot sends no audio for 1.5 s while the server is listening hands-free, the server gives up and goes `idle`.
+
+### Follow-up
+
+After a reply to a question that started with the wake word (or with a follow-up), the server sends `state listening` again about 0.5 s after the reply's audio ends, and the robot streams as usual: no new message is needed. If nobody speaks within 5 s (`FOLLOW_UP_SECONDS`), it goes back to `idle`; if speech starts, it is a new question, which may last up to 15 s. There are at most 3 follow-ups in a row; then only the wake word or the key starts a question. A reply that was cut off, failed, or refused gets no follow-up.
+
+**Privacy:** audio leaves the robot only after the phrase is heard, while the key is held, or during a follow-up window after a hands-free reply (5 s of listening, up to 15 s if speech starts, at most 3 times in a row).
 
 ## Server → robot
 

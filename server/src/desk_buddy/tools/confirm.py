@@ -215,15 +215,17 @@ class Confirmations:
             self._pending = None
         self._outcome(action, "cancelled", reason, NOT_ASKED)
 
-    def answer(self, text: str, question: int) -> str | None:
+    def answer(self, text: str, question: int, via: str | None = None) -> str | None:
         """The user's words at `question` (the transcript, nothing else): run, cancel or
         expire the pending action. Returns the system notes for Claude (any not yet
         reported first), or None. Blocking (the action may open a page): call it off the
-        event loop."""
+        event loop. `via` says how the words were heard when no key was held ("yes in
+        follow-up", "yes after wake"): a yes that runs the action says so in the log line
+        and on the dashboard."""
         with self._lock:
             action, self._pending = self._pending, None
             earlier, self._unreported = self._unreported, []
-        note = self._answer(action, text, question)
+        note = self._answer(action, text, question, f" ({via})" if via else "")
         return " ".join(n for n in (*earlier, note) if n) or None
 
     def report_late(self, note: str) -> None:
@@ -239,7 +241,9 @@ class Confirmations:
         with self._lock:
             return self._running
 
-    def _answer(self, action: PendingAction | None, text: str, question: int) -> str | None:
+    def _answer(
+        self, action: PendingAction | None, text: str, question: int, via: str = ""
+    ) -> str | None:
         if action is None:
             running = self.running
             if running is not None:  # any words: Claude must not think it's done yet
@@ -272,13 +276,13 @@ class Confirmations:
         try:
             result = action.run()
         except ToolError as exc:
-            self._outcome(action, "failed", str(exc))
+            self._outcome(action, "failed", f"{exc}{via}")
             if action.failed_note is not None:
                 return action.failed_note(exc)
             return failed_note(what, verb)
         except Exception:
             log.exception("Confirmed action %s crashed", action.tool)
-            self._outcome(action, "failed", "The action failed unexpectedly.")
+            self._outcome(action, "failed", f"The action failed unexpectedly.{via}")
             if action.failed_note is not None:
                 return action.failed_note(ActionCrashed("The action failed unexpectedly."))
             return failed_note(what, verb)
@@ -286,7 +290,8 @@ class Confirmations:
             with self._lock:
                 if self._running is action:
                     self._running = None
-        self._outcome(action, "ok", action.shown(result) if action.shown else result)
+        shown = action.shown(result) if action.shown else result
+        self._outcome(action, "ok", f"{shown}{via}")
         if action.ok_note is not None:
             return action.ok_note(result)
         return f"(System note: the server asked and the user said yes; {what} was {verb.done}.)"

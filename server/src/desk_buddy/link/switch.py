@@ -57,6 +57,7 @@ class DeviceSwitch:
 class SwitchedMic:
     def __init__(self, switch: DeviceSwitch, pc: Mic) -> None:
         self._switch, self._pc = switch, pc
+        self._hands_free: Robot | None = None  # the robot whose mic has the tap
 
     def _active(self) -> Mic:
         robot = self._switch.robot
@@ -74,12 +75,14 @@ class SwitchedMic:
             return False
         robot.mic.begin()
         robot.mic.on_frame = on_frame
+        self._hands_free = robot
         return True
 
     def end_hands_free(self, *, keep_recording: bool = False) -> None:
         """Stop passing frames on, and end the recording unless the key has taken it
-        over (keep_recording). The loop then takes the clip with stop()."""
-        robot = self._switch.robot
+        over (keep_recording). The loop then takes the clip with stop(). It acts on the
+        robot that got the tap, even if it has since been detached or replaced."""
+        robot, self._hands_free = self._hands_free, None
         if robot is None:
             return
         robot.mic.on_frame = None
