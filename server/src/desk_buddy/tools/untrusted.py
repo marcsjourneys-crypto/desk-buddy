@@ -10,16 +10,22 @@ from __future__ import annotations
 import html
 import re
 
-_SOURCE = re.compile(r"[a-z_]+")
+# A plain lowercase name, optionally with a ":"-qualifier such as a skill's slug
+# ("skill:hello-time").
+_SOURCE_PATTERN = r"[a-z_]+(?::[a-z0-9-]+)?"
+_SOURCE = re.compile(_SOURCE_PATTERN)
 # An optional plain prefix ("Started playing on Spotify: "), then one untrusted block.
-_WRAPPED = re.compile(r'(.*?)(<untrusted source="[a-z_]+">\n)(.*)(\n</untrusted>)', re.DOTALL)
+_WRAPPED = re.compile(
+    rf'(.*?)(<untrusted source="{_SOURCE_PATTERN}">\n)(.*)(\n</untrusted>)', re.DOTALL
+)
 MORE = "\n(and more)"
 
 
 def wrap(source: str, text: str, limit: int | None = None) -> str:
     """`text`, escaped, inside an untrusted block labelled `source` (a plain lowercase
-    name). With `limit`, the whole result is at most that long: the escaped text is cut
-    (never mid-escape) and ends with "(and more)"."""
+    name, or name:qualifier with lowercase letters, digits and -). With `limit`, the
+    whole result is at most that long: the escaped text is cut (never mid-escape) and ends
+    with "(and more)"."""
     if not _SOURCE.fullmatch(source):
         raise ValueError(f"source must be a plain lowercase name, got {source!r}")
     head, tail = f'<untrusted source="{source}">\n', "\n</untrusted>"
