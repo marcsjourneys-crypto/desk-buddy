@@ -1,7 +1,7 @@
 {
   "name": "Morning brief",
   "spoken_names": ["morning brief", "the news"],
-  "description": "Today's weather and the newest world, AI and robotics headlines, numbered. Use it when the user asks for the morning brief, the news, the headlines or today's weather; pick a section when they ask for only one. The user can then open a headline by its number.",
+  "description": "Today's weather and the newest world, AI and robotics headlines, numbered. Use it when the user asks for the morning brief, the news, the headlines or today's weather; pick a section when they ask for only one. The user can then open a headline by its number. When reporting it, read the weather and every headline, briefly and grouped by section, with their numbers: this is the one time a longer reply is wanted.",
   "inputs": {
     "choices": {
       "section": {
