@@ -33,6 +33,7 @@ server/                 Python brain (uv-managed, src layout)
     link/               robot link: protocol, RobotLink, DeviceSwitch
     server.py           FastAPI app (/robot WebSocket)
     fake_robot.py       fake robot client (tests + voice tool)
+    vad.py              streaming end of speech (Silero) for hands-free questions
     skills_store.py     the user's skills: manifest, fingerprint, approvals
     skills_setup.py     the dashboard's side of skills (view, approve with uv sync, off)
     tools/skills.py     SkillRunner: runs one skill in a clean environment
@@ -41,11 +42,16 @@ server/                 Python brain (uv-managed, src layout)
 examples/skills/        example skills (hello-time, send-note-email, morning-brief); not a uv project
 firmware/               ESP32-S3 firmware (PlatformIO, Arduino framework)
   include/              pins.h + pure-logic headers (ease, eye_model, dsp, servo_math,
-                        dc_block, ring_buffer, backoff, link_msg, link_policy, looks)
+                        dc_block, ring_buffer, backoff, link_msg, link_policy, looks,
+                        wake_logic, wake_mode, pre_roll, mic_route)
   src/                  main.cpp (serial menu), net (Wi-Fi + WebSocket link),
-                        settings (NVS), eyes, audio (incl. streaming tasks), servos
+                        settings (NVS), eyes, audio (incl. streaming tasks and the
+                        mic reader), wake (the wake word engine), servos
+  models/               hey_carl.json (the manifest); the model and its generated
+                        header are gitignored (personal-use training data)
   test/                 Unity tests — they run on the board (`pio test`)
   scripts/serial_cmd.py reset the board, send one command, print the output
+  scripts/model_to_header.py  the wake word model + manifest -> models/hey_carl_model.h
 docs/                   protocol.md, wiring.md, decisions.md, plans/
 ```
 
@@ -64,6 +70,7 @@ docs/                   protocol.md, wiring.md, decisions.md, plans/
 - **Settings precedence: dashboard over `.env` (and the process environment) over defaults.** The dashboard's values live in `%LOCALAPPDATA%\desk-buddy\settings.json` (`settings_store.py`); only non-secret keys are editable (`config.DASHBOARD_KEYS`), validated by `config.py`'s own rules, saved atomically. Turn settings apply at the next question (`LiveSettings.apply` when a turn starts: the `Brain` in `__main__` rebuilds the tools and chat between turns, never during one; the music tools and ducker are made once and then only switched, never replaced); turning computer control off applies at once; TTS speed at the next sentence; speech recognition, the key and the voice after a restart. A saved value that no longer validates is skipped at startup (and shown as invalid on the page, without blocking other edits); if Whisper or the voice won't load with dashboard values, startup retries once without them.
 - Python comes from uv's own builds only (`python-preference = "only-managed"`). The Microsoft Store Python can't open microphones.
 - VAD: Silero VAD — the ONNX model bundled with faster-whisper (`vad_filter`), no PyTorch.
+- **Hands-free listening (the wake word):** `vad.py`'s `Endpointer` runs the same Silero model streaming, one 32 ms chunk at a time, on the robot's mic frames (a tap in `RobotMic`). A question ends after `WAKE_END_SILENCE` (0.8 s) of silence following at least 0.25 s of speech; no speech in 4 s is a false wake; 15 s is the cap. Speech in the first 0.3 s of a wake recording (the end of "CARL") never counts, and a leading "(hey) Carl/Karl" is stripped from the transcript (only the phrase: a false wake). Wall-clock bounds: no audio for 1.5 s, or longer than the detector could take, ends it. After a reply to a hands-free question CARL listens again for `FOLLOW_UP_SECONDS` (5; 0 = off), at most 3 times in a row, never after a failed, refused or interrupted reply. The key always wins. The model loads at startup off the event loop; a failed load refuses wakes. Settings: `WAKE_WORD`, `WAKE_THRESHOLD` (blank: the robot's own), `FOLLOW_UP_SECONDS`, `WAKE_END_SILENCE` (dashboard "Wake word" group).
 - Audio I/O: sounddevice (PortAudio) for the PC mic/speaker.
 - STT: faster-whisper (CTranslate2), int8 on CPU. Start with `base.en`; model size, device (cpu/cuda) and compute type configurable in `.env`.
 - LLM: Anthropic API via the official `anthropic` SDK. Default model `claude-haiku-5-5` for low latency; configurable in `.env`. Stream responses so speech starts before the full reply is done. Provider is pluggable via `LLM_PROVIDER` (only `anthropic` today); OpenAI-compatible providers such as Kimi are planned after M3.
@@ -162,8 +169,9 @@ Anyone (or any TV) near the robot can talk to it.
 
 - One WebSocket at `/robot`. Text frames = JSON control messages. Binary frames = audio, 16 kHz 16-bit mono PCM: 20 ms frames up (mic), **100 ms frames down** (speech; the ESP32's lwIP can't keep up with 20 ms segments).
 - The first frame is `hello {token, fw_version}` within 5 s. `ROBOT_TOKEN` in `.env` (16+ chars; blank = link off); never log it. Close codes: 4001 bad token (or IP blocked), 4002 no valid hello, 4003 replaced by a newer connection (the newest wins), 1011 send-queue overflow. The firmware can't see close codes (library limit), so it infers a refusal from closes < 1 s after hello.
-- Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`, `wake {score}` (0–1, at most one per 2 s; the robot then streams its post-phrase pre-roll once the state is `listening`).
+- Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`, `wake {score}` (0–1, at most one per 2 s; once the state is `listening` the robot streams its pre-roll first, from 300 ms before the detection, then live audio).
 - Server → robot: `welcome`, `wake_config {enabled, threshold?}` (threshold 0.5–0.99, left out when `WAKE_THRESHOLD` is blank; after every `welcome` and at once on a dashboard change), `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
+- **Wake word and follow-up:** the robot detects "Hey CARL" only while idle and sends `wake`; the server ends the question itself (end of speech) and may follow a hands-free reply with a `listening` follow-up window. With `WAKE_WORD` off the server sends `wake_config {enabled: false}` and ignores wakes.
 - While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the CARL window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
 - Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a wake limit (1 per 2 s per connection), a 128-item send queue; bad messages are logged once per burst.
 - Localhost by default (`SERVER_HOST`, `SERVER_PORT`). For the robot: `SERVER_HOST=0.0.0.0` plus a Private-only firewall rule (exact command in `docs/protocol.md`).
@@ -191,6 +199,7 @@ Anyone (or any TV) near the robot can talk to it.
 - Freeze servos while listening so the mic doesn't hear them.
 - Servo motion always eased (no snapping); pan limit about ±60°.
 - Pin map lives in `firmware/include/pins.h` and `docs/wiring.md` — keep them in sync.
+- **Wake word (added 2026-11-26):** a microWakeWord model on TFLite Micro (prebuilt in the core: `esp-tflite-micro` 1.4.0, `esp-nn` 1.3.2) plus TFLM's audio microfrontend (vendored in `lib/microfrontend`). Wake mode runs only while linked, the state is `idle` and the wake word is on, with a 2 s hold-off after any state change. **The mic reader task is the only reader of the I2S mic** while linked; it routes each 20 ms frame to the wake engine and the pre-roll (3 s in PSRAM), or to the link. Both arenas live in **internal RAM** (PSRAM only as a fallback, with a warning) after a Phase 0 crash with them in PSRAM. The model (`models/*.tflite`) and its generated header (`models/*_model.h`) are **gitignored** (trained on personal-use-only data); `scripts/model_to_header.py` regenerates the header. `wake on|off` and `wake threshold` are saved in NVS; the server's `wake_config` overrides them until restart.
 
 ## Roadmap
 
@@ -211,4 +220,5 @@ Anyone (or any TV) near the robot can talk to it.
 - **Local skills** (after M8). The user's own Python scripts, approved on the Apps tab by fingerprint, run by voice in a clean environment, with a spoken "yes" for the powerful ones. (Built 2026-11-26: `docs/plans/2026-11-26-local-skills.md`, examples in `examples/skills/`; the user's check passed 2026-11-26.)
 - **Morning brief** (after local skills). Skills can hand back pages to open (`"pages": true`), and the `morning-brief` example skill gives today's weather and the newest world, AI and robotics headlines, each openable by number after a spoken "yes". (Built 2026-11-26: `docs/plans/2026-11-26-morning-brief.md`; the user's check is pending. Email comes later.)
 - **M9 – Expression library** (after M6). Design and preview eye expressions in the browser and map them to emotions.
-- **Later:** wake word, camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.
+- **Wake word ("Hey CARL").** Detected on the robot (microWakeWord), end of speech and follow-ups on the server. (Done 2026-11-26: `docs/plans/2026-11-25-wake-word.md`; the user's check passed.)
+- **Later:** camera board (XIAO ESP32S3 Sense) for face tracking, "hands" agent for other computers (e.g. a Mac), Raspberry Pi 7" console base.

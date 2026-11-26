@@ -63,7 +63,14 @@ From `../docs/plans/2026-11-25-wake-word.md`: TFLite Micro (prebuilt in Arduino 
 3. `python scripts/model_to_header.py --ops` writes `models/hey_carl_model.h` and lists the model's operators.
 4. Build and flash (`pio run -t upload`).
 
-Without the header the firmware still builds; `wake test` then says there's no model, and wake mode stays off.
+Without the header the firmware still builds; `wake test` then says there's no model, and wake mode stays off. The model and the header are gitignored (the training data is for personal use only), so a fresh clone has neither.
+
+**Retraining** (other spellings, more samples, or after false wakes):
+1. Train in Google Colab with the microWakeWord notebook (`notebooks/basic_training_notebook.ipynb` in `OHF-Voice/micro-wake-word`, or the community one-config notebook), `target_word = "hey carl"`; see Task 0.1 in the plan for the steps. A T4 GPU is faster; the CPU works too.
+2. Download `stream_state_internal_quant.tflite` and copy it to `models/hey_carl.tflite`.
+3. Update `models/hey_carl.json` if the notebook's cutoff, window size or arena size changed.
+4. `python scripts/model_to_header.py --ops` (every operator must be registered; a `MISSING` one needs adding in `src/wake.cpp`).
+5. Rebuild and flash (`pio run -t upload`, from PowerShell, with CARL stopped so COM is free), then check with `wake info` and `wake test` before linking.
 
 ### Wake mode (normal use)
 
@@ -74,7 +81,7 @@ While the robot is linked and CARL is **idle**, the robot listens for "Hey CARL"
 3. **No answer within 2 s** (the server ignored it, e.g. it wasn't idle): the audio is dropped, the eyes go back to the state's look, and listening resumes after 2 s ("unanswered").
 
 - **When it listens:** only while linked, the server's state is `idle`, and the wake word is on. It pauses while listening, thinking and speaking, and ignores detections for **2 s after any state change** (and after each restart of the engine): "ignored" in `net`.
-- **Privacy:** no audio leaves the robot until the phrase is heard or the PC key is pressed. The pre-roll's audio is only ever sent after a detection the server answered.
+- **Privacy:** no audio leaves the robot until the phrase is heard, the PC key is pressed, or the server opens a follow-up window after a hands-free reply (it sends `state listening`, as for any question). The pre-roll's audio is only ever sent after a detection the server answered.
 - **The PC key** works as before, with the wake word on or off.
 
 | Command | Does |

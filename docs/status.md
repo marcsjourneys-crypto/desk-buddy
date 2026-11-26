@@ -2,6 +2,17 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-26 — Wake word done (user check passed)
+
+- **Built:** "Hey CARL" end to end (`docs/plans/2026-11-25-wake-word.md`).
+  - **Robot:** a microWakeWord model on TFLite Micro, listening only while linked and idle; on a detection the eyes open, it sends `wake {score}` and, once the server says `listening`, streams a pre-roll from 300 ms before the detection, then live audio. One mic reader task feeds the wake engine, the pre-roll or the link. Arenas in internal RAM. `wake on|off` and `wake threshold` over serial; the server's `wake_config` overrides them.
+  - **Server:** `wake` and `wake_config` in the protocol; a streaming end-of-speech detector (`vad.py`, Silero); a wake starts a question that ends itself (0.8 s of silence, 4 s with no speech is a false wake, 15 s cap); a follow-up window after hands-free replies (5 s, at most 3 in a row); the key always wins; a "Wake word" group on the dashboard and wake, false wake and follow-up lines on the Live tab.
+- **Tests:** 1955 server tests pass (26 integration tests deselected).
+- **Check by the user: passed 2026-11-26** ("Hey CARL" on the real robot, the follow-up, the key).
+- **Watch:** the Phase 0 crash ("Cache error, MMU entry fault" in `MicroInterpreter::Invoke()`) hasn't recurred since the arenas moved to internal RAM. If the monitor ever shows `Last reset: PANIC`, note what was happening.
+- **Not pushed yet:** everything since `9aceb97` (the local skills check): the local skills follow-ups, the morning brief and the wake word. Push only when the user asks.
+- **Next:** the morning brief check, a TV evening counting false wakes on the Live tab, a write-only Keys section and first-run setup, the servo check, in-page controls, or M9 expressions (a softer follow-up look).
+
 ## 2026-11-26 — Morning brief built (user check pending)
 
 - **Built:**
