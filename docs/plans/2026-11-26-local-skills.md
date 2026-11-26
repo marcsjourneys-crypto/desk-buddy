@@ -60,13 +60,13 @@ CARL runs the user's own Python scripts ("skills") by voice. Examples: "check my
 | `needs_yes` | Optional, default `false`. |
 | `timeout_seconds` | Optional, 1–120, default 30. |
 
-**The fingerprint:**
-- a SHA-256 over the sorted relative paths and the contents of:
-  - `skill.json`;
-  - every `*.py` file in the folder (recursively, skipping `.venv`, `__pycache__` and dot-folders);
-  - `pyproject.toml` and `uv.lock`, if present;
-- `.env` is excluded;
-- at most 200 files and 5 MB in total, or the skill is invalid.
+**The fingerprint:** (revised after review: a `*.py`-only list missed `.pyw`/`.pyd`/`.pyc` files that Python imports, plus `uv.toml` and `.python-version`)
+- a SHA-256 over the sorted relative paths and contents of **every regular file** in the folder, recursively;
+- skipped: `.venv`, `__pycache__` and dot-folders; the only file left out is the top-level `.env`;
+- **links are refused:** a symlink or junction anywhere in the folder makes the skill invalid (`os.walk` doesn't follow directory symlinks, so code behind one would run unhashed);
+- at most 200 files and 5 MB in total, or the skill is invalid. Sizes are checked before a file is read;
+- the manifest is hashed from the same bytes that were parsed.
+- **What it can't cover:** the gate catches edits and updates, such as a `git pull` in a skill folder. It doesn't stop a live local attacker who swaps files between the check and the run. A skill that `exec`s data files is beyond any fingerprint; "Writing a skill" says so.
 
 **Approval:**
 - **Stored in** `%LOCALAPPDATA%\desk-buddy\skills.json` as `[{"slug", "fingerprint"}]`, at most 20 entries, saved atomically. A corrupt file only warns and shows a banner.
@@ -86,8 +86,13 @@ CARL runs the user's own Python scripts ("skills") by voice. Examples: "check my
 - if it isn't found, skills are off, with a warning and a banner.
 
 **The run:**
-- `subprocess.Popen([uv_path, "run", "--no-sync", "main.py"], cwd=folder, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=clean_env, creationflags=CREATE_NO_WINDOW)`, never `shell=True`;
+- `subprocess.Popen([uv_path, "run", "--no-sync", "--no-config", "--no-python-downloads", "--offline", "main.py"], cwd=folder, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=clean_env, creationflags=CREATE_NO_WINDOW)`, never `shell=True`;
 - stdin: `json.dumps({<choice>: <value>, …, "text": <text if given>})` in UTF-8, then closed;
+- **Nothing unhashed in the folder gets executed** (added after the Task 1 review):
+  - the skill's environment lives outside its folder: CARL sets `UV_PROJECT_ENVIRONMENT=%LOCALAPPDATA%\desk-buddy\skill-envs\<slug>` itself (for both `uv sync` and `uv run`), so a `.venv` in the folder is never used;
+  - `PYTHONPYCACHEPREFIX` points at a CARL-owned folder (`%LOCALAPPDATA%\desk-buddy\skill-cache\<slug>`), so a planted `__pycache__` `.pyc` is never loaded;
+  - uv gets `--no-config` (both commands), so no `uv.toml` in the folder or its parents can redirect anything;
+  - `uv run` also gets `--no-python-downloads` and `--offline`.
 - `clean_env` is built from an allowlist only: `SystemRoot`, `SystemDrive`, `WINDIR`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `COMPUTERNAME`, `USERNAME`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`, `COMSPEC`, plus `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`. Every `UV_*` variable is dropped.
 - **The timeout:** `communicate(timeout=…)`. When it's reached, the whole process tree is killed with `[%SystemRoot%\System32\taskkill.exe, "/PID", pid, "/T", "/F"]`, and the run is `failed: timed out`.
 - **One at a time:** a lock, and a second call while one is running is refused ("another skill is running"). Each run happens on a worker thread, so the voice loop never blocks.
@@ -146,7 +151,8 @@ CARL runs the user's own Python scripts ("skills") by voice. Examples: "check my
    - Plus a marked integration test that runs `examples/skills/hello-time` with the real uv.
    - Commit: `Run skills in a clean environment`.
 3. **Dashboard Skills section.**
-   - The API: `GET /api/skills` (the scan, with the status ok, changed, invalid or approved, and any errors); `POST /api/skills/<slug>/approve` (sync + fingerprint); `POST /api/skills/<slug>/disable`.
+   - The API: `GET /api/skills` (the scan, with the status `available`, `approved`, `changed` or `invalid`, and any errors)
+   - Saving an app or bookmark name that clashes with an approved skill's spoken name is refused, with a clear message.; `POST /api/skills/<slug>/approve` (sync + fingerprint); `POST /api/skills/<slug>/disable`.
    - The usual Host, Origin and token checks.
    - The Apps tab gets a Skills section, using `textContent` only.
    - Tests: the API round trip, 403s, a failed sync, no secrets in the responses (a planted `.env` value never appears).

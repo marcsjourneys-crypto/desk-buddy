@@ -3,9 +3,10 @@
 - A skill is a subfolder of SKILLS_DIR. Its name is the slug ([a-z0-9-]{1,40}), and its
   tool will be skill_<slug> with "-" becoming "_". It holds skill.json (the manifest,
   checked here) and main.py; .env (the skill's own secrets) is never read.
-- The fingerprint is a SHA-256 over skill.json, every *.py file (recursively, skipping
-  .venv, __pycache__ and dot-folders), pyproject.toml and uv.lock: a change to any of
-  them switches the skill off until it is approved again.
+- The fingerprint is a SHA-256 over every regular file in the folder (recursively,
+  skipping .venv, __pycache__ and dot-folders), except the top-level .env: a change to
+  any of them switches the skill off until it is approved again. A link (symlink,
+  junction or other reparse point) anywhere in the folder makes the skill invalid.
 - Approvals: %LOCALAPPDATA%\\desk-buddy\\skills.json, [{"slug", "fingerprint"}], at most
   MAX_APPROVED. Saves are atomic; a corrupt file is ignored with a warning and shown as a
   banner, a bad entry in it is skipped.
@@ -21,6 +22,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -59,8 +61,17 @@ FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 # Folders the fingerprint (and so a skill) never looks into, besides dot-folders.
 SKIPPED_DIRS = frozenset({".venv", "__pycache__"})
-# Covered at the top of a skill's folder only (with every *.py file, at any depth).
-TOP_FILES = (MANIFEST, "pyproject.toml", "uv.lock")
+# The skill's own secrets, at the top of its folder: the one file never read or hashed.
+SECRETS_FILE = ".env"
+REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+LINKS_REFUSED = "Links aren't allowed in a skill folder."
+TOO_BIG = f"The files add up to more than {MAX_TOTAL_BYTES // 2**20} MB."
+# Names Windows keeps for devices: a folder can't usefully have one.
+RESERVED_NAMES = frozenset(
+    ["con", "prn", "aux", "nul"]
+    + [f"com{i}" for i in range(1, 10)]
+    + [f"lpt{i}" for i in range(1, 10)]
+)
 
 MANIFEST_KEYS = frozenset(
     {"name", "spoken_names", "description", "inputs", "needs_yes", "timeout_seconds"}
@@ -167,6 +178,8 @@ def check_slug(value: Any) -> str:
         raise ValueError(
             "The folder name must be 1-40 lowercase letters, digits and -, like order-check."
         )
+    if value in RESERVED_NAMES:
+        raise ValueError(f"{value!r} is a name Windows keeps for devices.")
     return value
 
 
@@ -211,6 +224,8 @@ def parse_manifest(data: bytes) -> tuple[Manifest | None, tuple[SkillError, ...]
         return None, (SkillError(MANIFEST, "It must be UTF-8 text."),)
     try:
         raw = json.loads(text, object_pairs_hook=_no_duplicates)
+    except RecursionError:
+        return None, (SkillError(MANIFEST, "It isn't valid JSON (nested too deeply)."),)
     except ValueError as exc:
         return None, (SkillError(MANIFEST, f"It isn't valid JSON ({exc})."),)
     if not isinstance(raw, dict):
@@ -403,43 +418,72 @@ def _text_input(p: _Problems, value: Any) -> TextInput | None:
 # --- the fingerprint ---
 
 
-def covered_files(folder: Path) -> list[tuple[str, Path]]:
-    """The files the fingerprint covers, as (relative path with "/", path), sorted.
-    Raises ValueError past MAX_FILES, OSError if the folder can't be read."""
-    files: dict[str, Path] = {}
-    for name in TOP_FILES:
-        path = folder / name
-        if path.is_file():
-            files[name] = path
-    for root, dirs, names in os.walk(folder, onerror=_raise):
-        dirs[:] = sorted(d for d in dirs if d not in SKIPPED_DIRS and not d.startswith("."))
-        for name in names:
-            if not name.lower().endswith(".py"):
-                continue
-            path = Path(root) / name
-            if not path.is_file():
-                continue
-            rel = path.relative_to(folder).as_posix()
-            files[rel] = path
-            if len(files) > MAX_FILES:
-                raise ValueError(f"More than {MAX_FILES} files to check.")
-    return sorted(files.items())
+def is_link(path: str | os.PathLike[str] | os.DirEntry[str]) -> bool:
+    """A symlink, a junction or any other reparse point: never followed or hashed."""
+    if isinstance(path, os.DirEntry):
+        if path.is_symlink() or path.is_junction():
+            return True
+        st = path.stat(follow_symlinks=False)
+    else:
+        target = Path(path)
+        if target.is_symlink() or target.is_junction():
+            return True
+        st = os.lstat(target)
+    return bool(getattr(st, "st_file_attributes", 0) & REPARSE_POINT)
 
 
-def _raise(exc: OSError) -> None:
-    raise exc
+def covered_files(folder: Path) -> list[tuple[str, Path, int]]:
+    """The files the fingerprint covers, as (relative path with "/", path, size), sorted:
+    every regular file except the top-level .env, skipping .venv, __pycache__ and
+    dot-folders (dot-files count). Raises ValueError for a link anywhere, past MAX_FILES,
+    or once the sizes add up past MAX_TOTAL_BYTES (nothing is read here); OSError if a
+    folder can't be read."""
+    files: list[tuple[str, Path, int]] = []
+    total = 0
+    pending: list[tuple[str, str]] = [(str(folder), "")]
+    while pending:
+        here, prefix = pending.pop()
+        with os.scandir(here) as entries:
+            for entry in entries:
+                if is_link(entry):
+                    raise ValueError(LINKS_REFUSED)
+                rel = prefix + entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in SKIPPED_DIRS and not entry.name.startswith("."):
+                        pending.append((entry.path, rel + "/"))
+                    continue
+                if not entry.is_file(follow_symlinks=False) or rel == SECRETS_FILE:
+                    continue
+                size = entry.stat(follow_symlinks=False).st_size
+                total += size
+                if total > MAX_TOTAL_BYTES:
+                    raise ValueError(TOO_BIG)
+                files.append((rel, Path(entry.path), size))
+                if len(files) > MAX_FILES:
+                    raise ValueError(f"More than {MAX_FILES} files to check.")
+    return sorted(files)
 
 
-def fingerprint(folder: Path) -> str:
-    """SHA-256 over the covered files' relative paths and contents. Raises ValueError past
-    the limits (MAX_FILES, MAX_TOTAL_BYTES), OSError if a file can't be read."""
+def fingerprint(folder: Path, manifest_bytes: bytes | None = None) -> str:
+    """SHA-256 over the covered files' relative paths and contents. With `manifest_bytes`,
+    skill.json is hashed from those exact bytes (the ones that were parsed) instead of
+    being read again. Raises ValueError for a link or past the limits (MAX_FILES,
+    MAX_TOTAL_BYTES), OSError if a file can't be read."""
+    if is_link(folder):
+        raise ValueError(LINKS_REFUSED)
     digest = hashlib.sha256()
     total = 0
-    for rel, path in covered_files(folder):
-        content = path.read_bytes()
+    for rel, path, _size in covered_files(folder):
+        if rel == MANIFEST and manifest_bytes is not None:
+            content = manifest_bytes
+        else:
+            with path.open("rb") as f:
+                # Never more than the budget left, even if the file grew since its size
+                # was checked.
+                content = f.read(MAX_TOTAL_BYTES - total + 1)
         total += len(content)
         if total > MAX_TOTAL_BYTES:
-            raise ValueError(f"The files add up to more than {MAX_TOTAL_BYTES // 2**20} MB.")
+            raise ValueError(TOO_BIG)
         name = rel.encode("utf-8")
         # Lengths first, so no two different sets of files can hash the same bytes.
         digest.update(b"%d:%d:" % (len(name), len(content)))
@@ -461,6 +505,7 @@ def inspect_skill(folder: Path) -> Skill:
     except ValueError as exc:
         errors.append(SkillError("folder", str(exc)))
     manifest: Manifest | None = None
+    data: bytes | None = None
     manifest_file = folder / MANIFEST
     try:
         with manifest_file.open("rb") as f:
@@ -476,7 +521,7 @@ def inspect_skill(folder: Path) -> Skill:
         errors.append(SkillError(ENTRY, "The skill needs a main.py."))
     fp = None
     try:
-        fp = fingerprint(folder)
+        fp = fingerprint(folder, manifest_bytes=data)
     except ValueError as exc:
         errors.append(SkillError("files", str(exc)))
     except OSError as exc:
@@ -491,7 +536,8 @@ def find_clashes(
     """Spoken names a skill shares with another skill, an app or a bookmark, and tool
     names two skills would share: {slug: [errors]}. Every skill in a clash gets one."""
     other = frozenset(other_names)
-    skills = [s for s in skills if s.manifest is not None]
+    # Only skills that are otherwise fine: a broken one can't take a name from a good one.
+    skills = [s for s in skills if s.manifest is not None and not s.errors]
     users: dict[str, list[str]] = {}
     tools: dict[str, list[str]] = {}
     for s in skills:
@@ -528,7 +574,7 @@ class SkillsStore:
         self.approvals_file = approvals_file or skills_path()
         self._lock = threading.Lock()
         self._approved: dict[str, str] = {}  # slug -> fingerprint, in saved order
-        self._warned: set[str] = set()  # scan problems already logged
+        self._logged: frozenset[str] = frozenset()  # the last scan's problems, logged
         self.version = 0
         self.error: str | None = None
         self._read()
@@ -584,7 +630,7 @@ class SkillsStore:
                 if isinstance(exc, (FileNotFoundError, NotADirectoryError))
                 else f"SKILLS_DIR couldn't be read ({type(exc).__name__})"
             )
-            self._warn_once(message)
+            self._log_new((message,))
             return Scan(error=message, enabled=True)
         found = [inspect_skill(folder) for folder in folders]
         clashes = find_clashes(found, other_names)
@@ -616,8 +662,7 @@ class SkillsStore:
                     approved_fp is not None,
                 )
             )
-        for problem in problems:
-            self._warn_once(problem)
+        self._log_new(problems)
         return Scan(tuple(skills), None, True, tuple(problems))
 
     def check(self, skills_dir: str | Path, slug: str) -> Skill | None:
@@ -658,7 +703,7 @@ class SkillsStore:
             raw = json.loads(self.approvals_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             name = self.approvals_file.name
             self._warn(f"{name} couldn't be read ({type(exc).__name__}); no skill is on")
             return
@@ -691,9 +736,12 @@ class SkillsStore:
         self.error = message
         log.warning("Skills: %s", message)
 
-    def _warn_once(self, message: str) -> None:
+    def _log_new(self, problems: Iterable[str]) -> None:
+        """Log the problems the last scan didn't have: one that was fixed and came back is
+        logged again."""
+        current = frozenset(problems)
         with self._lock:
-            if message in self._warned:
-                return
-            self._warned.add(message)
-        log.warning("Skills: %s", message)
+            new = current - self._logged
+            self._logged = current
+        for message in sorted(new):
+            log.warning("Skills: %s", message)

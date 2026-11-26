@@ -85,6 +85,13 @@ def test_bad_slugs(slug):
         check_slug(slug)
 
 
+@pytest.mark.parametrize("slug", ["con", "prn", "aux", "nul", "com1", "com9", "lpt1", "lpt9"])
+def test_windows_device_names_are_not_slugs(slug):
+    with pytest.raises(ValueError, match="Windows"):
+        check_slug(slug)
+    assert check_slug(slug + "-x") == slug + "-x"
+
+
 def test_tool_names_swap_dashes_for_underscores():
     assert tool_name("order-check") == "skill_order_check"
     assert tool_name("hello") == "skill_hello"
@@ -348,6 +355,16 @@ def test_the_manifest_file_itself():
         assert result is None and [e.field for e in errors] == ["skill.json"]
 
 
+@pytest.mark.parametrize("raw", [b"[" * 5000, b'{"a":' * 5000])
+def test_deeply_nested_json_is_invalid_not_a_crash(tmp_path, raw):
+    result, errors = parse_manifest(raw[:MAX_MANIFEST_BYTES])
+    assert result is None and [e.field for e in errors] == ["skill.json"]
+    root = tmp_path / "skills"
+    make_skill(root, "deep", data=raw[:MAX_MANIFEST_BYTES])
+    scan = SkillsStore(tmp_path / "skills.json").scan(root)
+    assert scan.get("deep").status == INVALID
+
+
 def test_the_manifest_is_at_most_16_kb():
     padded = manifest(description="x")
     raw = json.dumps(padded).encode("utf-8")
@@ -401,8 +418,53 @@ def test_the_fingerprint_covers_each_file_but_not_env(tmp_path):
         assert fingerprint(folder) == before
 
     (folder / ".env").write_text("TOKEN=two\n")
-    (folder / "notes.txt").write_text("not code")
     assert fingerprint(folder) == before
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "helper.pyw",
+        "helper.pyd",
+        "x.pyc",  # outside __pycache__, Python imports it
+        "lib/y.pyc",
+        "uv.toml",
+        ".python-version",
+        "data.json",
+        "notes.txt",
+        "lib/.hidden-file",
+        "lib/.env",  # only the top-level .env is left out
+    ],
+)
+def test_every_other_file_changes_the_fingerprint(tmp_path, rel):
+    folder = make_skill(tmp_path)
+    before = fingerprint(folder)
+    path = folder / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"planted")
+    assert fingerprint(folder) != before
+
+
+def test_the_manifest_is_hashed_from_the_bytes_that_were_parsed(tmp_path):
+    folder = make_skill(tmp_path)
+    on_disk = (folder / "skill.json").read_bytes()
+    assert fingerprint(folder, manifest_bytes=on_disk) == fingerprint(folder)
+    other = json.dumps(manifest(name="Other")).encode("utf-8")
+    assert fingerprint(folder, manifest_bytes=other) != fingerprint(folder)
+    # inspect_skill reads skill.json once and hashes what it parsed
+    reads = []
+    real_open = type(folder).open
+
+    def counting_open(self, *args, **kwargs):
+        if self.name == "skill.json":
+            reads.append(self)
+        return real_open(self, *args, **kwargs)
+
+    from unittest import mock
+
+    with mock.patch.object(type(folder), "open", counting_open):
+        s = inspect_skill(folder)
+    assert s.fingerprint == fingerprint(folder) and len(reads) == 1
 
 
 def test_new_or_moved_files_change_the_fingerprint(tmp_path):
@@ -437,7 +499,7 @@ def test_the_fingerprint_is_stable_and_path_aware(tmp_path):
     assert fingerprint(a) != fingerprint(b)
 
 
-def test_at_most_200_files(tmp_path, monkeypatch):
+def test_at_most_200_files(tmp_path):
     folder = make_skill(tmp_path)
     for i in range(198):  # with skill.json and main.py: 200
         (folder / f"m{i}.py").write_text("")
@@ -459,6 +521,22 @@ def test_at_most_5_mb_in_total(tmp_path, monkeypatch):
     (folder / "big.py").write_bytes(b"#" * (1001 - used))
     s = inspect_skill(folder)
     assert s.status == INVALID and [e.field for e in s.errors] == ["files"]
+
+
+def test_a_too_large_file_is_never_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills_store, "MAX_TOTAL_BYTES", 1000)
+    folder = make_skill(tmp_path)
+    (folder / "huge.bin").write_bytes(b"x" * 2000)
+    real_open = type(folder).open
+
+    def guarded_open(self, *args, **kwargs):
+        assert self.name != "huge.bin", "the oversized file was read"
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(folder), "open", guarded_open)
+    with pytest.raises(ValueError, match="MB"):
+        fingerprint(folder)
+    assert [e.field for e in inspect_skill(folder).errors] == ["files"]
 
 
 def test_the_real_size_limit_is_5_mb():
@@ -546,7 +624,9 @@ def test_saves_are_atomic(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == ["skills.json"]  # no temp file left
 
 
-@pytest.mark.parametrize("content", ["{not json", '{"slug": "x"}', "\xff\xfe"])
+@pytest.mark.parametrize(
+    "content", ["{not json", '{"slug": "x"}', "\xff\xfe", "[" * 100000, '{"a":' * 100000]
+)
 def test_a_corrupt_file_is_ignored_with_a_banner(tmp_path, caplog, content):
     path = approvals_file(tmp_path)
     path.write_text(content, encoding="latin-1")
@@ -662,6 +742,20 @@ def test_scan_warnings_are_logged_once(tmp_path, caplog):
     assert store.scan(root).problems == ("broken: name: This can't be empty (1 to 40 characters).",)
 
 
+def test_a_problem_that_comes_back_is_logged_again(tmp_path, caplog):
+    root = tmp_path / "skills"
+    folder = make_skill(root, "flaky")
+    store = SkillsStore(approvals_file(tmp_path))
+    with caplog.at_level(logging.WARNING):
+        (folder / "main.py").unlink()
+        store.scan(root)
+        (folder / "main.py").write_text("")
+        store.scan(root)  # fixed
+        (folder / "main.py").unlink()
+        store.scan(root)  # broken again
+    assert caplog.text.count("flaky: main.py") == 2
+
+
 # --- name clashes ---
 
 
@@ -704,3 +798,71 @@ def test_find_clashes_works_on_its_own(tmp_path):
     assert find_clashes([a, b]) == {}
     clashes = find_clashes([a, b], ["y", "z"])
     assert set(clashes) == {"a", "b"}
+
+
+def test_a_broken_skill_cant_take_a_name_from_a_good_one(tmp_path):
+    root = tmp_path / "skills"
+    make_skill(root, "good", data=manifest(spoken_names=["orders"]))
+    make_skill(root, "broken", data=manifest(spoken_names=["orders"]), main=None)
+    scan = SkillsStore(approvals_file(tmp_path)).scan(root)
+    assert scan.get("good").status == AVAILABLE
+    assert [e.field for e in scan.get("broken").errors] == ["main.py"]
+
+
+# --- links ---
+
+
+def _junction(link, target):
+    """A directory junction, as Windows' mklink /J makes (no admin rights needed)."""
+    _winapi = pytest.importorskip("_winapi")
+    _winapi.CreateJunction(str(target), str(link))
+
+
+def _symlink_dir(link, target):
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError as exc:  # Windows without Developer Mode or admin rights
+        pytest.skip(f"symlinks aren't allowed here ({exc})")
+
+
+@pytest.mark.parametrize("make_link", [_symlink_dir, _junction])
+def test_a_linked_subfolder_makes_the_skill_invalid(tmp_path, make_link):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evil.py").write_text("print('unhashed')\n")
+    folder = make_skill(tmp_path / "skills")
+    make_link(folder / "lib", outside)
+    s = inspect_skill(folder)
+    assert s.status == INVALID and s.fingerprint is None
+    assert [(e.field, e.reason) for e in s.errors] == [
+        ("files", "Links aren't allowed in a skill folder.")
+    ]
+
+
+@pytest.mark.parametrize("make_link", [_symlink_dir, _junction])
+def test_a_link_in_a_skipped_folder_is_refused_too(tmp_path, make_link):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    folder = make_skill(tmp_path / "skills")
+    make_link(folder / ".venv", outside)
+    assert inspect_skill(folder).status == INVALID
+
+
+def test_a_linked_skill_folder_is_invalid(tmp_path):
+    real = make_skill(tmp_path / "elsewhere", "hello")
+    root = tmp_path / "skills"
+    root.mkdir()
+    _junction(root / "hello", real)
+    s = SkillsStore(approvals_file(tmp_path)).scan(root).get("hello")
+    assert s.status == INVALID and s.errors[0].reason == "Links aren't allowed in a skill folder."
+
+
+def test_a_symlinked_file_makes_the_skill_invalid(tmp_path):
+    folder = make_skill(tmp_path / "skills")
+    target = tmp_path / "secret.py"
+    target.write_text("")
+    try:
+        os.symlink(target, folder / "linked.py")
+    except OSError as exc:
+        pytest.skip(f"symlinks aren't allowed here ({exc})")
+    assert inspect_skill(folder).status == INVALID
