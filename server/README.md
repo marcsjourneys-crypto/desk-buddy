@@ -47,7 +47,7 @@ The Python brain for Desk Buddy (Windows). Managed with [uv](https://docs.astral
 
 With the robot connected, say "Hey CARL" and then your question, no key needed. The robot hears the phrase itself, then streams your question; CARL decides when you've finished (about 0.8 s of silence), so you can say it in one breath ("Hey CARL, what's the time?") or pause after the phrase.
 
-- **Follow-up:** after answering a question that started with "Hey CARL", CARL keeps listening for 5 s, so you can ask the next thing without the phrase. If you say nothing it goes back to sleep. At most 3 follow-ups in a row; after an error or a refusal there is none.
+- **Follow-up:** after answering a question that started with "Hey CARL", CARL keeps listening for 5 s, so you can ask the next thing without the phrase. If you say nothing it goes back to sleep. At most 5 follow-ups in a row; after an error or a refusal there is none.
 - **The key always wins:** holding Right Ctrl during a hands-free question or a follow-up takes over, and it still interrupts a reply.
 - **A spoken "yes"** in the follow-up window answers "Shall I open …?" like any other question; the Live tab marks it `(yes in follow-up)`.
 - **Settings** (the dashboard's "Wake word" group, or `.env`):
@@ -55,7 +55,7 @@ With the robot connected, say "Hey CARL" and then your question, no key needed. 
   - `WAKE_THRESHOLD` (0.50–0.99): higher means fewer false wakes but more misses. Blank leaves the robot's own (set over its serial menu); a threshold sent earlier stays until the robot restarts.
   - `FOLLOW_UP_SECONDS` (0–15, 0 turns follow-ups off) and `WAKE_END_SILENCE` (0.4–2.0 s): at the next wake.
 - **Live tab:** each wake (with its score), each false wake (nothing followed, or only the phrase), and follow-ups starting and ending.
-- **Privacy:** the robot sends no audio until it hears the phrase or you press the key, except in a follow-up window after a hands-free reply (5 s of listening, up to 15 s if you speak, at most 3 in a row). Your words then go to the PC, which transcribes them locally; only the text goes to Anthropic, as with the key.
+- **Privacy:** the robot sends no audio until it hears the phrase or you press the key, except in a follow-up window after a hands-free reply (5 s of listening, up to 15 s if you speak, at most 5 in a row). Your words then go to the PC, which transcribes them locally; only the text goes to Anthropic, as with the key.
 - No robot connected: the PC mic stays push-to-talk only.
 
 ## Writing a skill

@@ -592,26 +592,26 @@ def test_hands_free_listening_has_a_wall_clock_limit(caplog):
     assert "Hands-free listening stopped: no audio from the robot" in caplog.messages
 
 
-def test_at_most_three_follow_ups_in_a_row_then_a_wake_starts_again(caplog):
+def test_at_most_five_follow_ups_in_a_row_then_a_wake_starts_again(caplog):
     caplog.set_level(logging.INFO)
     rig = Rig()
 
     async def run():
         async with rig.running() as robot:
             await robot.wake_and_stream(QUESTION)
-            for _ in range(3):
-                await until(robot, LISTENING)  # follow-ups 1, 2, 3
+            for _ in range(5):
+                await until(robot, LISTENING)  # follow-ups 1 to 5
                 await robot.send_audio(QUESTION)
-            last = await until(robot, IDLE)  # no fourth
+            last = await until(robot, IDLE)  # no sixth
             await asyncio.sleep(2.1)  # past the link's wake limit
             await robot.wake_and_stream(QUESTION)
             await until(robot, LISTENING)  # the count was reset: a follow-up again
             return last
 
     assert states(asyncio.run(run())) == ["thinking", "speaking", "idle"]
-    assert len(rig.chat.prompts) == 5
-    assert "No follow-up: 3 in a row" in caplog.messages
-    assert len([e for e in rig.of("follow_up") if e["active"]]) == 4
+    assert len(rig.chat.prompts) == 7
+    assert "No follow-up: 5 in a row" in caplog.messages
+    assert len([e for e in rig.of("follow_up") if e["active"]]) == 6
 
 
 class FailingChat(Chat):

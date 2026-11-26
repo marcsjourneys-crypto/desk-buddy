@@ -46,7 +46,7 @@ FOLLOW_UP_DELAY = 0.15
 # A wake recording starts with ~0.3 s from before the detection (the end of "CARL"):
 # speech there doesn't start a question. Follow-ups have no phrase.
 WAKE_IGNORE_FIRST = 0.3
-MAX_FOLLOW_UPS = 3  # follow-ups in a row; then only a wake or the key
+MAX_FOLLOW_UPS = 5  # follow-ups in a row; then only a wake or the key (the user raised it from 3)
 # Hands-free listening stops if the robot sends no audio for this long, or if it
 # lasts EXTRA_SECONDS longer than the detector could ever take (wall clock).
 FRAME_GAP = 1.5
