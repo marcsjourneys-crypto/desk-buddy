@@ -448,6 +448,10 @@ class Orchestrator:
                 return
             seconds = settings.follow_up_seconds
             await asyncio.sleep(settings.follow_up_delay)
+            again = self._read_hands_free()  # the wake word may have been turned off
+            if again is None or not again.enabled:
+                self._set_state(State.IDLE)
+                return
             if not self._start_hands_free("follow_up", settings, seconds):
                 self._set_state(State.IDLE)
                 return
@@ -457,6 +461,18 @@ class Orchestrator:
         except Exception:
             log.exception("Couldn't start the follow-up")
             self._stop_hands_free()
+            self._set_state(State.IDLE)
+
+    def end_hands_free(self, why: str) -> None:
+        """End a wake recording or a follow-up in progress (the wake word was turned
+        off): the clip is dropped and CARL goes idle. Key recordings and turns are left
+        alone. On the event loop."""
+        if self._listening_kind is None:
+            return
+        self._stop_hands_free(why=why)
+        try:
+            self.mic.stop()  # the clip is dropped
+        finally:
             self._set_state(State.IDLE)
 
     async def wait_idle(self) -> None:

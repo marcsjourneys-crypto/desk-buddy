@@ -173,6 +173,8 @@ async def _run(settings: Settings) -> None:
         live.on_now(lambda old, new: _set_speed(synthesizer, new.tts_speed))
         live.on_now(brain.on_settings_now)  # computer control off: at once
         live.on_now(lambda old, new: send_wake_config(switch, old, new))  # to the robot now
+        main_loop = asyncio.get_running_loop()
+        live.on_now(lambda old, new: stop_when_wake_word_off(main_loop, orchestrator, old, new))
 
         events: asyncio.Queue[str] = asyncio.Queue()
         if settings.robot_token:
@@ -629,6 +631,15 @@ def send_wake_config(switch: DeviceSwitch, old: Settings, new: Settings) -> None
     robot = switch.robot
     if robot is not None:
         robot.send_wake_config(new.wake_word, new.wake_threshold)
+
+
+def stop_when_wake_word_off(
+    loop: asyncio.AbstractEventLoop, orchestrator: Orchestrator, old: Settings, new: Settings
+) -> None:
+    """Turning the wake word off on the dashboard also ends any hands-free listening in
+    progress, on the event loop (the hook may run on another thread)."""
+    if old.wake_word and not new.wake_word:
+        loop.call_soon_threadsafe(orchestrator.end_hands_free, "the wake word was turned off")
 
 
 def _load_vad() -> None:

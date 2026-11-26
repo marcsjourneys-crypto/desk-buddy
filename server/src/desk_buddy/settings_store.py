@@ -84,7 +84,7 @@ EDITABLE: tuple[Editable, ...] = (
         "Wake word",
         AT_ONCE,
         "float",
-        "Detection threshold (0.50-0.99; blank: the robot's own)",
+        "Detection threshold (0.50-0.99; blank: the robot's own, after it restarts)",
     ),
     Editable(
         "FOLLOW_UP_SECONDS",

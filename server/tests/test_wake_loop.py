@@ -774,3 +774,88 @@ def test_a_key_press_in_the_gap_before_the_follow_up_cancels_it():
     frames = asyncio.run(run())
     assert states(frames) == ["listening", "thinking", "speaking", "idle"]
     assert rig.of("follow_up") == []  # the key's question gets none either
+
+
+# --- turning the wake word off on the dashboard ---
+
+
+def turn_off(rig):
+    """What the dashboard's on_now hook does, from __main__."""
+    from desk_buddy.__main__ import stop_when_wake_word_off
+    from desk_buddy.config import Settings
+
+    on, off = (Settings(anthropic_api_key="k", wake_word=w) for w in (True, False))
+    stop_when_wake_word_off(asyncio.get_running_loop(), rig.orch, on, off)
+
+
+def test_turning_the_wake_word_off_ends_a_wake_recording(caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(silence(0.5))
+            link = rig.switch.robot
+            turn_off(rig)
+            frames = await until(robot, IDLE)
+            await robot.send_audio(QUESTION)  # too late: nobody is listening
+            await asyncio.sleep(0.2)
+            return frames, link
+
+    frames, link = asyncio.run(run())
+    assert states(frames) == ["idle"]
+    assert rig.transcriber.heard == [] and rig.of("false_wake") == []
+    assert link.mic.on_frame is None
+    assert "Hands-free listening stopped: the wake word was turned off" in caplog.messages
+
+
+def test_turning_the_wake_word_off_ends_a_follow_up():
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, LISTENING)  # the follow-up
+            turn_off(rig)
+            return await until(robot, IDLE)
+
+    assert states(asyncio.run(run())) == ["idle"]
+    assert len(rig.transcriber.heard) == 1
+    assert [(e["active"], e.get("heard")) for e in rig.of("follow_up")] == [
+        (True, None),
+        (False, False),
+    ]
+
+
+def test_turning_the_wake_word_off_leaves_a_key_recording_alone():
+    rig = Rig()
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.press()
+            await until(robot, LISTENING)
+            turn_off(rig)
+            await asyncio.sleep(0.1)
+            assert rig.orch.state is State.LISTENING
+            await robot.send_audio(silence(0.5))
+            await robot.release()
+            await until(robot, IDLE)
+
+    asyncio.run(run())
+    assert rig.transcriber.heard == [0.5]
+
+
+def test_turning_the_wake_word_off_in_the_gap_skips_the_follow_up():
+    holder = {"hf": HandsFree(follow_up_delay=0.5)}
+    rig = Rig()
+    rig.orch._hands_free = lambda: holder["hf"]
+
+    async def run():
+        async with rig.running() as robot:
+            await robot.wake_and_stream(QUESTION)
+            await until(robot, SPEAKING)
+            holder["hf"] = HandsFree(enabled=False)
+            return await until(robot, IDLE)
+
+    assert states(asyncio.run(run())) == ["idle"]
+    assert rig.of("follow_up") == []
