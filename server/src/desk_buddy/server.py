@@ -40,6 +40,7 @@ BUTTON_RATE = 10.0  # button downs per second, with a burst of BUTTON_BURST (ups
 BUTTON_BURST = 10
 BUTTON_QUIET_SECONDS = 1.0  # a flood is logged again after this long without drops
 WAKE_INTERVAL = 2.0  # at most one wake per this many seconds, per connection
+BAD_MESSAGE_QUIET_SECONDS = 1.0  # a burst of bad messages is logged once per this long
 
 WakeConfig = tuple[bool, float]  # (enabled, threshold) for the robot's wake word
 
@@ -87,6 +88,21 @@ class _AuthThrottle:
                 failures.popleft()
             if not failures:
                 del self._failures[ip]
+
+
+class _BurstLog:
+    """Logs a warning once per burst: again only after `quiet` seconds without one."""
+
+    def __init__(self, clock: Callable[[], float], quiet: float) -> None:
+        self._clock = clock
+        self._quiet = quiet
+        self._last: float | None = None
+
+    def warning(self, msg: str, *args: Any) -> None:
+        now = self._clock()
+        if self._last is None or now - self._last >= self._quiet:
+            log.warning(msg, *args)
+        self._last = now
 
 
 class _WakeLimiter:
@@ -218,7 +234,13 @@ def create_app(
             log.info("Robot connected (firmware %r)", link.fw_version or "unknown")
             bus.publish("robot", connected=True, fw_version=link.fw_version)
             await _receive_loop(
-                ws, link, events, _ButtonLimiter(clock), _WakeLimiter(clock), on_wake
+                ws,
+                link,
+                events,
+                _ButtonLimiter(clock),
+                _WakeLimiter(clock),
+                on_wake,
+                _BurstLog(clock, BAD_MESSAGE_QUIET_SECONDS),
             )
         finally:
             try:
@@ -272,9 +294,11 @@ async def _receive_loop(
     buttons: _ButtonLimiter | None = None,
     wakes: _WakeLimiter | None = None,
     on_wake: Callable[[float], None] = lambda score: None,
+    bad_messages: _BurstLog | None = None,
 ) -> None:
     buttons = buttons or _ButtonLimiter(time.monotonic)
     wakes = wakes or _WakeLimiter(time.monotonic)
+    bad_messages = bad_messages or _BurstLog(time.monotonic, BAD_MESSAGE_QUIET_SECONDS)
     while not link.closed:
         try:
             frame = await ws.receive()
@@ -288,7 +312,7 @@ async def _receive_loop(
         try:
             msg = protocol.parse(frame.get("text") or "")
         except ProtocolError as exc:
-            log.warning("Ignored bad message from robot: %s", exc)
+            bad_messages.warning("Ignored bad message from robot: %s", exc)
             continue
         if msg.type == "button":
             # Only downs are rate-limited. An up always gets through (and costs nothing),

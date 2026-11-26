@@ -102,7 +102,7 @@ def test_speech_starts_then_ends_after_the_trailing_silence():
     events = run(Endpointer(), pcm + silence(3))
     assert [e for e, _ in events] == [Event.SPEECH_START, Event.END]
     started, ended = events[0][1], events[1][1]
-    assert started < 0.5  # measured 0.29 s
+    assert started < 0.7  # measured 0.51 s: 0.25 s after the first speech chunk
     # Measured 4.26 s: the speech ends at 3.46 s, plus 0.8 s. The pause after "Right."
     # doesn't end it, and the end comes within a few chunks of end_silence.
     expected = last_voiced_seconds(pcm) + 0.8
@@ -120,7 +120,7 @@ def test_a_short_end_silence_ends_at_the_pause_after_the_first_word():
 def test_speech_after_a_pause_is_still_heard():
     events = run(Endpointer(), silence(1.5) + speech() + silence(3))
     assert [e for e, _ in events] == [Event.SPEECH_START, Event.END]
-    assert 1.5 < events[0][1] < 2.0
+    assert 1.5 < events[0][1] < 2.2
 
 
 def test_speech_that_starts_too_late_is_no_speech():
@@ -184,6 +184,7 @@ class ScriptedModel:
 
 
 CHUNK = bytes(CHUNK_SAMPLES * 2)
+ONE_CHUNK = CHUNK_SECONDS  # min_speech of one chunk: the logic tests below predate it
 
 
 def feed_chunks(endpointer, n):
@@ -193,7 +194,7 @@ def feed_chunks(endpointer, n):
 def test_hysteresis_like_silero():
     # Speech starts at >= 0.5 only, and a pause starts below 0.35 only.
     model = ScriptedModel([0.49, 0.5, 0.4, 0.4, 0.34])
-    endpointer = Endpointer(model=model)
+    endpointer = Endpointer(model=model, min_speech=ONE_CHUNK)
     assert endpointer.feed(CHUNK) is None
     assert not endpointer.heard_speech
     assert endpointer.feed(CHUNK) is Event.SPEECH_START
@@ -205,7 +206,7 @@ def test_hysteresis_like_silero():
 
 def test_a_pause_ends_only_after_end_silence_below_the_lower_threshold():
     model = ScriptedModel([0.9] + [0.2] * 24 + [0.6] + [0.2] * 25)
-    endpointer = Endpointer(model=model)
+    endpointer = Endpointer(model=model, min_speech=ONE_CHUNK)
     assert endpointer.feed(CHUNK) is Event.SPEECH_START
     assert set(feed_chunks(endpointer, 24)) == {None}  # 24 quiet chunks: not yet
     assert endpointer.feed(CHUNK) is None  # speech again: the pause is over
@@ -217,7 +218,9 @@ def test_a_pause_ends_only_after_end_silence_below_the_lower_threshold():
 
 def test_probabilities_between_the_thresholds_neither_start_nor_end_a_pause():
     model = ScriptedModel([0.9, 0.2] + [0.4] * 30 + [0.2] * 30)
-    endpointer = Endpointer(model=model, no_speech_timeout=100, max_seconds=100)
+    endpointer = Endpointer(
+        model=model, min_speech=ONE_CHUNK, no_speech_timeout=100, max_seconds=100
+    )
     feed_chunks(endpointer, 2)
     assert endpointer.silence_from == CHUNK_SAMPLES
     # In-between chunks don't reset the pause either, so it ends 25 chunks after it began.
@@ -227,7 +230,7 @@ def test_probabilities_between_the_thresholds_neither_start_nor_end_a_pause():
 
 def test_the_model_gets_float_audio_with_the_last_64_samples_as_context():
     model = ScriptedModel([0.0, 0.0])
-    endpointer = Endpointer(model=model)
+    endpointer = Endpointer(model=model, min_speech=ONE_CHUNK)
     ramp = np.arange(2 * CHUNK_SAMPLES, dtype="<i2")
     endpointer.feed(ramp.tobytes())
     first, second = model.inputs
@@ -239,12 +242,74 @@ def test_the_model_gets_float_audio_with_the_last_64_samples_as_context():
 
 def test_a_partial_chunk_waits_for_more_audio():
     model = ScriptedModel([0.9])
-    endpointer = Endpointer(model=model)
+    endpointer = Endpointer(model=model, min_speech=ONE_CHUNK)
     assert endpointer.feed(bytes(1023)) is None
     assert model.inputs == []
     assert endpointer.feed(bytes(1)) is Event.SPEECH_START
 
 
-def test_a_bad_threshold_is_refused():
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"threshold": 0},
+        {"end_silence": 0},
+        {"no_speech_timeout": -1},
+        {"max_seconds": 0},
+        {"min_speech": 0},
+        {"end_silence": float("nan")},
+    ],
+)
+def test_bad_settings_are_refused(kwargs):
     with pytest.raises(ValueError):
-        Endpointer(threshold=0)
+        Endpointer(**kwargs)
+
+
+# --- min_speech: a click or a cough is not a question ---
+
+
+@pytest.mark.parametrize("ms", [64, 128, 200])
+def test_a_short_slice_of_speech_is_no_speech(ms):
+    """A slice from 1.0 s into the fixture, after 1 s of silence. Measured: the 64 and
+    128 ms slices never reach the threshold; the 200 ms one does (see the next test)."""
+    start = SAMPLE_RATE * 2  # bytes: 1.0 s
+    blip = speech()[start : start + SAMPLE_RATE * 2 * ms // 1000]
+    endpointer = Endpointer()
+    assert run(endpointer, silence(1) + blip + silence(5)) == [(Event.NO_SPEECH, 4.0)]
+    assert not endpointer.heard_speech
+
+
+def test_without_min_speech_the_200_ms_slice_would_end_a_question():
+    start = SAMPLE_RATE * 2
+    blip = speech()[start : start + SAMPLE_RATE * 2 * 200 // 1000]
+    events = run(Endpointer(min_speech=ONE_CHUNK), silence(1) + blip + silence(5))
+    assert [e for e, _ in events] == [Event.SPEECH_START, Event.END]
+
+
+def test_speech_counts_only_after_min_speech_without_a_long_pause():
+    # 7 speech chunks (224 ms), a pause of 25 chunks (end_silence) forgets them; then
+    # 8 chunks (256 ms >= 250 ms) are real speech.
+    model = ScriptedModel([0.9] * 7 + [0.1] * 25 + [0.9] * 8)
+    endpointer = Endpointer(model=model)
+    assert set(feed_chunks(endpointer, 32)) == {None}
+    assert endpointer.speech_samples == 0 and not endpointer.speaking
+    assert feed_chunks(endpointer, 8)[-1] is Event.SPEECH_START
+    assert endpointer.heard_speech
+
+
+def test_a_short_pause_doesnt_forget_speech_before_min_speech():
+    model = ScriptedModel([0.9] * 4 + [0.1] * 10 + [0.9] * 4)
+    endpointer = Endpointer(model=model)
+    assert feed_chunks(endpointer, 18)[-1] is Event.SPEECH_START
+
+
+def test_a_possible_start_at_the_timeout_delays_no_speech_by_end_silence_at_most():
+    # 124 quiet chunks, then speech from chunk 124 (3.97 s): it is judged, not cut off.
+    model = ScriptedModel([0.1] * 124 + [0.9] * 8 + [0.1] * 40)
+    endpointer = Endpointer(model=model)
+    events = feed_chunks(endpointer, 132)
+    assert events[-1] is Event.SPEECH_START and Event.NO_SPEECH not in events
+    # In-between probabilities can't hold it off for longer than end_silence.
+    model = ScriptedModel([0.1] * 124 + [0.9] + [0.4] * 40)
+    endpointer = Endpointer(model=model)
+    events = feed_chunks(endpointer, 165)
+    assert events.index(Event.NO_SPEECH) == 149  # 4.8 s: the timeout plus end_silence

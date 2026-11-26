@@ -164,7 +164,7 @@ Anyone (or any TV) near the robot can talk to it.
 - Robot → server: `hello`, `button {action: down|up}` (optional; the M6 robot has no button), `touch`, `stats {data}`, `wake {score}` (0–1, at most one per 2 s; the robot then streams its post-phrase pre-roll once the state is `listening`).
 - Server → robot: `welcome`, `wake_config {enabled, threshold}` (0.5–0.99; right after `welcome` when the server has settings), `state {name}`, `emotion {name}`, `audio_start {rate}`, `audio_end`, `audio_stop`; `look`, `led`, `volume` reserved until the servos and LED are wired.
 - While a robot is connected it owns the mic and speaker (`DeviceSwitch`). The talk button is the PC key (Right Ctrl, in the CARL window), which drives the robot's mic, with a 250 ms release delay. The robot streams its mic exactly while the state is `listening`. Speech is paced at real time, ~200 ms ahead.
-- Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a 128-item send queue.
+- Hardening: per-IP bad-token throttle, a cap on half-open connections, a button-down rate limit, a wake limit (1 per 2 s per connection), a 128-item send queue; bad messages are logged once per burst.
 - Localhost by default (`SERVER_HOST`, `SERVER_PORT`). For the robot: `SERVER_HOST=0.0.0.0` plus a Private-only firewall rule (exact command in `docs/protocol.md`).
 - Server stays the source of truth for state. Robot is dumb and reconnects automatically (back-off 1 s doubling to 30 s).
 

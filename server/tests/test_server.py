@@ -1000,3 +1000,26 @@ def test_wake_config_can_be_sent_to_a_connected_robot():
             await robot.close()
 
     asyncio.run(run())
+
+
+def test_bad_messages_are_logged_once_per_burst(caplog):
+    clock = FakeClock()
+
+    async def run():
+        async with running(clock=clock) as (url, switch, events):
+            robot = FakeRobot(url, TOKEN)
+            await robot.connect()
+            await robot.recv_until("state")
+            for _ in range(5):
+                await robot.send({"type": "dance"})
+            await robot.press()  # a marker: every message before it was handled
+            await poll(lambda: switch.robot.mic._recording)
+            clock.now += server_module.BAD_MESSAGE_QUIET_SECONDS
+            await robot.ws.send("not json")
+            await robot.release()
+            await poll(lambda: not switch.robot.mic._recording)
+            await robot.close()
+
+    asyncio.run(run())
+    bad = [m for m in caplog.messages if m.startswith("Ignored bad message from robot")]
+    assert len(bad) == 2

@@ -8,7 +8,9 @@ The model takes 512 new samples (32 ms at 16 kHz) plus the last 64 samples of th
 before as context, as float32 in [-1, 1], and its state as `h` and `c` (each 1x1x128). It
 returns the speech probability of the chunk. Speech starts when the probability reaches
 `threshold` and pauses when it drops below `threshold - 0.15`, the same hysteresis as
-Silero's own (and faster-whisper's) `get_speech_timestamps`.
+Silero's own (and faster-whisper's) `get_speech_timestamps`. Speech only counts once
+there is `min_speech` (0.25 s) of it without a pause of `end_silence`, so a click or a
+cough after a false wake is NO_SPEECH, never a tiny question for Whisper to fill in.
 
 Cost: one ONNX call per 32 ms of audio, about 0.2 ms on the i7-1355U, so feed() is cheap
 enough to call on the event loop for each 20 ms frame. Only the first use loads the model
@@ -70,11 +72,21 @@ class Endpointer:
         no_speech_timeout: float = 4.0,
         max_seconds: float = 15.0,
         threshold: float = 0.5,
+        min_speech: float = 0.25,
         *,
         model: Any = None,
     ) -> None:
         if not 0 < threshold <= 1:
             raise ValueError("threshold must be in (0, 1]")
+        for name, value in (
+            ("end_silence", end_silence),
+            ("no_speech_timeout", no_speech_timeout),
+            ("max_seconds", max_seconds),
+            ("min_speech", min_speech),
+        ):
+            if not value > 0:  # NaN too
+                raise ValueError(f"{name} must be more than 0")
+        self._min_speech = round(min_speech * SAMPLE_RATE)
         self._end_silence = round(end_silence * SAMPLE_RATE)
         self._no_speech = round(no_speech_timeout * SAMPLE_RATE)
         self._max = round(max_seconds * SAMPLE_RATE)
@@ -90,8 +102,9 @@ class Endpointer:
         self._h = np.zeros(_STATE_SHAPE, dtype=np.float32)
         self._c = np.zeros(_STATE_SHAPE, dtype=np.float32)
         self.samples = 0  # samples judged so far (whole chunks)
-        self.speaking = False  # in speech now (with hysteresis)
-        self.heard_speech = False  # any speech since reset()
+        self.speaking = False  # in speech now (with hysteresis), maybe not yet real speech
+        self.speech_samples = 0  # speech in the current run, until it counts as real
+        self.heard_speech = False  # real speech (at least min_speech of it) since reset()
         self.silence_from: int | None = None  # where the current pause began, in samples
         self.done: Event | None = None  # the terminal event, once there is one
         self.last_probability = 0.0
@@ -99,7 +112,10 @@ class Endpointer:
     def feed(self, pcm: bytes) -> Event | None:
         """Judge every whole 32 ms chunk now buffered. Returns the event it caused, or
         None. If one call causes more than one (a big buffer), a terminal event wins over
-        SPEECH_START; `heard_speech` still tells whether speech started."""
+        SPEECH_START; `heard_speech` still tells whether speech started.
+
+        An error from onnxruntime (or the model failing to load) escapes from here: the
+        caller must catch it and end the recording."""
         if self.done is not None:
             return None
         self._pending += pcm
@@ -124,24 +140,40 @@ class Endpointer:
         event: Event | None = None
         if p >= self._threshold:
             self.silence_from = None
-            if not self.speaking:
-                self.speaking = True
-                if not self.heard_speech:
+            self.speaking = True
+            if not self.heard_speech:
+                # A click or a cough is not a question: speech counts only once there is
+                # min_speech of it, without a pause of end_silence in between.
+                self.speech_samples += CHUNK_SAMPLES
+                if self.speech_samples >= self._min_speech:
                     self.heard_speech = True
                     event = Event.SPEECH_START
         elif p < self._neg_threshold and self.speaking and self.silence_from is None:
             self.silence_from = start
-        if (
+        paused = (
             self.speaking
             and self.silence_from is not None
             and self.samples - self.silence_from >= self._end_silence
-        ):
+        )
+        if paused and self.heard_speech:
             self.speaking = False
             event = Event.END
-        elif not self.heard_speech and self.samples >= self._no_speech:
-            event = Event.NO_SPEECH
-        elif self.samples >= self._max:
-            event = Event.MAX
+        else:
+            if paused:  # too little speech before the pause: forget it
+                self.speaking = False
+                self.silence_from = None
+                self.speech_samples = 0
+            # A possible start that is still being judged delays NO_SPEECH by at most
+            # end_silence, so someone who began just before the timeout isn't cut off.
+            late = self.samples >= self._no_speech + self._end_silence
+            if (
+                not self.heard_speech
+                and self.samples >= self._no_speech
+                and (not self.speaking or late)
+            ):
+                event = Event.NO_SPEECH
+            elif self.samples >= self._max:
+                event = Event.MAX
         if event in TERMINAL:
             self.done = event
         return event

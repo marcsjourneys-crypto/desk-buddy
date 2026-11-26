@@ -113,7 +113,7 @@ state idle
 
 - **Frames are capped at 64 KB.** A larger frame closes the connection (code `1009`).
 - **Pings:** the server pings every 20 s and closes the connection if no pong arrives within 20 s. WebSocket libraries answer pings automatically. The firmware also pings every 15 s and drops the link after two missed pongs (5 s each).
-- **Bad frames are never fatal.** Malformed JSON, an unknown `type` or a bad field is logged and ignored.
+- **Bad frames are never fatal.** Malformed JSON, an unknown `type` or a bad field is ignored, and logged once per burst (again after 1 s without one).
 - **Recording cap:** 30 s per recording.
 - **Shutdown:** on Ctrl+C the server closes connections with `1012` and waits at most 5 s. Closing one link waits at most 2 s.
 
