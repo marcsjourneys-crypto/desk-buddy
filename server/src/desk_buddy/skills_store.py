@@ -474,7 +474,7 @@ def fingerprint(folder: Path, manifest_bytes: bytes | None = None) -> str:
     digest = hashlib.sha256()
     total = 0
     for rel, path, _size in covered_files(folder):
-        if rel == MANIFEST and manifest_bytes is not None:
+        if rel.lower() == MANIFEST and manifest_bytes is not None:
             content = manifest_bytes
         else:
             with path.open("rb") as f:

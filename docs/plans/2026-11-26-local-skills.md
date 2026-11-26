@@ -151,8 +151,8 @@ CARL runs the user's own Python scripts ("skills") by voice. Examples: "check my
    - Plus a marked integration test that runs `examples/skills/hello-time` with the real uv.
    - Commit: `Run skills in a clean environment`.
 3. **Dashboard Skills section.**
-   - The API: `GET /api/skills` (the scan, with the status `available`, `approved`, `changed` or `invalid`, and any errors)
-   - Saving an app or bookmark name that clashes with an approved skill's spoken name is refused, with a clear message.; `POST /api/skills/<slug>/approve` (sync + fingerprint); `POST /api/skills/<slug>/disable`.
+   - The API: `GET /api/skills` (the scan, with the status `available`, `approved`, `changed` or `invalid`, and any errors); `POST /api/skills/<slug>/approve` (sync + fingerprint); `POST /api/skills/<slug>/disable`.
+   - Saving an app or bookmark name that clashes with an approved skill's spoken name is refused, with a clear message.
    - The usual Host, Origin and token checks.
    - The Apps tab gets a Skills section, using `textContent` only.
    - Tests: the API round trip, 403s, a failed sync, no secrets in the responses (a planted `.env` value never appears).
