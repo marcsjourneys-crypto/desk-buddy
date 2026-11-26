@@ -12,10 +12,11 @@
 #include "servos.h"
 #include "settings.h"
 #include "wake.h"
+#include "wake_mode.h"
 
 namespace {
 
-constexpr char kFwVersion[] = "0.2.0-m6";
+constexpr char kFwVersion[] = "0.3.0-wake";
 
 char line[301];  // room for "token " plus a 256-char token
 size_t lineLen = 0;
@@ -61,17 +62,19 @@ void printHelp() {
   Serial.println("  mic                       mic levels for 10 s");
   Serial.println("  rec / play                record 3 s, play it back");
   Serial.println("  servo                     eased pan/tilt sweep");
-  Serial.println("  wake info                 the wake word model: ops, tensors, arena");
+  Serial.println("  wake info                 the wake word model: ops, tensors, arenas, heap");
   Serial.println("  wake test                 detect \"Hey CARL\": HEARD lines, timing, memory, fps");
   Serial.println("  wake raw                  the live score, for tuning");
+  Serial.println("  wake on|off               listen for \"Hey CARL\" while CARL is idle (saved)");
+  Serial.println("  wake threshold <0.50-0.99>  how sure the model must be (saved)");
   Serial.println("Robot link setup (saved on the robot):");
   Serial.println("  wifi <name> <password>    Wi-Fi network; the name can't contain spaces, the");
   Serial.println("                            password is 8-63 chars (no tabs) or - for open");
   Serial.println("  server <host>:<port>      the PC running Buddy, e.g. 192.168.1.20:8765");
   Serial.println("  token <value>             ROBOT_TOKEN from server/.env (16-256 chars)");
-  Serial.println("  config                    show the settings (secrets masked)");
+  Serial.println("  config                    show the settings (secrets masked), wake word");
   Serial.println("  forget                    wipe the Wi-Fi, server and token");
-  Serial.println("  net                       Wi-Fi, link state, reconnects, mic frames, heap");
+  Serial.println("  net                       Wi-Fi, link state, reconnects, mic frames, wake, heap");
 }
 
 // The rest of the line after the command name, trimmed; nullptr if there's nothing.
@@ -114,6 +117,52 @@ void printConfig() {
   } else {
     Serial.printf("token:  %s\n", notSet);
   }
+  const uint8_t th = settings::wakeThreshold();
+  if (th) {
+    Serial.printf("wake:   %s, threshold 0.%02u\n", settings::wakeOn() ? "on" : "off",
+                  static_cast<unsigned>(th));
+  } else {
+    Serial.printf("wake:   %s, threshold %.2f (the model's)\n", settings::wakeOn() ? "on" : "off",
+                  wake::modelCutoff());
+  }
+  if (!wake::haveModel()) Serial.println("        (no wake word model built in)");
+  if (net::wakeFromServer()) Serial.println("        (the server's wake_config overrides these until restart)");
+}
+
+// `wake on|off` and `wake threshold <x>`: saved, and they apply at once (net:: reads them
+// every pass), also while the link is up. Returns false if `arg` isn't one of them.
+bool handleWakeSettings(const char* arg, char* value) {
+  const char* error = nullptr;
+  if (!strcmp(arg, "on") || !strcmp(arg, "off")) {
+    if (value != nullptr) {
+      Serial.println("Usage: wake on|off");
+      return true;
+    }
+    const bool on = !strcmp(arg, "on");
+    error = settings::setWakeOn(on);
+    if (error == nullptr) {
+      Serial.printf("Wake word %s (saved)\n", on ? "on" : "off");
+      if (on && !wake::haveModel()) Serial.println("  but no model is built in (see README)");
+    }
+  } else if (!strcmp(arg, "threshold")) {
+    uint8_t hundredths = 0;
+    if (!wake::parseThreshold(value, &hundredths)) {
+      Serial.println("Usage: wake threshold <0.50-0.99>");
+      return true;
+    }
+    error = settings::setWakeThreshold(hundredths);
+    if (error == nullptr) {
+      Serial.printf("Wake threshold 0.%02u (saved)\n", static_cast<unsigned>(hundredths));
+    }
+  } else {
+    return false;
+  }
+  if (error != nullptr) {
+    Serial.println(error);
+  } else if (net::wakeFromServer()) {
+    Serial.println("  (the server's wake_config overrides it until restart)");
+  }
+  return true;
 }
 
 // `wifi <name> <password>`: the password is everything after the single space that follows
@@ -244,6 +293,11 @@ void runWake(bool raw) {
     Serial.println(error);
     return;
   }
+  if (!audio::startMic()) {
+    Serial.println("Mic: not started");
+    return;
+  }
+  wake::setThreshold(net::wakeThresholdInUse());
   wake::printInfo();
   Serial.printf("Listening for the wake word%s (press any letter to stop)\n",
                 raw ? ", live score" : "");
@@ -251,6 +305,7 @@ void runWake(bool raw) {
   constexpr uint32_t kRawMs = 100;
   constexpr uint32_t kHeardLookMs = 1500;
   eyes::show("thinking");
+  audio::setMicMode(audio::MicMode::Wake);  // the mic reader feeds the engine
   wake::run(true);
   uint32_t lastStats = millis();
   uint32_t lastRaw = lastStats;
@@ -285,22 +340,25 @@ void runWake(bool raw) {
       framesAt = frames;
       lastStats = now;
       Serial.printf(
-          "step %lu us avg, %lu max (%lu steps); frontend %lu us per 10 ms; core 0 load %.0f%%; "
+          "step %lu us avg, %lu max (%lu steps); frontend %lu us per 20 ms; core 0 load %.0f%%; "
           "eyes %.1f fps; heap %lu KB free (min %lu), PSRAM %lu KB free\n",
           static_cast<unsigned long>(st.invokeUsAvg), static_cast<unsigned long>(st.invokeUsMax),
           static_cast<unsigned long>(st.invokes), static_cast<unsigned long>(st.frontendUsAvg),
           st.load * 100, fps, static_cast<unsigned long>(ESP.getFreeHeap() / 1024),
           static_cast<unsigned long>(ESP.getMinFreeHeap() / 1024),
           static_cast<unsigned long>(ESP.getFreePsram() / 1024));
-      if (st.shortReads || st.invokeErrors) {
-        Serial.printf("  short mic reads %lu, failed steps %lu\n",
-                      static_cast<unsigned long>(st.shortReads),
+      if (st.dropped || st.invokeErrors) {
+        Serial.printf("  dropped frames %lu, failed steps %lu\n",
+                      static_cast<unsigned long>(st.dropped),
                       static_cast<unsigned long>(st.invokeErrors));
       }
     }
     delay(1);
   }
   wake::run(false);
+  audio::setMicMode(audio::MicMode::Off);
+  audio::dropPreRoll();
+  audio::waitMicIdle();  // the blocking mic tests may read it again
   eyes::show("sleep");
   Serial.println("Wake test stopped");
 }
@@ -312,7 +370,17 @@ void handle(char* cmd) {
   if (handleSettings(name, raw)) return;
   char* rest = trimmed(raw);
   char* arg = rest ? strtok(rest, " ") : nullptr;
-  // Audio tests would fight the streaming tasks; servo and fps block the loop for seconds.
+  if (!strcmp(name, "wake") && arg != nullptr) {
+    if (handleWakeSettings(arg, trimmed(strtok(nullptr, "")))) return;
+    if (!strcmp(arg, "info")) {  // read-only, so fine while wake mode runs the engine
+      const char* error = wake::begin();
+      wake::printInfo();
+      if (error != nullptr) Serial.println(error);
+      return;
+    }
+  }
+  // Audio tests would fight the streaming tasks (and `wake test` the link's wake mode, which
+  // owns the engine while linked); servo and fps block the loop for seconds.
   const bool blocksLink = !strcmp(name, "tone") || !strcmp(name, "mic") ||
                           !strcmp(name, "rec") || !strcmp(name, "play") ||
                           !strcmp(name, "servo") || !strcmp(name, "fps") ||
@@ -362,14 +430,10 @@ void handle(char* cmd) {
   } else if (!strcmp(name, "play")) {
     runPlay();
   } else if (!strcmp(name, "wake")) {
-    if (arg != nullptr && !strcmp(arg, "info")) {
-      const char* error = wake::begin();
-      wake::printInfo();
-      if (error != nullptr) Serial.println(error);
-    } else if (arg != nullptr && (!strcmp(arg, "test") || !strcmp(arg, "raw"))) {
+    if (arg != nullptr && (!strcmp(arg, "test") || !strcmp(arg, "raw"))) {
       runWake(!strcmp(arg, "raw"));
     } else {
-      Serial.println("Usage: wake info|test|raw");
+      Serial.println("Usage: wake info|test|raw|on|off|threshold <0.50-0.99>");
     }
   } else if (!strcmp(name, "servo")) {
     Serial.println("Servo sweep (press any letter to stop)");
@@ -429,6 +493,10 @@ void setup() {
   if (!audio::beginSpeaker()) Serial.println("Speaker: not started");
   if (!audio::beginMic()) Serial.println("Mic: not started");
   if (!servos::begin()) Serial.println("Servos: not started");
+  // The wake engine takes ~30 KB of internal RAM: claim it before Wi-Fi does, if it's on.
+  if (wake::haveModel() && settings::wakeOn()) {
+    if (const char* error = wake::begin()) Serial.printf("Wake word off: %s\n", error);
+  }
   net::begin(kFwVersion);
   if (!settings::complete()) Serial.println("Robot link: not set up (see 'help')");
   Serial.println("Type 'help' for commands.");

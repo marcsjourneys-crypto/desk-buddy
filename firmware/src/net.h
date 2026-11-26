@@ -11,6 +11,8 @@ void loop();                // every main-loop pass: the link, its state machine
 void restart(bool wifi);    // settings changed: reconnect (and rejoin Wi-Fi if `wifi`)
 void stop();                // settings forgotten: drop the link and leave Wi-Fi
 bool connected();           // a WebSocket is open (the streaming tasks may own the audio)
-void printStatus();         // the `net` command
+void printStatus();         // the `net` command, wake mode included
+bool wakeFromServer();      // the server's wake_config overrides the saved wake settings
+float wakeThresholdInUse(); // the server's, else the saved one, else the model's cutoff
 
 }  // namespace net

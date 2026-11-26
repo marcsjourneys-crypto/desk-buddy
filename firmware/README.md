@@ -39,9 +39,9 @@ Then:
 
 | Command | Shows |
 |---|---|
-| `config` | The settings, with the password and token masked (`****` plus the token's last 2 characters). |
-| `net` | Wi-Fi status, IP and signal strength; the link state (`NoConfig`, `WifiConnecting`, `Connecting`, `WaitingWelcome`, `Linked`, `Backoff`, `Refused`); reconnects; mic frames sent and dropped; free heap. |
-| `forget` | Wipes the Wi-Fi, server and token. |
+| `config` | The settings, with the password and token masked (`****` plus the token's last 2 characters), and the saved wake word settings. |
+| `net` | Wi-Fi status, IP and signal strength; the link state (`NoConfig`, `WifiConnecting`, `Connecting`, `WaitingWelcome`, `Linked`, `Backoff`, `Refused`); reconnects; mic frames sent and dropped; wake mode (see below); free heap. |
+| `forget` | Wipes the Wi-Fi, server and token (not the wake word settings). |
 
 What to expect in the monitor: `Wi-Fi: joining …`, `Wi-Fi connected <ip>`, then `Linked to <server>`, and the eyes wake up. CARL greets the robot unless it only just started. Hold Right Ctrl in the CARL window on the PC to talk.
 
@@ -51,11 +51,11 @@ What to expect in the monitor: `Wi-Fi: joining …`, `Wi-Fi connected <ip>`, the
 - `Wi-Fi: still joining … (network not found)`: check the name (2.4 GHz only). `connect failed (password?)`: check the password.
 - `Can't connect to …, retry in Ns`: CARL isn't running, the IP is wrong, `SERVER_HOST` isn't `0.0.0.0`, or the firewall rule is missing. Without the rule each attempt also hangs for about 5 s.
 - `Server refused the robot (bad token or protocol) - check: token <value>`: the token doesn't match `ROBOT_TOKEN`. After repeated bad tokens the server also blocks the robot's IP for 60 s. The robot retries every 5 minutes, or at once after a new `token` command.
-- While the link is connected, `tone`, `mic`, `rec`, `play`, `servo`, `fps` and `wake` are refused (they would fight the link for the speaker, the mic or the main loop).
+- While the link is connected, `tone`, `mic`, `rec`, `play`, `servo`, `fps`, `wake test` and `wake raw` are refused (they would fight the link for the speaker, the mic, the wake engine or the main loop). `wake info`, `wake on|off` and `wake threshold` work at any time.
 
-## Wake word ("Hey CARL", Phase 0 test)
+## Wake word ("Hey CARL")
 
-The engine test from `../docs/plans/2026-11-25-wake-word.md`: TFLite Micro (prebuilt in Arduino core 3.3.12: `esp-tflite-micro` 1.4.0, `esp-nn` 1.3.2) and TFLM's audio microfrontend (vendored in `lib/microfrontend`, see its README) run a microWakeWord model on the robot. Code: `src/wake.cpp`, logic in `include/wake_logic.h`.
+From `../docs/plans/2026-11-25-wake-word.md`: TFLite Micro (prebuilt in Arduino core 3.3.12: `esp-tflite-micro` 1.4.0, `esp-nn` 1.3.2) and TFLM's audio microfrontend (vendored in `lib/microfrontend`, see its README) run a microWakeWord model on the robot. Code: `src/wake.cpp` (the engine), wake mode in `src/net.cpp`, the mic reader and pre-roll in `src/audio.cpp`; the pure logic in `include/wake_logic.h`, `include/wake_mode.h` and `include/pre_roll.h`.
 
 **Put the model in** (each time it changes), in `firmware/`:
 1. Copy the trained `stream_state_internal_quant.tflite` to `models/hey_carl.tflite`.
@@ -63,15 +63,38 @@ The engine test from `../docs/plans/2026-11-25-wake-word.md`: TFLite Micro (preb
 3. `python scripts/model_to_header.py --ops` writes `models/hey_carl_model.h` and lists the model's operators.
 4. Build and flash (`pio run -t upload`).
 
-Without the header the firmware still builds; `wake test` then says there's no model.
+Without the header the firmware still builds; `wake test` then says there's no model, and wake mode stays off.
+
+### Wake mode (normal use)
+
+While the robot is linked and CARL is **idle**, the robot listens for "Hey CARL" by itself:
+
+1. **It hears the phrase:** the eyes switch to `listening` at once, and the robot sends `{"type": "wake", "score": 0.99}` to the server. `net` counts it under "wakes sent".
+2. **The server answers `state listening`:** the robot streams the audio recorded since the moment of the detection first (up to 1.5 s, faster than real time), then live audio, as with the PC key.
+3. **No answer within 2 s** (the server ignored it, e.g. it wasn't idle): the audio is dropped, the eyes go back to the state's look, and listening resumes after 2 s ("unanswered").
+
+- **When it listens:** only while linked, the server's state is `idle`, and the wake word is on. It pauses while listening, thinking and speaking, and ignores detections for **2 s after any state change** (and after each restart of the engine): "ignored" in `net`.
+- **Privacy:** no audio leaves the robot until the phrase is heard or the PC key is pressed. The pre-roll's audio is only ever sent after a detection the server answered.
+- **The PC key** works as before, with the wake word on or off.
+
+| Command | Does |
+|---|---|
+| `wake on` / `wake off` | Turns wake mode on or off. Saved; on by default once a model is built in. |
+| `wake threshold <0.50-0.99>` | How sure the model must be (the sliding window's mean). Saved. Higher means fewer false wakes but more misses. Until set, the model's own cutoff (0.97) applies. |
+
+- Both apply at once, and also while linked. **The server can override both** with `wake_config` (sent after `welcome`, from the dashboard): the override lasts until the robot restarts and isn't saved. `config` shows the saved values, `net` the ones in use and where they came from (`saved`, `server` or `model`).
+- `net` shows wake mode as `listening`, `listening (holding off)`, `heard, waiting for the server`, `paused (state …)`, `paused (no link)`, `off`, `no model built in` or `engine failed`, plus the counters: wakes sent, unanswered, ignored.
+- The engine starts at boot when the wake word is on (it takes ~30 KB of internal RAM, so it claims it before Wi-Fi), or the first time it's turned on later.
+
+**Who reads the mic.** One task, the mic reader (`audio.cpp`), is the only reader of the I2S mic while the link is up. It hands each 20 ms frame to whoever the mode says: the wake engine plus the pre-roll ring (idle), only the pre-roll (a wake was sent, waiting for the server), or the link (listening; after a wake, the pre-roll's kept frames go first and live frames queue behind them). The wake engine and the link never read the mic themselves, so they can't overlap, and switching between them loses no audio. `wake test`/`wake raw` use the same reader while the link is down.
 
 | Command | Shows |
 |---|---|
 | `wake info` | The model: wake word, size, operators (a missing one is marked `MISSING`), input/output shape and quantisation; each arena's size, use and place (internal RAM, or PSRAM as a fallback); the internal heap before and after the engine started, and now. |
-| `wake test` | `HEARD (score 0.98)` on each detection (the eyes flash surprised), and every 3 s: model step time (avg, max), frontend time per 10 ms, core 0 load, eye fps, free heap and PSRAM. Any letter stops it. |
+| `wake test` | `HEARD (score 0.98)` on each detection (the eyes flash surprised), and every 3 s: model step time (avg, max), frontend time per 20 ms frame, core 0 load, eye fps, free heap and PSRAM. Any letter stops it. Uses the threshold in use (see above). |
 | `wake raw` | The model's probability and the window's score 10 times a second, for tuning the cutoff. |
 
-- `wake` is refused while the robot link is connected (the link owns the mic). Nothing fires for 2 s after a start, a detection or (later) a state change.
+- `wake test` and `wake raw` are refused while the robot link is connected (wake mode owns the engine and the mic then). Nothing fires for 2 s after a start or a detection.
 - The eyes play the animated "thinking" look during the test, so the fps shows what detection costs them (the cap is ~30 fps; the target is ≥ 20).
 - **Memory:** both arenas (the tensors, and the model's streaming state) are in internal RAM, after one unexplained "Cache error, MMU entry fault" crash with them in PSRAM in Phase 0. At start the engine builds the model once on roomy PSRAM arenas to measure what it really uses (one step included), then rebuilds it on internal arenas of that size plus 1/8 (at least 512 bytes). If internal RAM is short, an arena stays in PSRAM and a `WARNING` is printed. In the measuring pass the tensor arena starts at the manifest's `tensor_arena_size` and doubles up to 256 KB if `AllocateTensors` fails; set it to a bit over what `wake info` says is used.
 

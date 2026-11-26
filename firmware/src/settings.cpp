@@ -8,6 +8,7 @@
 namespace {
 
 constexpr char kNamespace[] = "buddy";
+constexpr char kWakeNamespace[] = "wake";  // not wiped by forget()
 constexpr char kSaveFailed[] = "Couldn't save the setting (NVS error)";
 constexpr size_t kMinToken = 16;
 constexpr size_t kMaxToken = 256;
@@ -17,6 +18,8 @@ char passBuf[65];  // WPA2: an 8-63 char passphrase or a 64-hex-digit key; empty
 char hostBuf[64];
 char tokenBuf[kMaxToken + 1];
 uint16_t portVal = 0;
+bool wakeOnVal = true;
+uint8_t wakeThresholdVal = 0;
 
 // Copies, truncating to fit; the setters have already checked the length.
 void copy(char* dst, size_t cap, const char* src) {
@@ -66,6 +69,12 @@ void load() {
   readString(p, "token", tokenBuf, sizeof(tokenBuf));
   portVal = p.getUShort("port", 0);
   p.end();
+  Preferences w;
+  if (!w.begin(kWakeNamespace, false)) return;
+  wakeOnVal = w.getBool("on", true);
+  const uint8_t t = w.getUChar("threshold", 0);
+  wakeThresholdVal = t >= 50 && t <= 99 ? t : 0;
+  w.end();
 }
 
 const char* ssid() { return ssidBuf; }
@@ -141,6 +150,30 @@ const char* forget() {
   if (!cleared) return kSaveFailed;
   ssidBuf[0] = passBuf[0] = hostBuf[0] = tokenBuf[0] = '\0';
   portVal = 0;
+  return nullptr;
+}
+
+bool wakeOn() { return wakeOnVal; }
+uint8_t wakeThreshold() { return wakeThresholdVal; }
+
+const char* setWakeOn(bool on) {
+  Preferences p;
+  if (!p.begin(kWakeNamespace, false)) return kSaveFailed;
+  const bool saved = p.putBool("on", on) == 1;
+  p.end();
+  if (!saved) return kSaveFailed;
+  wakeOnVal = on;
+  return nullptr;
+}
+
+const char* setWakeThreshold(uint8_t hundredths) {
+  if (hundredths < 50 || hundredths > 99) return "Threshold must be 0.50-0.99";
+  Preferences p;
+  if (!p.begin(kWakeNamespace, false)) return kSaveFailed;
+  const bool saved = p.putUChar("threshold", hundredths) == 1;
+  p.end();
+  if (!saved) return kSaveFailed;
+  wakeThresholdVal = hundredths;
   return nullptr;
 }
 

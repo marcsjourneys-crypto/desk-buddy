@@ -15,6 +15,7 @@
 #include <esp_memory_utils.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,8 +25,8 @@
 #include <new>
 
 #include "audio.h"
-#include "dc_block.h"
 #include "wake_logic.h"
+#include "wake_mode.h"
 
 // The model is optional at build time: scripts/model_to_header.py writes this header.
 #if __has_include("../models/hey_carl_model.h")
@@ -45,7 +46,6 @@ namespace {
 // *FillConfigWithDefaults() values in lib/microfrontend (TFLM 5d5a2e9); all are set
 // explicitly here so nothing depends on a default changing.
 constexpr int kSampleRate = 16000;
-constexpr size_t kFrameSamples = kSampleRate / 100;  // 10 ms = the frontend's step
 constexpr int kChannels = 40;
 
 bool startFrontend(FrontendState* state) {
@@ -162,18 +162,28 @@ int stride = 0;  // feature frames per model step (the input's second dimension)
 FrontendState frontend;
 wake::Detector detector(kCutoff, kWindow);
 
+// The mic reader (audio.cpp) -> the wake task: 20 ms frames with their pre-roll numbers.
+struct Frame {
+  uint32_t seq;
+  int16_t pcm[audio::kFrameSamples];
+};
+constexpr UBaseType_t kFeedDepth = 8;  // 160 ms: rides out a slow model step
+QueueHandle_t feedQueue = nullptr;
+
 // Task <-> main loop.
 std::atomic<bool> wanted{false};
-std::atomic<uint32_t> idleTicks{0};  // bumped each time the task sees !wanted
+std::atomic<float> threshold{kCutoff};  // replaces the manifest's cutoff (setThreshold)
 std::atomic<float> lastProbability{0};
 std::atomic<float> lastScore{0};
 std::atomic<uint32_t> detections{0};
 std::atomic<float> detectedScore{0};
+std::atomic<uint32_t> detectedSeq{0};  // the frame being processed when it fired
+std::atomic<uint32_t> fedDrops{0};     // frames the full queue refused
 uint32_t seenDetections = 0;  // main loop only
 
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 struct Totals {
-  uint32_t frames, invokes, invokeErrors, shortReads;
+  uint32_t frames, invokes, invokeErrors;
   uint64_t invokeUs, frontendUs;
   uint32_t invokeUsMax;
 };
@@ -342,8 +352,9 @@ float readProbability() {
   }
 }
 
-// One feature frame into the input; a model step once `stride` frames are in.
-void onFeatures(const uint16_t* f, int slot, Totals& t) {
+// One feature frame into the input; a model step once `stride` frames are in. `seq` is the
+// mic frame it came from.
+void onFeatures(const uint16_t* f, int slot, uint32_t seq, Totals& t) {
   if (input->type == kTfLiteInt8) {
     int8_t* dst = input->data.int8 + slot * kChannels;
     const float scale = input->params.scale;
@@ -368,72 +379,69 @@ void onFeatures(const uint16_t* f, int slot, Totals& t) {
   lastProbability = p;
   if (detector.step(p, millis())) {
     detectedScore = detector.detectedScore();
-    detections++;
+    detectedSeq = seq;
+    detections++;  // last: takeDetection() reads the score and seq once it sees this
   }
   lastScore = detector.score();
 }
 
+// Processes the frames the mic reader feeds (it never reads the mic itself). While not
+// wanted it throws frames away; each restart begins with a fresh frontend and a hold-off.
 void wakeTask(void*) {
-  int16_t pcm[kFrameSamples];
-  DcBlocker dc;
+  static Frame frame;  // one task, and keeps 644 bytes off its stack
   bool active = false;
-  bool seed = false;
   int slot = 0;
   for (;;) {
+    const bool got = xQueueReceive(feedQueue, &frame, pdMS_TO_TICKS(20)) == pdTRUE;
     if (!wanted.load()) {
       active = false;
-      idleTicks++;
-      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
+    if (!got) continue;
     if (!active) {
-      audio::flushMic();
       FrontendReset(&frontend);
       slot = 0;
-      seed = true;
       // The model's streaming state still holds the end of the last run; the hold-off
       // gives it time to fill with fresh audio before anything can fire.
       detector.holdOff(millis());
       active = true;
     }
+    detector.setCutoff(threshold.load());
     Totals t = {};
-    if (audio::readMic(pcm, kFrameSamples) != kFrameSamples) {
-      t.shortReads++;
-      vTaskDelay(pdMS_TO_TICKS(10));
-    } else {
-      // The INMP441 has a DC offset that the training audio didn't.
-      if (seed) {
-        dc.reset(pcm[0]);
-        seed = false;
+    t.frames = 1;
+    const int16_t* p = frame.pcm;
+    size_t left = audio::kFrameSamples;
+    while (left > 0) {
+      size_t used = 0;
+      const int64_t f0 = esp_timer_get_time();
+      const FrontendOutput out = FrontendProcessSamples(&frontend, p, left, &used);
+      t.frontendUs += esp_timer_get_time() - f0;
+      p += used;
+      left -= used;
+      if (out.size == static_cast<size_t>(kChannels)) {
+        onFeatures(out.values, slot, frame.seq, t);
+        slot = (slot + 1) % stride;
       }
-      dc.processBlock(pcm, kFrameSamples);
-      t.frames = 1;
-      const int16_t* p = pcm;
-      size_t left = kFrameSamples;
-      while (left > 0) {
-        size_t used = 0;
-        const int64_t f0 = esp_timer_get_time();
-        const FrontendOutput out = FrontendProcessSamples(&frontend, p, left, &used);
-        t.frontendUs += esp_timer_get_time() - f0;
-        p += used;
-        left -= used;
-        if (out.size == static_cast<size_t>(kChannels)) {
-          onFeatures(out.values, slot, t);
-          slot = (slot + 1) % stride;
-        }
-        if (used == 0) break;
-      }
+      if (used == 0) break;
     }
     portENTER_CRITICAL(&statsMux);
     totals.frames += t.frames;
     totals.invokes += t.invokes;
     totals.invokeErrors += t.invokeErrors;
-    totals.shortReads += t.shortReads;
     totals.invokeUs += t.invokeUs;
     totals.frontendUs += t.frontendUs;
     if (t.invokeUsMax > totals.invokeUsMax) totals.invokeUsMax = t.invokeUsMax;
     portEXIT_CRITICAL(&statsMux);
   }
+}
+
+// The mic reader's sink (its task, core 1): never blocks; a full queue drops the frame.
+void feed(const int16_t* pcm, size_t n, uint32_t seq) {
+  if (!wanted.load() || n != audio::kFrameSamples) return;
+  Frame f;
+  f.seq = seq;
+  memcpy(f.pcm, pcm, sizeof(f.pcm));
+  if (xQueueSend(feedQueue, &f, 0) != pdTRUE) fedDrops++;
 }
 
 const char* start() {
@@ -455,10 +463,13 @@ const char* start() {
   if (const char* e = allocate()) return e;
   if (const char* e = checkTensors()) return e;
   if (!startFrontend(&frontend)) return fail("Wake: the microfrontend didn't start (memory?)");
+  feedQueue = xQueueCreate(kFeedDepth, sizeof(Frame));
+  if (feedQueue == nullptr) return fail("Wake: no memory for the frame queue");
   if (xTaskCreatePinnedToCore(wakeTask, "wake", kTaskStack, nullptr, kTaskPriority, nullptr,
                               kTaskCore) != pdPASS) {
     return fail("Wake: couldn't start the task");
   }
+  audio::setWakeSink(feed);
   ready = true;
   return nullptr;
 }
@@ -495,8 +506,9 @@ const char* begin() {
 
 void printInfo() {
   Serial.printf("Wake word: %s (model %u bytes)\n", kWakeWord, static_cast<unsigned>(kModelBytes));
-  Serial.printf("  cutoff %.2f, window %u steps, cooldown %lu ms\n", kCutoff,
-                static_cast<unsigned>(kWindow), static_cast<unsigned long>(kCooldownMs));
+  Serial.printf("  cutoff %.2f (in use %.2f), window %u steps, cooldown %lu ms\n", kCutoff,
+                threshold.load(), static_cast<unsigned>(kWindow),
+                static_cast<unsigned long>(kCooldownMs));
   if (model != nullptr && model->operator_codes() != nullptr) {
     Serial.print("  ops:");
     for (const auto* code : *model->operator_codes()) {
@@ -522,20 +534,23 @@ void printInfo() {
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 }
 
+bool ready() { return ::ready; }
+
+float modelCutoff() { return kCutoff; }
+
+void setThreshold(float t) {
+  if (validThreshold(t)) threshold = t;
+}
+
+float currentThreshold() { return threshold.load(); }
+
 void run(bool on) {
-  if (!ready) return;
+  if (!::ready || on == wanted.load()) return;
   if (on) {
-    seenDetections = detections.load();
-    takeStats();  // start the counters now
-    wanted = true;
-    return;
+    seenDetections = detections.load();  // nothing from an earlier run counts
+    takeStats();                         // start the counters now
   }
-  if (!wanted.load()) return;
-  const uint32_t ticks = idleTicks.load();
-  wanted = false;
-  // The task bumps idleTicks only after it has seen !wanted, so from then on it's off the mic.
-  const uint32_t start = millis();
-  while (idleTicks.load() == ticks && millis() - start < 500) delay(2);
+  wanted = on;
 }
 
 bool running() { return wanted.load(); }
@@ -553,7 +568,7 @@ Stats takeStats() {
   s.frames = t.frames;
   s.invokes = t.invokes;
   s.invokeErrors = t.invokeErrors;
-  s.shortReads = t.shortReads;
+  s.dropped = fedDrops.exchange(0);
   s.invokeUsAvg = t.invokes ? static_cast<uint32_t>(t.invokeUs / t.invokes) : 0;
   s.invokeUsMax = t.invokeUsMax;
   s.frontendUsAvg = t.frames ? static_cast<uint32_t>(t.frontendUs / t.frames) : 0;
@@ -565,11 +580,12 @@ float probability() { return lastProbability.load(); }
 
 float score() { return lastScore.load(); }
 
-bool takeDetection(float* out) {
+bool takeDetection(float* out, uint32_t* seq) {
   const uint32_t n = detections.load();
   if (n == seenDetections) return false;
   seenDetections = n;
   if (out != nullptr) *out = detectedScore.load();
+  if (seq != nullptr) *seq = detectedSeq.load();
   return true;
 }
 

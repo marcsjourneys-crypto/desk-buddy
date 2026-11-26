@@ -12,9 +12,11 @@
 #include "link_msg.h"
 #include "link_policy.h"
 #include "looks.h"
+#include "pre_roll.h"
 #include "ring_buffer.h"
 #include "servo_math.h"
 #include "wake_logic.h"
+#include "wake_mode.h"
 
 void setUp() {}
 void tearDown() {}
@@ -605,6 +607,288 @@ void test_wake_dequantize() {
   TEST_ASSERT_EQUAL_FLOAT(1.0f, wake::dequantize(300, 1.0f / 256, 0));
 }
 
+
+// --- Wake mode (W2): the pre-roll ring, the gate, the threshold, the messages.
+
+// Frames of 2 samples, each filled with its own number, so a pop shows which one it was.
+void pushFrame(FrameRing& r, int16_t v, bool* overwrote = nullptr) {
+  const int16_t f[2] = {v, v};
+  r.push(f, overwrote);
+}
+
+int16_t popFrame(FrameRing& r) {
+  int16_t f[2] = {-1, -1};
+  if (!r.pop(f)) return -1;
+  TEST_ASSERT_EQUAL_INT16(f[0], f[1]);
+  return f[0];
+}
+
+void test_pre_roll_order_and_seq() {
+  int16_t store[3 * 2];
+  FrameRing r(store, 3, 2);
+  int16_t f[2] = {7, 7};
+  TEST_ASSERT_EQUAL_UINT32(0, r.push(f));
+  TEST_ASSERT_EQUAL_UINT32(1, r.push(f));
+  TEST_ASSERT_EQUAL_UINT32(2u, r.count());
+  TEST_ASSERT_EQUAL_UINT32(0, r.oldestSeq());
+  TEST_ASSERT_EQUAL_UINT32(2, r.nextSeq());
+  TEST_ASSERT_EQUAL_INT16(7, popFrame(r));
+  TEST_ASSERT_EQUAL_UINT32(1, r.oldestSeq());
+  TEST_ASSERT_EQUAL_INT16(7, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(-1, popFrame(r));  // empty
+}
+
+void test_pre_roll_overwrites_oldest() {
+  int16_t store[3 * 2];
+  FrameRing r(store, 3, 2);
+  bool lost = true;
+  for (int16_t v = 10; v < 13; v++) {
+    pushFrame(r, v, &lost);
+    TEST_ASSERT_FALSE(lost);
+  }
+  pushFrame(r, 13, &lost);  // full: 10 goes
+  TEST_ASSERT_TRUE(lost);
+  pushFrame(r, 14, &lost);  // and 11
+  TEST_ASSERT_TRUE(lost);
+  TEST_ASSERT_EQUAL_UINT32(3u, r.count());
+  TEST_ASSERT_EQUAL_UINT32(2, r.oldestSeq());  // frames 2, 3, 4 = values 12, 13, 14
+  TEST_ASSERT_EQUAL_INT16(12, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(13, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(14, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(-1, popFrame(r));
+}
+
+void test_pre_roll_keep_from() {
+  int16_t store[5 * 2];
+  FrameRing r(store, 5, 2);
+  for (int16_t v = 0; v < 7; v++) pushFrame(r, v);  // holds 2..6 (seq = value)
+  r.keepFrom(1);                                    // older than what's there: no change
+  TEST_ASSERT_EQUAL_UINT32(5u, r.count());
+  r.keepFrom(4);  // a detection while frame 3 was processed: keep 4 on
+  TEST_ASSERT_EQUAL_UINT32(3u, r.count());
+  TEST_ASSERT_EQUAL_UINT32(4, r.oldestSeq());
+  pushFrame(r, 7);  // the reader carries on behind them
+  TEST_ASSERT_EQUAL_INT16(4, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(5, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(6, popFrame(r));
+  TEST_ASSERT_EQUAL_INT16(7, popFrame(r));
+  for (int16_t v = 8; v < 11; v++) pushFrame(r, v);
+  r.keepFrom(50);  // from the future: everything goes
+  TEST_ASSERT_EQUAL_UINT32(0u, r.count());
+  TEST_ASSERT_EQUAL_UINT32(11, r.nextSeq());
+}
+
+void test_pre_roll_clear_keeps_numbering() {
+  int16_t store[4 * 2];
+  FrameRing r(store, 4, 2);
+  for (int16_t v = 0; v < 3; v++) pushFrame(r, v);
+  r.clear();
+  TEST_ASSERT_EQUAL_UINT32(0u, r.count());
+  TEST_ASSERT_EQUAL_UINT32(3, r.oldestSeq());
+  int16_t f[2] = {9, 9};
+  TEST_ASSERT_EQUAL_UINT32(3, r.push(f));
+  TEST_ASSERT_EQUAL_INT16(9, popFrame(r));
+}
+
+void test_pre_roll_seq_wraps() {
+  int16_t store[4 * 2];
+  FrameRing r(store, 4, 2, 0xFFFFFFFEu);
+  for (int16_t v = 0; v < 4; v++) pushFrame(r, v);  // seq FFFFFFFE, FFFFFFFF, 0, 1
+  TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFEu, r.oldestSeq());
+  r.keepFrom(0);  // across the wrap: drops the two before it
+  TEST_ASSERT_EQUAL_UINT32(2u, r.count());
+  TEST_ASSERT_EQUAL_INT16(2, popFrame(r));
+  r.keepFrom(0xFFFFFFFFu);  // now in the past: no change
+  TEST_ASSERT_EQUAL_UINT32(1u, r.count());
+  TEST_ASSERT_EQUAL_INT16(3, popFrame(r));
+}
+
+void test_wake_gate_mic_by_state() {
+  using wake::Mic;
+  using wake::Server;
+  wake::Gate g;
+  g.setEnabled(true);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Off);  // no link
+  g.onLink(true, 1000);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Off);  // no state yet
+  g.onState(Server::Idle, 1000);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Wake);
+  g.onState(Server::Listening, 2000);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Stream);
+  g.onState(Server::Other, 3000);  // thinking, speaking
+  TEST_ASSERT_TRUE(g.mic() == Mic::Off);
+  g.onState(Server::Idle, 4000);
+  g.setEnabled(false);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Off);
+  g.onState(Server::Listening, 5000);  // push-to-talk works with the wake word off
+  TEST_ASSERT_TRUE(g.mic() == Mic::Stream);
+  g.onLink(false, 6000);
+  TEST_ASSERT_TRUE(g.mic() == Mic::Off);
+}
+
+void test_wake_gate_hold_off_after_state_change() {
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0);
+  g.onState(wake::Server::Idle, 10000);
+  TEST_ASSERT_FALSE(g.accepts(10000));
+  TEST_ASSERT_FALSE(g.onDetection(11999));  // ignored: 1999 ms after the change
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Wake);
+  TEST_ASSERT_TRUE(g.accepts(12000));
+  g.onState(wake::Server::Idle, 12500);  // a repeated state counts as a change too
+  TEST_ASSERT_FALSE(g.accepts(14000));
+  TEST_ASSERT_TRUE(g.onDetection(14500));
+  TEST_ASSERT_TRUE(g.pending());
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Hold);
+  TEST_ASSERT_FALSE(g.onDetection(14600));  // not twice
+}
+
+void test_wake_gate_not_while_busy() {
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0);
+  g.onState(wake::Server::Other, 0);
+  TEST_ASSERT_FALSE(g.onDetection(60000));  // thinking/speaking: never
+  g.onState(wake::Server::Listening, 60000);
+  TEST_ASSERT_FALSE(g.onDetection(90000));
+  g.setEnabled(false);
+  g.onState(wake::Server::Idle, 90000);
+  TEST_ASSERT_FALSE(g.onDetection(99000));  // off
+}
+
+void test_wake_gate_answer() {
+  using wake::Answer;
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0);
+  g.onState(wake::Server::Idle, 0);
+  TEST_ASSERT_TRUE(g.onDetection(5000));
+  TEST_ASSERT_TRUE(g.onState(wake::Server::Listening, 5300) == Answer::Listening);
+  TEST_ASSERT_FALSE(g.pending());
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Stream);
+  TEST_ASSERT_TRUE(g.onState(wake::Server::Other, 9000) == Answer::None);  // nothing pending
+  g.onState(wake::Server::Idle, 20000);
+  TEST_ASSERT_TRUE(g.onDetection(25000));
+  // The server was busy and ignored it: any other state ends the wait.
+  TEST_ASSERT_TRUE(g.onState(wake::Server::Idle, 25100) == Answer::Other);
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Wake);
+  TEST_ASSERT_FALSE(g.accepts(26000));  // and a fresh hold-off
+}
+
+void test_wake_gate_expires() {
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0);
+  g.onState(wake::Server::Idle, 0);
+  TEST_ASSERT_TRUE(g.onDetection(3000));
+  TEST_ASSERT_FALSE(g.expire(4999));
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Hold);
+  TEST_ASSERT_TRUE(g.expire(5000));
+  TEST_ASSERT_FALSE(g.expire(5001));  // once
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Wake);
+  TEST_ASSERT_FALSE(g.accepts(6999));  // hold-off from the expiry
+  TEST_ASSERT_TRUE(g.accepts(7000));
+}
+
+void test_wake_gate_link_drop_clears_pending() {
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0);
+  g.onState(wake::Server::Idle, 0);
+  TEST_ASSERT_TRUE(g.onDetection(3000));
+  g.onLink(false, 3100);
+  TEST_ASSERT_FALSE(g.pending());
+  TEST_ASSERT_FALSE(g.expire(9000));
+  g.onLink(true, 9000);
+  TEST_ASSERT_TRUE(g.mic() == wake::Mic::Off);  // until the server says idle
+}
+
+void test_wake_gate_survives_millis_wrap() {
+  wake::Gate g;
+  g.setEnabled(true);
+  g.onLink(true, 0xFFFFF000u);
+  g.onState(wake::Server::Idle, 0xFFFFFF00u);
+  TEST_ASSERT_FALSE(g.accepts(0x00000100u));  // 512 ms later
+  TEST_ASSERT_TRUE(g.onDetection(0x00000800u));  // 2304 ms later
+  TEST_ASSERT_FALSE(g.expire(0x00000800u + 1999));
+  TEST_ASSERT_TRUE(g.expire(0x00000800u + 2000));
+}
+
+void test_wake_server_from_name() {
+  TEST_ASSERT_TRUE(wake::serverFromName("idle") == wake::Server::Idle);
+  TEST_ASSERT_TRUE(wake::serverFromName("listening") == wake::Server::Listening);
+  TEST_ASSERT_TRUE(wake::serverFromName("thinking") == wake::Server::Other);
+  TEST_ASSERT_TRUE(wake::serverFromName("sleeping") == wake::Server::Other);
+  TEST_ASSERT_TRUE(wake::serverFromName(nullptr) == wake::Server::None);
+}
+
+void test_wake_parse_threshold() {
+  uint8_t h = 0;
+  TEST_ASSERT_TRUE(wake::parseThreshold("0.97", &h));
+  TEST_ASSERT_EQUAL_UINT8(97, h);
+  TEST_ASSERT_TRUE(wake::parseThreshold(".5", &h));
+  TEST_ASSERT_EQUAL_UINT8(50, h);
+  TEST_ASSERT_TRUE(wake::parseThreshold("0.99", &h));
+  TEST_ASSERT_EQUAL_UINT8(99, h);
+  TEST_ASSERT_TRUE(wake::parseThreshold("0.904", &h));  // rounded
+  TEST_ASSERT_EQUAL_UINT8(90, h);
+  h = 0;
+  const char* bad[] = {"", "0.49", "1", "1.0", "0.995", "-0.9", "+0.9", "0.9x", "x", "nan",
+                       "0.9.1", "9e-1", " 0.9", "."};
+  for (const char* b : bad) {
+    TEST_ASSERT_FALSE_MESSAGE(wake::parseThreshold(b, &h), b);
+  }
+  TEST_ASSERT_FALSE(wake::parseThreshold(nullptr, &h));
+  TEST_ASSERT_EQUAL_UINT8(0, h);  // untouched on failure
+  TEST_ASSERT_TRUE(wake::validThreshold(0.5f));
+  TEST_ASSERT_TRUE(wake::validThreshold(0.99f));
+  TEST_ASSERT_FALSE(wake::validThreshold(0.4f));
+  TEST_ASSERT_FALSE(wake::validThreshold(NAN));
+}
+
+void test_parse_wake_config() {
+  using linkmsg::Msg;
+  linkmsg::Parsed m = parse("{\"type\":\"wake_config\",\"enabled\":true,\"threshold\":0.97}");
+  TEST_ASSERT_TRUE(m.type == Msg::WakeConfig);
+  TEST_ASSERT_TRUE(m.hasEnabled && m.enabled);
+  TEST_ASSERT_TRUE(m.hasThreshold);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.97f, m.threshold);
+  m = parse("{\"type\":\"wake_config\",\"enabled\":false}");
+  TEST_ASSERT_TRUE(m.type == Msg::WakeConfig);
+  TEST_ASSERT_TRUE(m.hasEnabled && !m.enabled);
+  TEST_ASSERT_FALSE(m.hasThreshold);
+  m = parse("{\"type\":\"wake_config\",\"threshold\":0.5}");
+  TEST_ASSERT_TRUE(m.type == Msg::WakeConfig);
+  TEST_ASSERT_FALSE(m.hasEnabled);
+  TEST_ASSERT_TRUE(m.hasThreshold);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"wake_config\",\"enabled\":\"yes\"}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"wake_config\",\"enabled\":1}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"wake_config\",\"threshold\":\"0.9\"}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"wake_config\",\"threshold\":1.5}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(parse("{\"type\":\"wake_config\",\"threshold\":0.2}").type == Msg::Bad);
+  TEST_ASSERT_TRUE(
+      parse("{\"type\":\"wake_config\",\"enabled\":true,\"threshold\":2}").type == Msg::Bad);
+}
+
+void test_build_wake() {
+  char out[48];
+  const size_t n = linkmsg::buildWake(out, sizeof(out), 0.98765f);
+  TEST_ASSERT_GREATER_THAN_UINT32(0, n);
+  TEST_ASSERT_EQUAL_UINT32(strlen(out), n);
+  JsonDocument doc;
+  TEST_ASSERT_TRUE(deserializeJson(doc, out) == DeserializationError::Ok);
+  TEST_ASSERT_EQUAL_STRING("wake", doc["type"].as<const char*>());
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.99f, doc["score"].as<float>());
+  linkmsg::buildWake(out, sizeof(out), 1.7f);  // clamped
+  deserializeJson(doc, out);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, doc["score"].as<float>());
+  linkmsg::buildWake(out, sizeof(out), NAN);
+  deserializeJson(doc, out);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, doc["score"].as<float>());
+  TEST_ASSERT_EQUAL_UINT32(0, linkmsg::buildWake(out, 8, 0.5f));  // too small
+  TEST_ASSERT_EQUAL_STRING("", out);
+}
+
 void setup() {
   delay(2000);  // let the serial port settle
   UNITY_BEGIN();
@@ -667,6 +951,22 @@ void setup() {
   RUN_TEST(test_wake_detector_survives_millis_wrap);
   RUN_TEST(test_wake_quantize_feature);
   RUN_TEST(test_wake_dequantize);
+  RUN_TEST(test_pre_roll_order_and_seq);
+  RUN_TEST(test_pre_roll_overwrites_oldest);
+  RUN_TEST(test_pre_roll_keep_from);
+  RUN_TEST(test_pre_roll_clear_keeps_numbering);
+  RUN_TEST(test_pre_roll_seq_wraps);
+  RUN_TEST(test_wake_gate_mic_by_state);
+  RUN_TEST(test_wake_gate_hold_off_after_state_change);
+  RUN_TEST(test_wake_gate_not_while_busy);
+  RUN_TEST(test_wake_gate_answer);
+  RUN_TEST(test_wake_gate_expires);
+  RUN_TEST(test_wake_gate_link_drop_clears_pending);
+  RUN_TEST(test_wake_gate_survives_millis_wrap);
+  RUN_TEST(test_wake_server_from_name);
+  RUN_TEST(test_wake_parse_threshold);
+  RUN_TEST(test_parse_wake_config);
+  RUN_TEST(test_build_wake);
   UNITY_END();
 }
 

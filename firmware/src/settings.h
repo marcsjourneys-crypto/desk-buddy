@@ -1,6 +1,7 @@
 #pragma once
-// The robot's settings (Wi-Fi, server address, token), typed once over serial and kept in
-// NVS, so they survive reflashing and nothing secret goes into the build.
+// The robot's settings (Wi-Fi, server address, token, and the wake word), typed once over
+// serial and kept in NVS, so they survive reflashing and nothing secret goes into the build.
+// The wake word's settings live in their own NVS namespace, so `forget` leaves them alone.
 //
 // Not thread-safe: the getters return static buffers that the setters overwrite, so read
 // them and call the setters only from loop() (the serial commands and net:: run there).
@@ -26,5 +27,11 @@ const char* setWifi(const char* ssid, const char* pass);  // pass "" = open netw
 const char* setServer(const char* hostPort);  // "<host>:<port>", host [A-Za-z0-9.-]
 const char* setToken(const char* token);
 const char* forget();
+
+// The wake word: on by default; the threshold in hundredths (50-99), 0 = the model's cutoff.
+bool wakeOn();
+uint8_t wakeThreshold();
+const char* setWakeOn(bool on);
+const char* setWakeThreshold(uint8_t hundredths);
 
 }  // namespace settings

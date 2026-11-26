@@ -14,6 +14,7 @@
 #include "dc_block.h"
 #include "dsp.h"
 #include "pins.h"
+#include "pre_roll.h"
 #include "ring_buffer.h"
 
 namespace {
@@ -129,13 +130,14 @@ void playTone(float hz, uint32_t ms) {
 }  // namespace audio
 
 // ---------------------------------------------------------------------------------------
-// Streaming: a playback task drains a PSRAM ring into the speaker, and a mic task queues
-// DC-blocked 20 ms frames for the main loop to send. Both run on core 1; the WebSocket and
-// the eyes stay in the main loop.
+// Streaming: a playback task drains a PSRAM ring into the speaker, and the mic reader hands
+// DC-blocked 20 ms frames to the wake engine, the pre-roll or the link (see audio.h). Both
+// run on core 1; the WebSocket and the eyes stay in the main loop, the wake engine on core 0.
 namespace {
 
 constexpr size_t kRingSamples = dsp::kRate;  // 1 s; the server paces only ~200 ms ahead
 constexpr size_t kMicQueueDepth = 8;         // 160 ms of frames
+constexpr size_t kPreRollFrames = 75;        // 1.5 s of 20 ms frames, in PSRAM
 constexpr UBaseType_t kPlaybackPriority = 5;
 constexpr UBaseType_t kMicPriority = 4;
 constexpr BaseType_t kAudioCore = 1;
@@ -153,14 +155,23 @@ std::atomic<bool> ended{false};      // audio_end arrived: play whatever is buff
 std::atomic<uint32_t> stopGen{0};    // bumped by streamStop(): cut the block in hand
 bool tried = false;                  // startStreaming() has run (it runs once)
 bool playbackOn = false;
+bool micTried = false;               // startMic() has run (it runs once)
 bool micOn = false;
 
 static_assert(kBlock * sizeof(int16_t) == audio::kFrameBytes, "a mic frame is one block");
+static_assert(kBlock == audio::kFrameSamples, "a mic frame is one block");
 
 QueueHandle_t micQueue = nullptr;
-std::atomic<bool> micWanted{false};
-std::atomic<uint32_t> micStarts{0};  // bumped per setMicStreaming(true): a fresh flush
+std::atomic<audio::MicMode> mode{audio::MicMode::Off};
+std::atomic<uint32_t> micIdleTicks{0};  // bumped each time the reader sees Off
 std::atomic<uint32_t> micDrops{0};
+std::atomic<audio::MicSink> wakeSink{nullptr};
+
+// The pre-roll and the backlog flag, under preMux (the reader and the main loop share them).
+FrameRing* preRoll = nullptr;
+portMUX_TYPE preMux = portMUX_INITIALIZER_UNLOCKED;
+bool backlog = false;    // Stream after Hold: the pre-roll goes first, live frames behind it
+uint32_t noRingSeq = 0;  // frame numbers if the pre-roll couldn't be allocated
 
 void playbackTask(void*) {
   int16_t block[kBlock];
@@ -189,33 +200,64 @@ void playbackTask(void*) {
   }
 }
 
+// One frame to whoever the mode says (see audio.h).
+void deliver(audio::MicMode m, const int16_t* frame) {
+  using audio::MicMode;
+  bool toQueue = false;
+  bool lost = false;
+  uint32_t seq = 0;
+  portENTER_CRITICAL(&preMux);
+  if (m == MicMode::Stream) {
+    if (backlog && preRoll != nullptr && preRoll->count() > 0) {
+      preRoll->push(frame, &lost);  // behind the kept audio, in order
+    } else {
+      backlog = false;  // drained: live frames go straight to the queue from now on
+      toQueue = true;
+    }
+  } else if (preRoll != nullptr) {
+    seq = preRoll->push(frame, &lost);
+    if (m == MicMode::Wake) lost = false;  // in Wake mode it's history: overwriting is normal
+  } else {
+    seq = noRingSeq++;
+  }
+  portEXIT_CRITICAL(&preMux);
+  if (lost) micDrops++;
+  if (toQueue && xQueueSend(micQueue, frame, 0) != pdTRUE) micDrops++;
+  if (m == MicMode::Wake) {
+    const audio::MicSink sink = wakeSink.load();
+    if (sink != nullptr) sink(frame, kBlock, seq);
+  }
+}
+
 void micTask(void*) {
   int16_t frame[kBlock];
   DcBlocker dc;
-  uint32_t seen = 0;  // the micStarts this stream belongs to
-  bool seed = false;  // the next frame starts a stream
+  bool reading = false;  // false: the next frame starts afresh (flush, seed the DC blocker)
+  bool seed = false;
   for (;;) {
-    if (!micWanted.load()) {
+    const audio::MicMode m = mode.load();
+    if (m == audio::MicMode::Off) {
+      reading = false;
+      micIdleTicks++;
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
-    const uint32_t starts = micStarts.load();
-    if (starts != seen) {
+    if (!reading) {
       audio::flushMic();  // drop what the DMA recorded while nobody listened
-      seen = starts;
+      reading = true;
       seed = true;
     }
     if (audio::readMic(frame, kBlock) != kBlock) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
-    // Seed with the first sample, so the mic's DC offset doesn't start with a thump.
+    // Seed with the first sample, so the DC offset of the mic doesn't start with a thump.
     if (seed) {
       dc.reset(frame[0]);
       seed = false;
     }
     dc.processBlock(frame, kBlock);
-    if (xQueueSend(micQueue, frame, 0) != pdTRUE) micDrops++;
+    deliver(m, frame);
   }
 }
 
@@ -240,19 +282,6 @@ bool startPlayback() {
   return true;
 }
 
-bool startMicStream() {
-  if (!micOk) return false;
-  micQueue = xQueueCreate(kMicQueueDepth, kFrameBytes);
-  if (micQueue == nullptr) return false;
-  if (xTaskCreatePinnedToCore(micTask, "micstream", 4096, nullptr, kMicPriority, nullptr,
-                              kAudioCore) != pdPASS) {
-    vQueueDelete(micQueue);
-    micQueue = nullptr;
-    return false;
-  }
-  return true;
-}
-
 }  // namespace
 
 // Runs once: each half starts if its hardware started; a failure is reported once and not
@@ -261,7 +290,7 @@ bool startStreaming() {
   if (tried) return playbackOn && micOn;
   tried = true;
   playbackOn = startPlayback();
-  micOn = startMicStream();
+  startMic();
   if (!playbackOn) Serial.println("Audio: streamed playback didn't start (speaker or memory)");
   if (!micOn) Serial.println("Audio: mic streaming didn't start (mic or memory)");
   return playbackOn && micOn;
@@ -305,16 +334,85 @@ void streamStop() {
   portEXIT_CRITICAL(&ringMux);
 }
 
-void setMicStreaming(bool on) {
-  if (!micOn) return;
-  if (on && !micWanted.load()) {
-    xQueueReset(micQueue);  // no stale frames from last time
-    micStarts++;
+bool startMic() {
+  if (micTried) return micOn;
+  micTried = true;
+  if (!micOk) return false;
+  // The pre-roll is optional: without it wake mode still works, it just can't send the audio
+  // between the detection and the server's `listening`.
+  auto* store = static_cast<int16_t*>(ps_malloc(kPreRollFrames * kFrameBytes));
+  if (store != nullptr) {
+    preRoll = new FrameRing(store, kPreRollFrames, kBlock);
+  } else {
+    Serial.println("Audio: no PSRAM for the wake word's pre-roll");
   }
-  micWanted = on;
+  micQueue = xQueueCreate(kMicQueueDepth, kFrameBytes);
+  if (micQueue == nullptr) return false;
+  if (xTaskCreatePinnedToCore(micTask, "mic", 6144, nullptr, kMicPriority, nullptr,
+                              kAudioCore) != pdPASS) {
+    vQueueDelete(micQueue);
+    micQueue = nullptr;
+    return false;
+  }
+  micOn = true;
+  return true;
+}
+
+void setMicMode(MicMode m) {
+  if (!micOn) return;
+  const MicMode was = mode.load();
+  if (m == was) return;
+  portENTER_CRITICAL(&preMux);
+  // A stream that follows a held wake sends the kept pre-roll first; any other stream starts
+  // now, and no other mode ever sends the pre-roll.
+  backlog = m == MicMode::Stream && was == MicMode::Hold;
+  if (m == MicMode::Stream && !backlog && preRoll != nullptr) preRoll->clear();
+  portEXIT_CRITICAL(&preMux);
+  if (m == MicMode::Stream) xQueueReset(micQueue);  // no stale frames from last time
+  mode = m;
+}
+
+MicMode micMode() { return mode.load(); }
+
+void waitMicIdle() {
+  if (!micOn || mode.load() != MicMode::Off) return;
+  const uint32_t ticks = micIdleTicks.load();
+  const uint32_t start = millis();
+  while (micIdleTicks.load() == ticks && millis() - start < 200) delay(2);
+}
+
+void setWakeSink(MicSink s) { wakeSink = s; }
+
+void keepPreRollFrom(uint32_t seq) {
+  portENTER_CRITICAL(&preMux);
+  if (preRoll != nullptr) preRoll->keepFrom(seq);
+  portEXIT_CRITICAL(&preMux);
+}
+
+void dropPreRoll() {
+  portENTER_CRITICAL(&preMux);
+  if (preRoll != nullptr) preRoll->clear();
+  backlog = false;
+  portEXIT_CRITICAL(&preMux);
+}
+
+bool micBacklog() {
+  portENTER_CRITICAL(&preMux);
+  const bool b = backlog && preRoll != nullptr && preRoll->count() > 0;
+  portEXIT_CRITICAL(&preMux);
+  return b;
 }
 
 bool popMicFrame(uint8_t out[kFrameBytes]) {
+  bool got = false;
+  int16_t frame[kBlock];
+  portENTER_CRITICAL(&preMux);
+  if (backlog && preRoll != nullptr) got = preRoll->pop(frame);
+  portEXIT_CRITICAL(&preMux);
+  if (got) {
+    memcpy(out, frame, kFrameBytes);
+    return true;
+  }
   return micQueue != nullptr && xQueueReceive(micQueue, out, 0) == pdTRUE;
 }
 

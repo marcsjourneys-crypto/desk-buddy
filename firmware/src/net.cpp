@@ -11,6 +11,8 @@
 #include "link_policy.h"
 #include "looks.h"
 #include "settings.h"
+#include "wake.h"
+#include "wake_mode.h"
 
 namespace {
 
@@ -80,6 +82,10 @@ constexpr uint32_t kWifiReportMs = 10000;
 constexpr uint32_t kWifiRejoinMs = 30000;
 constexpr uint32_t kWifiRestartGapMs = 200;  // between WiFi.disconnect() and begin()
 constexpr int kMaxFramesPerPass = 4;
+// While the wake word's pre-roll is waiting (it can be ~1.5 s), more per pass, so it catches
+// up a few times faster than real time. 8 frames (5 KB) stay within lwIP's TCP send buffer,
+// so a pass doesn't wait on the network; the server takes frames as fast as they come.
+constexpr int kMaxBacklogFramesPerPass = 8;
 constexpr int kMaxWsLoopsPerPass = 16;  // drain queued frames: the eyes can take 40-60 ms
 
 LinkClient ws;
@@ -104,7 +110,48 @@ bool badLogged = false;
 char serverState[16] = "";
 char emotion[16] = "neutral";
 
+// Wake mode (main loop only). The server's wake_config overrides the saved settings, field by
+// field, until restart.
+wake::Gate gate;
+struct ServerWake {
+  bool hasEnabled = false;
+  bool enabled = false;
+  bool hasThreshold = false;
+  float threshold = 0;
+} serverWake;
+bool wakeBegun = false;  // wake::begin() has been tried from here
+uint32_t wakesSent = 0;
+uint32_t wakesIgnored = 0;  // detections in a hold-off, or while not listening
+uint32_t wakesUnanswered = 0;
+
+bool wakeOn() { return serverWake.hasEnabled ? serverWake.enabled : settings::wakeOn(); }
+
+float wakeThreshold() {
+  if (serverWake.hasThreshold) return serverWake.threshold;
+  const uint8_t t = settings::wakeThreshold();
+  return t ? t / 100.0f : wake::modelCutoff();
+}
+
+audio::MicMode micModeFor(wake::Mic m) {
+  switch (m) {
+    case wake::Mic::Wake: return audio::MicMode::Wake;
+    case wake::Mic::Hold: return audio::MicMode::Hold;
+    case wake::Mic::Stream: return audio::MicMode::Stream;
+    default: return audio::MicMode::Off;
+  }
+}
+
+// The mic goes where the gate says, and the wake engine runs only in Wake mode.
+void applyMic() {
+  const wake::Mic m = gate.mic();
+  audio::setMicMode(micModeFor(m));
+  wake::run(m == wake::Mic::Wake);
+}
+
 bool elapsed(uint32_t from, uint32_t ms) { return elapsedMs(millis(), from, ms); }
+
+// Forward: printStatus() is in namespace net.
+void printWake();
 
 void enter(State s) {
   state = s;
@@ -120,7 +167,9 @@ bool open() {
 
 // The link is gone: stop the audio and put the eyes to sleep.
 void linkDown() {
-  audio::setMicStreaming(false);
+  gate.onLink(false, millis());
+  applyMic();  // Off: the mic reader lets go, the wake engine pauses
+  audio::dropPreRoll();
   audio::streamStop();
   serverState[0] = '\0';
   strcpy(emotion, "neutral");
@@ -157,16 +206,23 @@ void onText(const char* text, size_t len) {
     enter(State::Linked);
     linkedAt = since;
     audio::startStreaming();  // runs once; reports its own failures
+    gate.onLink(true, millis());
     Serial.printf("Linked to %s:%u\n", settings::host(), static_cast<unsigned>(settings::port()));
     return;
   }
   if (state != State::Linked) return;
   switch (m.type) {
-    case Msg::State:
+    case Msg::State: {
       strcpy(serverState, m.name);  // both 16 bytes, NUL-terminated
-      audio::setMicStreaming(!strcmp(serverState, "listening"));
+      // A pending wake ends here: `listening` streams the kept pre-roll first (Hold ->
+      // Stream), anything else means the server ignored it.
+      if (gate.onState(wake::serverFromName(serverState), millis()) == wake::Answer::Other) {
+        audio::dropPreRoll();
+      }
+      applyMic();
       showLook();
       break;
+    }
     case Msg::Emotion:
       strcpy(emotion, m.name);
       if (!strcmp(serverState, "speaking")) showLook();
@@ -179,6 +235,18 @@ void onText(const char* text, size_t len) {
       break;
     case Msg::AudioStop:
       audio::streamStop();
+      break;
+    case Msg::WakeConfig:
+      if (m.hasEnabled) {
+        serverWake.hasEnabled = true;
+        serverWake.enabled = m.enabled;
+      }
+      if (m.hasThreshold) {
+        serverWake.hasThreshold = true;
+        serverWake.threshold = m.threshold;
+      }
+      Serial.printf("Wake word: the server set it %s, threshold %.2f (until restart)\n",
+                    wakeOn() ? "on" : "off", wakeThreshold());
       break;
     case Msg::Bad:
       if (!badLogged) Serial.println("Link: ignoring a malformed message");
@@ -276,6 +344,41 @@ void stopWifi() {
   WiFi.disconnect();
   wifiStarted = false;
   wifiRejoinPending = false;
+}
+
+// Wake mode, every pass while linked: starts the engine when it's wanted, keeps the gate's
+// inputs current, gives up a wake the server didn't answer, and sends a detection.
+void serviceWake() {
+  const uint32_t now = millis();
+  if (wakeOn() && wake::haveModel() && !wakeBegun) {
+    wakeBegun = true;  // begin() runs once anyway; report a failure once
+    if (const char* e = wake::begin()) Serial.printf("Wake word off: %s\n", e);
+  }
+  wake::setThreshold(wakeThreshold());
+  gate.setEnabled(wakeOn() && wake::ready());
+  if (gate.expire(now)) {
+    wakesUnanswered++;
+    audio::dropPreRoll();
+    Serial.println("Wake: no answer from the server; listening again in 2 s");
+    showLook();
+  }
+  applyMic();
+  float score = 0;
+  uint32_t seq = 0;
+  if (!wake::takeDetection(&score, &seq)) return;
+  if (!gate.onDetection(now)) {
+    wakesIgnored++;
+    return;
+  }
+  // Keep the audio from just after the detection; the mic goes to Hold (the engine pauses)
+  // until the server's `state listening` turns it into the stream.
+  audio::keepPreRollFrom(seq + 1);
+  applyMic();
+  eyes::show("listening");
+  char msg[48];
+  const size_t n = linkmsg::buildWake(msg, sizeof(msg), score);
+  if (n > 0 && ws.sendTXT(msg, n)) wakesSent++;
+  Serial.printf("Wake: heard (score %.2f)\n", score);
 }
 
 // Handles received frames; several per pass, so streamed audio keeps up with slow passes.
@@ -388,12 +491,18 @@ void loop() {
     return;
   }
   if (state == State::Linked) {
+    serviceWake();
     uint8_t frame[audio::kFrameBytes];
-    for (int i = 0; i < kMaxFramesPerPass && audio::popMicFrame(frame); i++) {
+    const int most = audio::micBacklog() ? kMaxBacklogFramesPerPass : kMaxFramesPerPass;
+    for (int i = 0; i < most && audio::popMicFrame(frame); i++) {
       if (ws.sendBIN(frame, sizeof(frame))) framesSent++;
     }
   }
 }
+
+bool wakeFromServer() { return serverWake.hasEnabled || serverWake.hasThreshold; }
+
+float wakeThresholdInUse() { return wakeThreshold(); }
 
 void printStatus() {
   if (WiFi.status() == WL_CONNECTED) {
@@ -415,9 +524,42 @@ void printStatus() {
   Serial.printf("Reconnects: %lu\n", static_cast<unsigned long>(reconnects));
   Serial.printf("Mic frames: %lu sent, %lu dropped\n", static_cast<unsigned long>(framesSent),
                 static_cast<unsigned long>(audio::micDropped()));
+  printWake();
   Serial.printf("Heap free: %lu KB (min %lu KB)\n",
                 static_cast<unsigned long>(ESP.getFreeHeap() / 1024),
                 static_cast<unsigned long>(ESP.getMinFreeHeap() / 1024));
 }
 
 }  // namespace net
+
+namespace {
+
+// The `net` command's wake word lines.
+void printWake() {
+  const char* thresholdFrom = serverWake.hasThreshold ? "server"
+                              : settings::wakeThreshold() ? "saved"
+                                                          : "model";
+  Serial.printf("Wake:   %s (%s), threshold %.2f (%s), ", wakeOn() ? "on" : "off",
+                serverWake.hasEnabled ? "server" : "saved", wakeThreshold(), thresholdFrom);
+  const uint32_t now = millis();
+  if (!wake::haveModel()) {
+    Serial.println("no model built in");
+  } else if (wakeOn() && wakeBegun && !wake::ready()) {
+    Serial.println("engine failed (see wake info)");
+  } else if (state != State::Linked) {
+    Serial.println("paused (no link)");
+  } else if (gate.pending()) {
+    Serial.println("heard, waiting for the server");
+  } else if (gate.mic() == wake::Mic::Wake) {
+    Serial.println(gate.holdingOff(now) ? "listening (holding off)" : "listening");
+  } else if (!wakeOn()) {
+    Serial.println("off");
+  } else {
+    Serial.printf("paused (state %s)\n", serverState[0] ? serverState : "none yet");
+  }
+  Serial.printf("        wakes sent %lu, unanswered %lu, ignored %lu\n",
+                static_cast<unsigned long>(wakesSent), static_cast<unsigned long>(wakesUnanswered),
+                static_cast<unsigned long>(wakesIgnored));
+}
+
+}  // namespace
