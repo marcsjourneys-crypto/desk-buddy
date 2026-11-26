@@ -12,11 +12,13 @@
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <atomic>
 #include <new>
@@ -100,12 +102,23 @@ bool registerOps() {
   return true;
 }
 
-// The streaming state (resource variables) gets its own small arena. Both arenas are in
-// PSRAM; if the step time is too slow, moving the tensor arena to internal RAM is the
-// first thing to try.
-constexpr size_t kVarArenaBytes = 32 * 1024;
+// The streaming state (resource variables) gets its own small arena. Both arenas live in
+// internal RAM (W1, after one unexplained "Cache error, MMU entry fault" inside Invoke() with
+// them in PSRAM), sized from a measuring pass: begin() first builds the interpreter on
+// generous PSRAM arenas, reads what AllocateTensors actually used, then rebuilds it on
+// internal arenas of that size plus a margin. If internal RAM is short, an arena stays in
+// PSRAM with a warning.
+constexpr size_t kMeasureVarArenaBytes = 32 * 1024;
 constexpr int kMaxResourceVariables = 32;
 constexpr size_t kMaxArenaBytes = 256 * 1024;  // the arena doubles up to this if too small
+constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+constexpr uint32_t kPsramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+
+// What was used, plus 1/8 (at least 512 bytes) for alignment and TFLM's own slack,
+// rounded up to 16 bytes.
+constexpr size_t withMargin(size_t used) {
+  return (used + (used / 8 > 512 ? used / 8 : 512) + 15) & ~static_cast<size_t>(15);
+}
 
 constexpr UBaseType_t kTaskPriority = 4;  // below Wi-Fi (23) and lwIP (18) on core 0
 constexpr BaseType_t kTaskCore = 0;
@@ -131,9 +144,17 @@ bool tried = false;
 bool ready = false;  // start() finished: the task runs and the tensors are checked
 char error[200] = "";
 const tflite::Model* model = nullptr;
-uint8_t* arena = nullptr;
-size_t arenaBytes = 0;
-uint8_t* varArena = nullptr;
+
+struct Arena {
+  uint8_t* data = nullptr;
+  size_t size = 0;
+  size_t used = 0;  // what TFLM had taken once AllocateTensors finished
+  bool internal = false;
+};
+Arena arena;     // the tensor arena
+Arena varArena;  // the resource variables (the model's streaming state)
+size_t internalFreeBefore = 0;  // internal heap around begin(), for `wake info`
+size_t internalFreeAfter = 0;
 tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
@@ -179,34 +200,108 @@ const char* missingOp() {
   return nullptr;
 }
 
-// Builds the interpreter, doubling the arena from the manifest's size until it fits.
-const char* allocate() {
-  varArena = static_cast<uint8_t*>(
-      heap_caps_aligned_alloc(16, kVarArenaBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (varArena == nullptr) return fail("Wake: no PSRAM for the variable arena");
-  for (size_t size = kArenaBytes; size <= kMaxArenaBytes; size *= 2) {
-    arena = static_cast<uint8_t*>(
-        heap_caps_aligned_alloc(16, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (arena == nullptr) return fail("Wake: no PSRAM for a %u-byte arena", (unsigned)size);
-    tflite::MicroAllocator* varAlloc = tflite::MicroAllocator::Create(varArena, kVarArenaBytes);
-    tflite::MicroResourceVariables* vars =
-        varAlloc ? tflite::MicroResourceVariables::Create(varAlloc, kMaxResourceVariables)
-                 : nullptr;
-    if (vars == nullptr) return fail("Wake: couldn't set up the resource variables");
-    interpreter = new (std::nothrow) tflite::MicroInterpreter(model, resolver, arena, size, vars);
-    if (interpreter != nullptr && interpreter->AllocateTensors() == kTfLiteOk) {
-      arenaBytes = size;
-      return nullptr;
-    }
+void freeArena(Arena& a) {
+  heap_caps_free(a.data);
+  a = Arena{};
+}
+
+void dropInterpreter() {
+  delete interpreter;
+  interpreter = nullptr;
+  freeArena(arena);
+  freeArena(varArena);
+}
+
+bool allocArena(Arena& a, size_t size, uint32_t caps) {
+  a.data = static_cast<uint8_t*>(heap_caps_aligned_alloc(16, size, caps));
+  if (a.data == nullptr) return false;
+  a.size = size;
+  a.used = 0;
+  a.internal = esp_ptr_internal(a.data);
+  return true;
+}
+
+// The interpreter on the arenas in hand. True once AllocateTensors worked; records the use.
+tflite::MicroAllocator* varAlloc = nullptr;  // the variable arena's allocator
+
+bool build() {
+  varAlloc = tflite::MicroAllocator::Create(varArena.data, varArena.size);
+  tflite::MicroResourceVariables* vars =
+      varAlloc ? tflite::MicroResourceVariables::Create(varAlloc, kMaxResourceVariables)
+               : nullptr;
+  if (vars == nullptr) return false;
+  interpreter = new (std::nothrow)
+      tflite::MicroInterpreter(model, resolver, arena.data, arena.size, vars);
+  if (interpreter == nullptr || interpreter->AllocateTensors() != kTfLiteOk) {
     delete interpreter;
     interpreter = nullptr;
-    heap_caps_free(arena);
-    arena = nullptr;
+    return false;
+  }
+  arena.used = interpreter->arena_used_bytes();
+  varArena.used = varAlloc->used_bytes();
+  return true;
+}
+
+// The measuring pass: PSRAM arenas, the tensor arena doubling from the manifest's size until
+// the model fits. Leaves the interpreter built on them.
+const char* measure() {
+  for (size_t size = kArenaBytes; size <= kMaxArenaBytes; size *= 2) {
+    if (!allocArena(varArena, kMeasureVarArenaBytes, kPsramCaps)) {
+      return fail("Wake: no PSRAM for the variable arena");
+    }
+    if (!allocArena(arena, size, kPsramCaps)) {
+      freeArena(varArena);
+      return fail("Wake: no PSRAM for a %u-byte arena", static_cast<unsigned>(size));
+    }
+    if (build()) {
+      // One step on silence, so whatever the first Invoke() sets up (CALL_ONCE fills the
+      // streaming state) is counted too.
+      TfLiteTensor* in = interpreter->input(0);
+      if (in != nullptr && in->data.raw != nullptr) memset(in->data.raw, 0, in->bytes);
+      interpreter->Invoke();
+      arena.used = interpreter->arena_used_bytes();
+      varArena.used = varAlloc->used_bytes();
+      return nullptr;
+    }
+    dropInterpreter();
     Serial.printf("Wake: AllocateTensors failed with a %u-byte arena (message above)\n",
-                  (unsigned)size);
+                  static_cast<unsigned>(size));
   }
   return fail("Wake: the model doesn't fit a %u KB arena, or a tensor/op failed to prepare",
-              (unsigned)(kMaxArenaBytes / 1024));
+              static_cast<unsigned>(kMaxArenaBytes / 1024));
+}
+
+// Measures, then moves both arenas to internal RAM at their measured size plus a margin.
+const char* allocate() {
+  internalFreeBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if (const char* e = measure()) return e;
+  const size_t tensorBytes = withMargin(arena.used);
+  const size_t varBytes = withMargin(varArena.used);
+  dropInterpreter();
+  // Each arena goes internal if it can; one that can't goes to PSRAM.
+  const bool tensorIn = allocArena(arena, tensorBytes, kInternalCaps);
+  if (!tensorIn && !allocArena(arena, tensorBytes, kPsramCaps)) {
+    return fail("Wake: no memory for a %u-byte arena", static_cast<unsigned>(tensorBytes));
+  }
+  const bool varIn = allocArena(varArena, varBytes, kInternalCaps);
+  if (!varIn && !allocArena(varArena, varBytes, kPsramCaps)) {
+    freeArena(arena);
+    return fail("Wake: no memory for a %u-byte variable arena", static_cast<unsigned>(varBytes));
+  }
+  if (!tensorIn || !varIn) {
+    Serial.printf("Wake: WARNING: internal RAM is short, so the %s in PSRAM\n",
+                  !tensorIn && !varIn ? "arenas are"
+                                      : (!tensorIn ? "tensor arena is" : "variable arena is"));
+  }
+  if (!build()) {
+    // The measured size plus the margin should always fit; if it doesn't, use the
+    // measuring pass's roomy PSRAM arenas rather than fail.
+    dropInterpreter();
+    Serial.println("Wake: WARNING: the sized arenas didn't fit, so both are in PSRAM");
+    if (const char* e = measure()) return e;
+  }
+  internalFreeAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  return nullptr;
 }
 
 const char* checkTensors() {
@@ -379,6 +474,11 @@ void printTensor(const char* label, const TfLiteTensor* t) {
                 static_cast<long>(t->params.zero_point));
 }
 
+void printArena(const char* label, const Arena& a) {
+  Serial.printf("  %s: %u of %u bytes used, in %s\n", label, static_cast<unsigned>(a.used),
+                static_cast<unsigned>(a.size), a.internal ? "internal RAM" : "PSRAM (fallback)");
+}
+
 }  // namespace
 
 namespace wake {
@@ -410,9 +510,16 @@ void printInfo() {
   printTensor("input", input);
   printTensor("output", output);
   Serial.printf("  %d feature frames per step (%d ms)\n", stride, stride * 10);
-  Serial.printf("  arena: %u of %u bytes used (manifest says %u), in PSRAM\n",
-                static_cast<unsigned>(interpreter->arena_used_bytes()),
-                static_cast<unsigned>(arenaBytes), static_cast<unsigned>(kArenaBytes));
+  printArena("tensor arena", arena);
+  Serial.printf("    (the manifest says %u)\n", static_cast<unsigned>(kArenaBytes));
+  printArena("variable arena", varArena);
+  Serial.printf("  internal heap: %u KB free before the wake engine, %u KB after; now %u KB "
+                "free (min %u KB, largest block %u KB)\n",
+                static_cast<unsigned>(internalFreeBefore / 1024),
+                static_cast<unsigned>(internalFreeAfter / 1024),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 }
 
 void run(bool on) {

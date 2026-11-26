@@ -67,13 +67,13 @@ Without the header the firmware still builds; `wake test` then says there's no m
 
 | Command | Shows |
 |---|---|
-| `wake info` | The model: wake word, size, operators (a missing one is marked `MISSING`), input/output shape and quantisation, arena used. |
+| `wake info` | The model: wake word, size, operators (a missing one is marked `MISSING`), input/output shape and quantisation; each arena's size, use and place (internal RAM, or PSRAM as a fallback); the internal heap before and after the engine started, and now. |
 | `wake test` | `HEARD (score 0.98)` on each detection (the eyes flash surprised), and every 3 s: model step time (avg, max), frontend time per 10 ms, core 0 load, eye fps, free heap and PSRAM. Any letter stops it. |
 | `wake raw` | The model's probability and the window's score 10 times a second, for tuning the cutoff. |
 
 - `wake` is refused while the robot link is connected (the link owns the mic). Nothing fires for 2 s after a start, a detection or (later) a state change.
 - The eyes play the animated "thinking" look during the test, so the fps shows what detection costs them (the cap is ~30 fps; the target is ≥ 20).
-- If `AllocateTensors` fails, the arena is doubled up to 256 KB; set `tensor_arena_size` in the manifest to a bit over what `wake info` says is used.
+- **Memory:** both arenas (the tensors, and the model's streaming state) are in internal RAM, after one unexplained "Cache error, MMU entry fault" crash with them in PSRAM in Phase 0. At start the engine builds the model once on roomy PSRAM arenas to measure what it really uses (one step included), then rebuilds it on internal arenas of that size plus 1/8 (at least 512 bytes). If internal RAM is short, an arena stays in PSRAM and a `WARNING` is printed. In the measuring pass the tensor arena starts at the manifest's `tensor_arena_size` and doubles up to 256 KB if `AllocateTensors` fails; set it to a bit over what `wake info` says is used.
 
 ### Feature check (design note, not built yet)
 

@@ -1,7 +1,7 @@
 #pragma once
 // "Hey CARL" wake word engine (Phase 0: the feasibility test). The TFLM audio microfrontend
 // turns 10 ms mic frames into 40 features, and the microWakeWord streaming model (TFLite
-// Micro, tensor arena in PSRAM) gives a probability per model step. It runs on its own
+// Micro, both arenas in internal RAM, sized at begin()) gives a probability per model step. It runs on its own
 // task on core 0. The model is compiled in from models/hey_carl_model.h (see
 // scripts/model_to_header.py); without it everything builds and begin() says so.
 //
