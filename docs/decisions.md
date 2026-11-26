@@ -328,3 +328,15 @@ Plan: `docs/plans/2026-11-25-wake-word.md`.
 
 - **The follow-up opens as soon as CARL stops** (`FOLLOW_UP_DELAY` 0.7 → 0.15 s after the last `play()` returns). With the new 0.25 s pause after every sentence, the old delay opened the mic about 1 s after CARL fell silent, and in the user's check a quick "yes" to "Shall I open the page on…?" was lost. The trailing pause keeps the robot's speaker quiet when the mic opens.
 - **A bare "please" is a yes.** In the same check, "Please." in answer to "Shall I open…?" was refused, so CARL proposed and asked again. It is no riskier than "okay", which the user already accepted for the hands-free yes.
+
+## 2026-11-26 — A smart model for hard questions
+
+Plan: `docs/plans/2026-11-26-smarter-model.md`.
+
+- **Haiku stays the default; Sonnet 5.5 answers hard questions (`SMART_MODEL`, `off` to disable).** Both ways in, by the user's choice: a fixed spoken phrase ("think hard", "think it through", "big brain"…) checked by the server, and a `think_harder` tool Haiku may call. · Alternatives: only the phrase (no help when the user doesn't think to ask), only Haiku's judgement (can't be forced), Opus 5.5 (slower and dearer for spoken replies).
+- **The handover is offered only in Haiku's first round** and discards that round entirely (its tools never run, its blocks never reach the smart model or memory), so a handover can never repeat or half-run an action. Text Haiku already spoke stands.
+- **It stays on for 2 minutes after each smart answer (the user's choice)**, covering follow-ups; a Haiku answer, a forget or a restart ends it. · Alternatives: that question only; until "back to normal".
+- **Silent (the user's choice):** no spoken line on a handover; the Live tab labels the reply instead.
+- **Thinking stays at the model's default (adaptive)**, never `disabled` (a 400 on Sonnet 5.5); effort `high` when the user asked, `medium` for a handover or a follow-on, `max_tokens` 8192.
+- **Failures fall back to Haiku** only when nothing was said and no tool round ran (so nothing is said twice or run twice); a model the key can't use (404/403) is blocked by its id until restart. A web-search 400 on a smart run only retries without search: the process-wide search block stays for the account-level refusal on Haiku.
+- **Skill builder noted for later:** the smart model writes a skill from the user's description into `SKILLS_DIR`; it still needs the usual approval on the Apps tab.

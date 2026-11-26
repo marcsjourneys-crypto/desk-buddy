@@ -58,6 +58,17 @@ With the robot connected, say "Hey CARL" and then your question, no key needed. 
 - **Privacy:** the robot sends no audio until it hears the phrase or you press the key, except in a follow-up window after a hands-free reply (5 s of listening, up to 15 s if you speak, at most 5 in a row). Your words then go to the PC, which transcribes them locally; only the text goes to Anthropic, as with the key.
 - No robot connected: the PC mic stays push-to-talk only.
 
+## Smarter answers
+
+CARL answers on Haiku (fast and cheap). For a hard question it uses a stronger model, Sonnet 5.5 by default:
+
+- **Ask for it:** say "think hard", "think harder", "think carefully", "think deeply", "think it through" or "big brain" anywhere in the question ("Hey CARL, think hard: …").
+- **Or let Haiku decide:** for maths, code, puzzles or careful reasoning, Haiku may hand the question over itself.
+- **It stays on** for the next question if it comes within 2 minutes (follow-ups included), then CARL goes back to Haiku. "Forget that" ends it too.
+- **It's silent:** the reply may take a few seconds longer (the pondering line covers a long wait). The Live tab labels each such reply, e.g. `sonnet-5-5 · asked`, `handed over` or `follow-on`; `unavailable` means the stronger model failed and Haiku answered.
+- **Setting:** `SMART_MODEL` (the dashboard's "Thinking" group, or `.env`): a Claude model id, or `off` for Haiku only. A model your API key can't use is switched off until restart, with a hint in the log.
+- **Cost:** about 2–5 cents per smart question (Sonnet is about 20× Haiku per token). Most questions stay on Haiku.
+
 ## Writing a skill
 
 A skill is a folder inside `SKILLS_DIR`. CARL runs its `main.py`, hands it the inputs as JSON on stdin, and says what it prints in its own words. Three working examples are in `examples/skills/` at the repo root: `hello-time` (a choice, no packages), `send-note-email` (free text and a spoken "yes"; it only prints what it would send) and `morning-brief` (a choice, network calls with the standard library, and [pages](#returning-pages)).

@@ -2,6 +2,15 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-26 — Smart model for hard questions (user check pending)
+
+- **Built:** `docs/plans/2026-11-26-smarter-model.md`. Haiku answers by default; Sonnet 5.5 (`SMART_MODEL`) answers when the user says "think hard" (and similar phrases) or when Haiku hands the question over with `think_harder`, and stays on for questions within 2 minutes. A failure falls back to Haiku; a model the key can't use is blocked until restart. The Live tab labels smart replies.
+- **Also since the last push:** a 0.25 s pause after each spoken sentence, the page list kept until a newer one, the follow-up opening sooner, a bare "please" as yes, 5 follow-ups in a row.
+- **Tests:** 2038 server tests pass (28 integration tests deselected). The optional live test `uv run pytest -m integration tests/integration/test_smart_model_live.py` costs a few cents; never run it without asking.
+- **Check by the user (pending):** the steps at the end of the plan.
+- **Not pushed yet:** everything since `fa1d190`. Push only when the user asks.
+- **Next:** the user check, then M9 expressions; later the skill builder (the smart model writes a skill from a description, approved on the Apps tab as usual).
+
 ## 2026-11-26 — Wake word done (user check passed)
 
 - **Built:** "Hey CARL" end to end (`docs/plans/2026-11-25-wake-word.md`).
