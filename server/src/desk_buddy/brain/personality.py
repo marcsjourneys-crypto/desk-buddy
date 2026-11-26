@@ -118,13 +118,15 @@ def system_prompt(
     youtube_search: bool = False,
     media: bool = False,
     skills: bool = False,
+    think_harder: bool = False,
 ) -> str:
     """The editable character, what the user said about themselves (if anything), then the
     locked rules. Joined, never formatted: nothing the user wrote is ever read as a
     template. `apps`/`websites`/`pages`: open_app/open_website/open_search_result are
     offered; `youtube`/`youtube_search`: play_youtube/youtube_search are offered; `media`:
     media_control is offered; `skills`: at least one skill_ tool is offered;
-    `computer_control` only changes why they aren't."""
+    `computer_control` only changes why they aren't; `think_harder`: the handover tool
+    may be offered (Haiku's prompt only, never the smart model's)."""
     parts = [character.strip()]
     if about is not None and not about.is_blank():
         parts.append(_about_block(about))
@@ -133,7 +135,18 @@ def system_prompt(
     parts.append(_youtube_text(youtube, youtube_search, music, computer_control))
     parts.append(_media_text(media, music, computer_control))
     parts.append(_skills_text(skills, computer_control, pages))
+    if think_harder:
+        parts.append(THINK_HARDER_TEXT)
     return "\n\n".join(parts)
+
+
+THINK_HARDER_TEXT = (
+    "You can hand a question to your deeper-thinking model with the think_harder tool. Use "
+    "it for maths, code, puzzles, careful multi-step reasoning, comparing complicated "
+    "options, or when you aren't confident you can answer well. Don't use it for small "
+    "talk, notes, music, opening things, skills or simple facts. Call it straight away, "
+    "alone, with no words before it; the deeper model answers in your voice."
+)
 
 
 SKILLS_TEXT = (

@@ -15,7 +15,7 @@ import anthropic
 
 from desk_buddy.brain.memory import merge_consecutive
 from desk_buddy.brain.personality import Personality, system_prompt
-from desk_buddy.brain.smart import ASKED, UNAVAILABLE
+from desk_buddy.brain.smart import ASKED, HANDED_OVER, UNAVAILABLE
 from desk_buddy.config import Settings
 from desk_buddy.skills_store import TOOL_PREFIX as SKILL_TOOL_PREFIX
 from desk_buddy.tools.actions import publish_action
@@ -154,6 +154,22 @@ def _block_smart(model: str) -> None:
     if not _smart_blocked:
         log.warning(SMART_OFF_HINT, model)
     _smart_blocked = True
+
+
+# Offered to Haiku in its first round when the smart model may answer: calling it hands
+# the question over. Not a computer-control action (no guard, no yes, not counted), not
+# strict, not in the ToolRegistry, and never remembered.
+THINK_HARDER = "think_harder"
+THINK_HARDER_TOOL: dict[str, Any] = {
+    "name": THINK_HARDER,
+    "description": "Hand this question to CARL's deeper-thinking model. Call it alone, "
+    "first, with no text before it.",
+    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+
+class _HandOver(Exception):
+    """Haiku called think_harder: the question runs again on the smart model."""
 
 
 @dataclass
@@ -310,8 +326,14 @@ class ClaudeChat:
             async for delta in self._smart_run(messages, turn, route):
                 yield delta
             return
-        async for delta in self._haiku_run(messages, turn):
-            yield delta
+        try:
+            async for delta in self._haiku_run(messages, turn, handover=self.smart_available):
+                yield delta
+        except _HandOver:
+            # Haiku's round is thrown away (its think_harder call and thinking blocks
+            # included): the smart model gets the original messages and a fresh 3 rounds.
+            async for delta in self._smart_run(messages, turn, HANDED_OVER):
+                yield delta
 
     @property
     def smart_available(self) -> bool:
@@ -322,15 +344,19 @@ class ClaudeChat:
             and self._smart_model != self._model
         )
 
-    def _haiku_run(self, messages: list[Any], turn: _Turn) -> AsyncGenerator[str, None]:
-        """The reply on `model` (no handover: Task 4 adds it)."""
+    def _haiku_run(
+        self, messages: list[Any], turn: _Turn, *, handover: bool
+    ) -> AsyncGenerator[str, None]:
+        """The reply on `model`. With `handover`, its first round offers think_harder (and
+        the prompt has its rule); calling it raises _HandOver."""
         return self._rounds(
             messages,
             turn,
             model=self._model,
             effort=self._effort,
             max_tokens=MAX_TOKENS,
-            system=self._system,
+            system=self._system if handover else self._plain_system,
+            handover=handover,
         )
 
     async def _smart_run(
@@ -365,14 +391,7 @@ class ClaudeChat:
             ):
                 _block_smart(smart)
         self.answered_by = (self._model, UNAVAILABLE)
-        async for delta in self._rounds(
-            messages,
-            turn,
-            model=self._model,
-            effort=self._effort,
-            max_tokens=MAX_TOKENS,
-            system=self._plain_system,
-        ):
+        async for delta in self._haiku_run(messages, turn, handover=False):
             yield delta
 
     async def _rounds(
@@ -384,8 +403,10 @@ class ClaudeChat:
         effort: str,
         max_tokens: int,
         system: Callable[[], str],
+        handover: bool = False,
     ) -> AsyncGenerator[str, None]:
-        """Up to MAX_TOOL_ROUNDS API calls on one model, running tools between them."""
+        """Up to MAX_TOOL_ROUNDS API calls on one model, running tools between them.
+        `handover`: offer think_harder in round 1, and raise _HandOver if it's called."""
         searching, reported = turn.searching, turn.reported
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             last = round_no == MAX_TOOL_ROUNDS
@@ -404,6 +425,7 @@ class ClaudeChat:
                             system=system,
                             last=last,
                             web=web,
+                            handover=handover and round_no == 1,
                         )
                     ) as stream:
                         async for event in stream:
@@ -470,6 +492,10 @@ class ClaudeChat:
             if not uses:
                 log.warning("stop_reason=tool_use but no tool_use blocks; ending the reply")
                 return
+            if handover and round_no == 1 and any(b.name == THINK_HARDER for b in uses):
+                # Before any tool runs or is recorded: none of this round's calls happen.
+                log.info("Handing over to %s", self._smart_model)
+                raise _HandOver
             # For memory: plain tool_use blocks (no thinking, no text, which was spoken),
             # recorded before they run. Each result starts as a placeholder and is filled
             # in as its tool finishes, so a call cut off mid-run (or never reached) is
@@ -517,6 +543,7 @@ class ClaudeChat:
         system: Callable[[], str],
         last: bool,
         web: bool,
+        handover: bool = False,
     ) -> dict[str, Any]:
         # No "thinking" key: both models think adaptively by default (and "disabled" is a
         # 400 on some).
@@ -530,6 +557,8 @@ class ClaudeChat:
         tools = self._tools.schemas()
         if web:
             tools.append(self._web_tool())
+        if handover and not last:
+            tools.append(dict(THINK_HARDER_TOOL))
         if tools:
             params["tools"] = tools
             if last:  # also stops a search
@@ -687,11 +716,20 @@ def create_chat(
         publish_search(bus, search)
 
     if settings.llm_provider == "anthropic":
+        # Haiku's prompt has the think_harder rule while the smart model is on and not
+        # blocked (read per request); the smart model and any fallback get the plain one.
         return ClaudeChat(
             anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key),
             model=settings.llm_model,
             effort=settings.llm_effort,
-            system=lambda: prompt_for(settings, tools, personality()),
+            system=lambda: prompt_for(
+                settings,
+                tools,
+                personality(),
+                think_harder=bool(settings.smart_model) and not smart_blocked(),
+            ),
+            plain_system=lambda: prompt_for(settings, tools, personality(), think_harder=False),
+            smart_model=settings.smart_model or None,
             tools=tools,
             web_search_max=settings.web_search_max if settings.web_search else None,
             location=lambda: personality().about.location,
@@ -700,11 +738,19 @@ def create_chat(
     raise ValueError(f"unsupported LLM_PROVIDER {settings.llm_provider!r}")
 
 
-def prompt_for(settings: Settings, tools: ToolRegistry | None, personality: Personality) -> str:
-    """The full system prompt CARL gets (also the dashboard's read-only preview). Web
-    search counts as off once the API refused it for this key."""
+def prompt_for(
+    settings: Settings,
+    tools: ToolRegistry | None,
+    personality: Personality,
+    *,
+    think_harder: bool = False,
+) -> str:
+    """The full system prompt CARL gets (also the dashboard's read-only preview, which
+    leaves out the think_harder rule). Web search counts as off once the API refused it
+    for this key."""
     return system_prompt(
         settings.max_sentences,
+        think_harder=think_harder,
         notes=tools is not None and "take_note" in tools,
         music=tools is not None and "play_music" in tools,
         web=settings.web_search and not web_search_blocked(),

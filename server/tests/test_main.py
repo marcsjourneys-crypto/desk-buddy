@@ -526,7 +526,9 @@ def test_a_settings_change_that_doesnt_touch_the_chat_doesnt_rebuild_it(monkeypa
 
 
 @pytest.mark.parametrize(
-    "change", [{"web_search": False}, {"web_search_max": 5}], ids=["switch", "max"]
+    "change",
+    [{"web_search": False}, {"web_search_max": 5}, {"smart_model": ""}],
+    ids=["switch", "max", "smart_model"],
 )
 def test_web_search_settings_rebuild_the_chat_at_the_next_question(
     monkeypatch, fakes, calls, change

@@ -12,8 +12,17 @@ from desk_buddy.brain.personality import (
     PONDERING,
     REFUSAL_LINE,
     TASK_DONE,
+    THINK_HARDER_TEXT,
     system_prompt,
 )
+
+
+def test_the_think_harder_rule_is_only_there_when_asked_for():
+    assert THINK_HARDER_TEXT not in system_prompt(2)
+    assert THINK_HARDER_TEXT not in system_prompt(2, think_harder=False)
+    prompt = system_prompt(2, think_harder=True)
+    assert THINK_HARDER_TEXT in prompt
+    assert "think_harder tool" in THINK_HARDER_TEXT
 
 
 def test_prompt_introduces_carl_42():

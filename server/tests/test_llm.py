@@ -8,13 +8,14 @@ import httpx2
 import pytest
 
 import desk_buddy.llm as llm_module
-from desk_buddy.brain.personality import About, Personality
-from desk_buddy.brain.smart import ASKED, FOLLOW_ON, UNAVAILABLE
+from desk_buddy.brain.personality import THINK_HARDER_TEXT, About, Personality
+from desk_buddy.brain.smart import ASKED, FOLLOW_ON, HANDED_OVER, UNAVAILABLE
 from desk_buddy.config import Settings
 from desk_buddy.llm import (
     INTERRUPTED_RESULT,
     MAX_TOOL_ROUNDS,
     SMART_MAX_TOKENS,
+    THINK_HARDER_TOOL,
     ClaudeChat,
     LLMError,
     LLMRefusal,
@@ -1092,3 +1093,153 @@ def test_a_smart_refusal_never_falls_back():
     with pytest.raises(LLMRefusal):
         collect(chat, "think hard")
     assert len(client.calls) == 1
+
+
+# --- The think_harder handover ---
+
+
+def think_use(id="h1"):
+    return SimpleNamespace(type="tool_use", id=id, name="think_harder", input={})
+
+
+def tool_names(call):
+    return [t["name"] for t in call.get("tools", [])]
+
+
+def test_think_harder_is_offered_only_in_haikus_first_round():
+    calls = []
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use()])
+    chat, client = smart_chat(first, FakeStream(["Noted."]), tools=note_registry(calls))
+    assert collect(chat, "note buy milk") == ["Noted."]
+    assert tool_names(client.calls[0]) == ["take_note", "think_harder"]
+    assert client.calls[0]["tools"][-1] == THINK_HARDER_TOOL
+    assert "strict" not in THINK_HARDER_TOOL
+    assert tool_names(client.calls[1]) == ["take_note"]
+    assert client.calls[0]["system"] == "sys"  # the prompt with the think_harder rule
+    assert chat.answered_by is None and calls == ["buy milk"]
+
+
+def test_think_harder_alone_needs_no_tool_choice():
+    chat, client = smart_chat(FakeStream(["Hi."]))
+    collect(chat, "hi")
+    assert client.calls[0]["tools"] == [THINK_HARDER_TOOL]
+    assert "tool_choice" not in client.calls[0]
+
+
+def test_think_harder_is_not_offered_on_a_smart_run_or_with_the_feature_off(monkeypatch):
+    chat, client = smart_chat(FakeStream(["Deep."]), tools=note_registry([]), route=ASKED)
+    collect(chat, "think hard")
+    assert tool_names(client.calls[0]) == ["take_note"]
+    chat, client = make_chat(FakeStream(["Hi."]), tools=note_registry([]))
+    collect(chat, "hi")
+    assert tool_names(client.calls[0]) == ["take_note"]
+    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    chat, client = smart_chat(FakeStream(["Hi."]), tools=note_registry([]))
+    collect(chat, "hi")
+    assert tool_names(client.calls[0]) == ["take_note"]
+    assert client.calls[0]["system"] == "plain"  # no rule for a tool that isn't there
+
+
+def test_think_harder_is_not_offered_on_the_fallback():
+    chat, client = smart_chat(
+        FakeStream([], error=connection_error()),
+        FakeStream(["Quick."]),
+        tools=note_registry([]),
+        route=ASKED,
+    )
+    collect(chat, "think hard")
+    assert tool_names(client.calls[1]) == ["take_note"]
+    assert client.calls[1]["system"] == "plain"
+
+
+def test_a_handover_runs_the_question_again_on_the_smart_model(caplog):
+    thinking = SimpleNamespace(type="thinking", thinking="", signature="haiku-sig")
+    first = FakeStream([], stop_reason="tool_use", content=[thinking, think_use()])
+    chat, client = smart_chat(first, FakeStream(["Deep answer."]))
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "[happy] Hi."}]
+    with caplog.at_level("INFO", logger="desk_buddy.llm"):
+        assert collect(chat, "explain bloom filters", history) == ["Deep answer."]
+    haiku, smart = client.calls
+    assert haiku["model"] == "m"
+    assert smart["model"] == "big"
+    assert smart["output_config"] == {"effort": "medium"}
+    assert smart["max_tokens"] == SMART_MAX_TOKENS
+    assert smart["system"] == "plain"
+    assert smart["messages"] == haiku["messages"]  # the original ones
+    assert "think_harder" not in str(smart["messages"]) and "haiku-sig" not in str(smart)
+    assert "think_harder" not in tool_names(smart)
+    assert chat.answered_by == ("big", HANDED_OVER)
+    assert chat.last_tool_rounds == []
+    assert "Handing over to big" in caplog.text
+
+
+def test_a_handover_next_to_another_tool_runs_neither():
+    calls = []
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use("a"), think_use()])
+    chat, client = smart_chat(first, FakeStream(["Deep."]), tools=note_registry(calls))
+    collect(chat, "note it and think")
+    assert calls == []
+    assert chat.tools_succeeded == 0
+    assert client.calls[1]["model"] == "big"
+    assert chat.last_tool_rounds == []
+
+
+def test_haiku_text_before_the_handover_stands():
+    first = FakeStream(["Hmm."], stop_reason="tool_use", content=[think_use()])
+    chat, _ = smart_chat(first, FakeStream(["Deep."]))
+    assert collect(chat, "x") == ["Hmm.", "\n", "Deep."]
+
+
+def test_only_the_smart_runs_tool_rounds_are_remembered():
+    calls = []
+    first = FakeStream([], stop_reason="tool_use", content=[tool_use("a", "x"), think_use()])
+    smart_tool = FakeStream([], stop_reason="tool_use", content=[tool_use("b", "y")])
+    chat, client = smart_chat(first, smart_tool, FakeStream(["Done."]), tools=note_registry(calls))
+    collect(chat, "x")
+    assert calls == ["y"]
+    assert chat.tools_succeeded == 1
+    ((uses, results),) = chat.last_tool_rounds
+    assert [u["id"] for u in uses] == ["b"] and results[0]["content"] == "Saved"
+    assert len(client.calls) == 3  # a fresh 3 rounds on the smart model
+    assert all(c["model"] == "big" for c in client.calls[1:])
+
+
+def test_a_failed_handover_falls_back_to_haiku_without_offering_it_again():
+    first = FakeStream([], stop_reason="tool_use", content=[think_use()])
+    chat, client = smart_chat(
+        first, FakeStream([], error=connection_error()), FakeStream(["Quick."])
+    )
+    assert collect(chat, "x") == ["Quick."]
+    assert [c["model"] for c in client.calls] == ["m", "big", "m"]
+    assert "tools" not in client.calls[2]
+    assert chat.answered_by == ("m", UNAVAILABLE)
+
+
+def test_a_later_think_harder_call_is_never_a_handover():
+    # Not offered after round 1; if the model calls it anyway, it's an unknown tool.
+    first = FakeStream([], stop_reason="pause_turn", content=[])
+    second = FakeStream([], stop_reason="tool_use", content=[think_use()])
+    chat, client = smart_chat(first, second, FakeStream(["Ok."]), tools=note_registry([]))
+    assert collect(chat, "x") == ["Ok."]
+    assert all(c["model"] == "m" for c in client.calls)
+    assert chat.answered_by is None
+
+
+def test_create_chat_wires_the_smart_model_and_both_prompts():
+    chat = create_chat(Settings(anthropic_api_key="k"))
+    assert chat._smart_model == "claude-sonnet-5-5" and chat.smart_available
+    assert THINK_HARDER_TEXT in chat._system()
+    assert THINK_HARDER_TEXT not in chat._plain_system()
+    off = create_chat(Settings(anthropic_api_key="k", smart_model=""))
+    assert off._smart_model is None and not off.smart_available
+    assert THINK_HARDER_TEXT not in off._system()
+
+
+def test_create_chat_drops_the_rule_once_the_smart_model_is_blocked(monkeypatch):
+    chat = create_chat(Settings(anthropic_api_key="k"))
+    monkeypatch.setattr(llm_module, "_smart_blocked", True)
+    assert THINK_HARDER_TEXT not in chat._system()
+
+
+def test_the_dashboard_preview_has_no_think_harder_rule():
+    assert THINK_HARDER_TEXT not in prompt_for(Settings(anthropic_api_key="k"), None, Personality())

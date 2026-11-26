@@ -263,6 +263,7 @@ _CHAT_SETTINGS = (
     "max_sentences",
     "llm_model",
     "llm_effort",
+    "smart_model",
     "obsidian_vault_path",
     "obsidian_daily_folder",
     "obsidian_ideas_folder",
