@@ -340,3 +340,15 @@ Plan: `docs/plans/2026-11-26-smarter-model.md`.
 - **Thinking stays at the model's default (adaptive)**, never `disabled` (a 400 on Sonnet 5.5); effort `high` when the user asked, `medium` for a handover or a follow-on, `max_tokens` 8192.
 - **Failures fall back to Haiku** only when nothing was said and no tool round ran (so nothing is said twice or run twice); a model the key can't use (404/403) is blocked by its id until restart. A web-search 400 on a smart run only retries without search: the process-wide search block stays for the account-level refusal on Haiku.
 - **Skill builder noted for later:** the smart model writes a skill from the user's description into `SKILLS_DIR`; it still needs the usual approval on the Apps tab.
+
+## 2026-11-26 — Dashboard controls
+
+Plan: `docs/plans/2026-11-26-dashboard-controls.md`.
+
+- **Talk, Stop and Forget on the Live tab (the user's choice); music buttons left out** (they would be computer-control actions; the voice and the media keys already do it).
+- **Talk goes through the key's own handler,** so it drives the robot's mic with the same 250 ms release delay and the loop's rules decide the rest. · Alternatives: a separate page microphone in the browser (a second audio path to keep in sync).
+- **Every press is counted (key, page, wake), and a page release ends only its own press.** The review found that a lost page release, fired later by the 60 s cap, could end a question started with the key or the wake word. A page hold is also released at once when its event socket closes, and the page sends its `pagehide` release as a `keepalive` fetch.
+- **The server caps a page hold at 60 s** (`TALK_MAX_HOLD`), so a closed lid or a crashed browser can't leave the mic open.
+- **Stop cancels an action waiting for a yes (changed in review):** the plan left it pending, but pressing Stop during "Shall I…?" means no. Forget expires it, as the spoken forget does.
+- **Several dashboard tabs share one hold:** a release from one ends another's press. Accepted; the dashboard is this PC only.
+

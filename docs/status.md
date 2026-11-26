@@ -2,13 +2,28 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## Waiting for your check
+
+1. **Dashboard controls** (`docs/plans/2026-11-26-dashboard-controls.md`): hold Talk, ask and let go (robot and, with no robot, the PC mic); Stop during a long answer; Forget, then "what did I just ask?"; hold Talk and switch tabs; hold Talk and close the tab (CARL should stop listening at once, not after 60 s); Stop during "Shall I open…?" then "yes" (nothing opens).
+2. **Smart model** (`docs/plans/2026-11-26-smarter-model.md`, User check): "think hard: 17 × 23 − √144" (`sonnet-5-5 · asked`, 379), a follow-on, Haiku after 2 minutes, a possible handover, `SMART_MODEL=off`.
+3. **Morning brief**: tick it off (it already works in real use).
+4. **A TV evening** counting false wakes on the Live tab.
+5. **The servo sweep**, once the 5 V supply is wired.
+
+## 2026-11-26 — Dashboard controls (user check pending)
+
+- **Built:** Talk (hold), Stop and Forget on the Live tab. Talk works like Right Ctrl (robot or PC mic) and only ever releases its own press; the server caps a hold at 60 s and releases when the page disconnects. Stop drops everything and cancels a waiting yes; Forget also clears the conversation and says the fresh-start line.
+- **Review fixes:** the cap and page releases tied to their press (a later key or wake question can't be cut off), a `keepalive` release on tab close plus a server release when the page's socket closes, no release for a refused press, a reload on a 403, Stop cancels a waiting yes (a change from the plan: pressing Stop during "Shall I…?" means no).
+- **Tests:** 2093 server tests pass (28 integration tests deselected).
+- **Not pushed yet:** the dashboard controls. Push only when the user asks.
+
 ## 2026-11-26 — Smart model for hard questions (user check pending)
 
 - **Built:** `docs/plans/2026-11-26-smarter-model.md`. Haiku answers by default; Sonnet 5.5 (`SMART_MODEL`) answers when the user says "think hard" (and similar phrases) or when Haiku hands the question over with `think_harder`, and stays on for questions within 2 minutes. A failure falls back to Haiku; a model the key can't use is blocked until restart. The Live tab labels smart replies.
 - **Also since the last push:** a 0.25 s pause after each spoken sentence, the page list kept until a newer one, the follow-up opening sooner, a bare "please" as yes, 5 follow-ups in a row.
 - **Tests:** 2038 server tests pass (28 integration tests deselected). The optional live test `uv run pytest -m integration tests/integration/test_smart_model_live.py` costs a few cents; never run it without asking.
 - **Check by the user (pending):** the steps at the end of the plan.
-- **Not pushed yet:** everything since `fa1d190`. Push only when the user asks.
+- **Pushed** 2026-11-26 (`6ce90ce`).
 - **Next:** the user check, then M9 expressions; later the skill builder (the smart model writes a skill from a description, approved on the Apps tab as usual).
 
 ## 2026-11-26 — Wake word done (user check passed)
