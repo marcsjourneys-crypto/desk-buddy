@@ -1517,7 +1517,7 @@ def test_a_forget_command_expires_it_and_clears_the_search_results():
     assert PAGE not in rig.results
 
 
-def test_each_question_with_speech_moves_the_search_results_along():
+def test_the_page_list_lasts_until_a_forget_when_no_newer_one_replaces_it():
     rig = YesRig()
     orch, _, _ = rig.orchestrator()
 
@@ -1527,6 +1527,8 @@ def test_each_question_with_speech_moves_the_search_results_along():
         await answer(orch, "")  # no speech: not a question
         assert PAGE in rig.results
         await answer(orch, "And now?")
+        assert PAGE in rig.results  # no newer pages: the list stays
+        await answer(orch, "Forget that.")
 
     asyncio.run(scenario())
     assert PAGE not in rig.results

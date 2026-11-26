@@ -34,7 +34,7 @@ from desk_buddy.tools.skills import (
     check_pages,
 )
 from desk_buddy.tools.untrusted import wrap
-from desk_buddy.tools.urls import GAP, SearchResults, plain_line
+from desk_buddy.tools.urls import GAP, PAGE_LIST_TTL, SearchResults, plain_line
 
 A1 = "https://news.example.com/world/a1"
 A2 = "https://www.robots.example.org/story/a2?id=7"
@@ -771,3 +771,101 @@ def test_with_computer_control_off_there_is_no_numbered_note(monkeypatch, tmp_pa
     results.add([A1])  # a web search still runs
     results.new_question()
     assert results.note() is None
+
+
+# --- The list lasts until a newer one, a forget or PAGE_LIST_TTL ---
+
+
+def nine_pages():
+    return [{"title": f"Story {i}", "url": f"{A1}?n={i}"} for i in range(1, 10)]
+
+
+def test_the_users_sequence_five_still_opens_two_questions_later(tmp_path):
+    """The user's check: the brief, a question about it, "open the neuron" (CARL asks
+    which), "Five please" (it was refused when the list lasted one question), "Yes"."""
+    rig = PagesRig(tmp_path, runner=real_runner(tmp_path, output(pages=nine_pages())))
+    brief = CallingChat(lambda: rig.call("skill_morning_brief"), deltas=("[happy] Here. ",))
+    orch, parts, _ = rig.orchestrator(chat=brief, transcriber=FakeTranscriber("Morning brief"))
+    about = FakeChat(deltas=("[happy] Yes, number five. ",))
+    which = FakeChat(deltas=("[curious] Which number? ",))
+    opening = CallingChat(lambda: rig.launch.open_search_result("5"), deltas=("[happy] Sure. ",))
+    done = FakeChat(deltas=("[happy] There you go. ",))
+
+    async def scenario():
+        await talk(orch)
+        await answer(orch, "Did you get the AI news from the Daily Neuron?", about)
+        await answer(orch, "Go ahead and open the neuron.", which)
+        await answer(orch, "Five please.", opening)
+        await answer(orch, "Yes.", done)
+
+    asyncio.run(scenario())
+    assert "5. Story 5 (news.example.com)" in about.prompts[0]  # the note, once
+    assert "pages from your last search" not in which.prompts[0]
+    assert "pages from your last search" not in opening.prompts[0]
+    assert parts["speaker"].played[-2:] == [
+        "Shall I open the page on news.example.com?",
+        "There you go.",
+    ]
+    assert rig.opener.calls == [f"{A1}?n=5"]
+    assert "refused" not in rig.outcomes()
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_newer_search_replaces_the_list_but_an_empty_question_keeps_it():
+    results = SearchResults(clock=Clock())
+    results.add([A1, A2])
+    results.new_question(1)
+    assert results.note() is not None  # once, at the question after
+    results.new_question(2)  # nothing found
+    assert results.note() is None and results.resolve("2") == A2
+    results.new_question(3)
+    results.add([A3], question=3)  # a search in question 3
+    assert results.resolve("2") == A2  # still the old list during question 3
+    results.new_question(4)
+    assert results.resolve("1") == A3 and results.resolve("2") is None
+    assert "1. Untitled (ai.example.net)" in results.note()
+
+
+def test_the_list_expires_10_minutes_after_it_was_made():
+    clock = Clock()
+    results = SearchResults(clock=clock)
+    results.add([A1])
+    results.new_question(1)
+    clock.now += PAGE_LIST_TTL - 1
+    results.new_question(2)
+    assert results.resolve("1") == A1 and A1 in results
+    clock.now += 2
+    assert results.resolve("1") is None and A1 not in results
+    results.new_question(3)
+    assert results.note() is None
+
+
+def test_forget_clears_the_kept_list():
+    results = SearchResults(clock=Clock())
+    results.add([A1])
+    results.new_question(1)
+    results.new_question(2)
+    results.clear()
+    assert results.resolve("1") is None and results.note() is None
+    results.new_question(3)
+    assert results.resolve("1") is None
+
+
+def test_the_note_comes_only_at_the_first_question_after_the_list_is_made():
+    results = SearchResults(clock=Clock())
+    results.add([A1])
+    assert results.note() is None  # this question's are seen raw
+    results.new_question(1)
+    assert results.note() is not None
+    assert results.note() is not None  # same question: still the fresh list
+    results.new_question(2)
+    assert results.note() is None
+    results.new_question(3)
+    assert results.note() is None and results.resolve("1") == A1

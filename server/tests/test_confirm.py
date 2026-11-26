@@ -456,13 +456,15 @@ def test_the_last_questions_results_by_number_and_this_questions_by_address():
     with pytest.raises(ToolError):
         tools.open_search_result(PAGE)
     tools.open_search_result(" 1 ")
-    results.new_question()  # the next-next question: old numbers mean nothing
-    with pytest.raises(ToolError):
-        tools.open_search_result("1")
+    results.new_question()  # the next-next question found nothing: the list stays
+    tools.open_search_result("1")
+    assert confirmations.pending.log_args == f'{{"page": "1", "url": "{OTHER}"}}'
     results.add([PAGE])
     results.clear()  # a forget command
     with pytest.raises(ToolError):
         tools.open_search_result(PAGE)
+    with pytest.raises(ToolError):
+        tools.open_search_result("1")
 
 
 @pytest.mark.parametrize("page", ["0", "3", "11", "-1", "1.0", "one", "١", "1" * 600])

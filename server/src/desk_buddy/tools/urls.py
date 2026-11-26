@@ -8,8 +8,9 @@ from __future__ import annotations
 import ipaddress
 import re
 import threading
+import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +26,7 @@ LIST_NOTE_START = (
     "(System note: pages from your last search or skill, for open_search_result by number:"
 )
 LIST_SOURCE = "search_and_skill_pages"
+PAGE_LIST_TTL = 600.0  # seconds a numbered list can still be opened from
 NOT_AVAILABLE = "(not available)"
 
 # One search result (or a skill's page): (title, site, full address). A skill's page that
@@ -64,9 +66,11 @@ class SearchResults:
 
     - This question's results can be opened by their exact address (Claude saw a search's
       addresses in this turn).
-    - At the next question with speech they become a numbered list (up to MAX_LISTED):
-      Claude is shown the titles and sites in a system note (note()) and opens one by its
-      number. Numbers only ever mean the latest list.
+    - At the next question with speech they become the numbered list (up to MAX_LISTED):
+      Claude is shown the titles and sites once, in a system note at that question
+      (note()), and opens one by its number. The list stays until a later question finds
+      pages of its own (which replace it), a forget, or PAGE_LIST_TTL after it was made:
+      questions in between keep it. Numbers only ever mean the latest list.
     - Skills' pages come first, each skill's as one block in the order the skill gave
       them: a dropped page keeps its number as a placeholder (GAP), so the numbers a
       skill's text says are the numbers that open. Then the searches' results, one per
@@ -78,17 +82,20 @@ class SearchResults:
     Thread-safe: searches are added on the event loop, tools resolve from worker threads.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
+        self._clock = clock
         self._skills: list[Page] = []  # this question's skill pages (with GAPs)
         self._now: list[Page] = []  # this question's search results
         self._listed: list[Page] = []
+        self._listed_at = 0.0
+        self._fresh = False  # the list was made at this question: note it once
         self._question: int | None = None
         self.offered = True
 
     def new_question(self, question: int | None = None) -> None:
-        """A new question with speech (its number, from the loop): this question's pages
-        become the numbered list."""
+        """A new question with speech (its number, from the loop): the last question's
+        pages, if it had any, become the numbered list; otherwise the list stays."""
         with self._lock:
             listed = self._skills[:MAX_LISTED]
             taken = {url for _, _, url in listed if url}
@@ -98,13 +105,23 @@ class SearchResults:
                 if url not in taken:
                     taken.add(url)
                     listed.append((title, site, url))
-            self._listed, self._skills, self._now = listed, [], []
+            self._skills, self._now = [], []
             self._question = question
+            self._fresh = bool(listed)
+            if listed:
+                self._listed, self._listed_at = listed, self._clock()
+
+    def _current(self) -> list[Page]:
+        """The numbered list, unless it has expired (call with the lock held)."""
+        if self._listed and self._clock() - self._listed_at > PAGE_LIST_TTL:
+            self._listed, self._fresh = [], False
+        return self._listed
 
     def clear(self) -> None:
         """Forget every result (a forget command)."""
         with self._lock:
             self._listed, self._skills, self._now = [], [], []
+            self._fresh = False
 
     def _stale(self, question: int | None) -> bool:
         return self._question is not None and question is not None and question != self._question
@@ -152,17 +169,19 @@ class SearchResults:
         with self._lock:
             if text.isdigit() and text.isascii():
                 n = int(text)
-                return (self._listed[n - 1][2] or None) if 1 <= n <= len(self._listed) else None
+                listed = self._current()
+                return (listed[n - 1][2] or None) if 1 <= n <= len(listed) else None
             if not text:
                 return None
             return text if any(url == text for _, _, url in (*self._skills, *self._now)) else None
 
     def note(self) -> str | None:
         """The numbered list for Claude, as a system note around an untrusted block (the
-        titles are web text), or None when the last question found nothing (or
-        open_search_result isn't offered)."""
+        titles are web text), only at the question right after it was made (Claude keeps
+        it in memory after that); None otherwise, or when open_search_result isn't
+        offered."""
         with self._lock:
-            listed = list(self._listed)
+            listed = list(self._current()) if self._fresh else []
         if not listed or not self.offered:
             return None
         lines = [
@@ -178,7 +197,7 @@ class SearchResults:
         if not url:
             return False
         with self._lock:
-            return any(u == url for _, _, u in (*self._skills, *self._now, *self._listed))
+            return any(u == url for _, _, u in (*self._skills, *self._now, *self._current()))
 
 
 def site_name(url: str) -> str:
