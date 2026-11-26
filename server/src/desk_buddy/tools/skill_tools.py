@@ -54,6 +54,7 @@ CONTROL_TEXT = "The text can't hold control or invisible formatting characters."
 # Server-written lines after a pages skill's result (outside its untrusted block).
 PAGES_FROM = "(Its pages are numbered from {start}.)"
 PAGES_FULL = "(Its pages can't be opened: the list of pages is already full.)"
+PAGES_CUT = "(Only its first {count} pages can be opened.)"
 PAGES_STALE = "(Its pages can no longer be opened.)"
 
 
@@ -381,8 +382,11 @@ class SkillTools:
             text += "\n" + PAGES_STALE
         elif start > MAX_LISTED:
             text += "\n" + PAGES_FULL
-        elif start > 1:
-            text += "\n" + PAGES_FROM.format(start=start)
+        else:
+            if start > 1:
+                text += "\n" + PAGES_FROM.format(start=start)
+            if start + len(pages) - 1 > MAX_LISTED:
+                text += "\n" + PAGES_CUT.format(count=MAX_LISTED - start + 1)
         output = SkillOutput(text)
         if start is not None:
             output.links = sum(1 for _, _, url in pages if url)

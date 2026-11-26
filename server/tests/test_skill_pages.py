@@ -394,6 +394,23 @@ def test_a_skill_after_the_list_is_full_is_told_its_pages_cant_be_opened(prig):
     assert prig.results.resolve("10") == f"{A1}?n=9" and prig.results.resolve("11") is None
 
 
+def test_a_skill_whose_pages_cross_slot_10_is_told_how_many_can_be_opened(prig):
+    eight = tuple((f"S{i}", "news.example.com", f"{A1}?n={i}") for i in range(8))
+    prig.runner.result = SkillResult(True, "Eight.", "ok", eight)
+    assert "Only its first" not in prig.call("skill_morning_brief")
+    three = tuple((f"T{i}", "ai.example.net", f"{A3}?n={i}") for i in range(3))
+    prig.runner.result = SkillResult(True, wrap("skill:x", "Three."), "ok", three)
+    second = prig.call("skill_morning_brief")
+    assert second.endswith(
+        "</untrusted>\n(Its pages are numbered from 9.)\n(Only its first 2 pages can be opened.)"
+    )
+    prig.results.new_question()
+    assert prig.results.resolve("10") == f"{A3}?n=1" and prig.results.resolve("11") is None
+    ten = tuple((f"U{i}", "ai.example.net", f"{A2}?n={i}") for i in range(10))
+    prig.runner.result = SkillResult(True, "Ten.", "ok", ten)
+    assert "Only its first" not in prig.call("skill_morning_brief")  # exactly 10 fit
+
+
 def test_a_search_later_in_the_question_also_comes_after_the_pages(prig):
     prig.call("skill_morning_brief")
     later = [(f"Hit {i}", "bbc.co.uk", f"https://www.bbc.co.uk/{i}") for i in range(12)]
@@ -601,6 +618,34 @@ def test_an_add_in_its_own_question_is_kept(prig):
     assert "no longer" not in prig.call("skill_morning_brief")
     prig.results.new_question(2)
     assert prig.results.resolve("1") == A1
+
+
+def test_a_search_add_stamped_with_an_earlier_question_is_dropped():
+    results = SearchResults()
+    results.new_question(5)
+    results.add([A1], question=4)
+    assert results.resolve(A1) is None
+    token = QUESTION.set(4)  # stamped from the context, as a late tool thread would be
+    try:
+        results.add([A2])
+    finally:
+        QUESTION.reset(token)
+    assert results.resolve(A2) is None
+    results.add([A3], question=5)
+    assert results.resolve(A3) == A3
+
+
+def test_a_search_add_with_no_stamp_is_kept():
+    results = SearchResults()
+    results.new_question(5)
+    token = QUESTION.set(None)
+    try:
+        results.add([A1])
+    finally:
+        QUESTION.reset(token)
+    assert results.resolve(A1) == A1
+    results.new_question(6)
+    assert results.resolve("1") == A1
 
 
 READING_RESULT = SkillResult(True, wrap("skill:reading-list", "Two saved."), "ok", PAGES)
