@@ -2,6 +2,24 @@
 
 Where the project stands, so work can resume after a break. Update this when a milestone moves.
 
+## 2026-11-26 — Morning brief built (user check pending)
+
+- **Built:**
+  - **Skills can hand back pages** (`"pages": true` in `skill.json`): the script prints `{"text", "pages": [{"title", "url"}]}`, the runner checks the shape and every address (public http/https only), and the pages join the numbered list web search fills. "Open number 4" opens one through `open_search_result` after the spoken yes. Skill pages come first in the list and keep their numbers even when one is dropped. `open_search_result` is offered with a pages skill even when web search is off.
+  - **The `morning-brief` example skill** (`examples/skills/morning-brief`, standard library only): today's weather from Open-Meteo and the three newest world (BBC), AI (TechCrunch) and robotics (IEEE Spectrum) headlines, numbered 1-9 in the same order as its pages. Place, units and feeds in its `config.json`; setup in `server/README.md`.
+  - Review fixes: stable slots, skill pages first, gating on `open_search_result`, adds stamped with their question, titles without control or format characters.
+- **Plan:** `docs/plans/2026-11-26-morning-brief.md`.
+- **Tests:** 1774 server tests pass (25 integration tests deselected; the morning brief's live run passes on this PC: 9 pages, the weather and all three sections).
+- **Check by the user (pending):**
+  1. Copy `morning-brief` into `carl-skills`, set your place in `config.json`, and tick it on the Apps tab.
+  2. "Morning brief": CARL gives the weather and the world, AI and robotics headlines.
+  3. "Open number 4": the robot asks "Shall I open the page on …?". Say yes and the article opens.
+  4. "Just the AI news": only that section.
+  5. "Tell me more about the second AI story": CARL searches the web.
+- **Wake word ("Hey CARL"):** Phase 0 still waits on the user training the model (Task 0.1 in `docs/plans/2026-11-25-wake-word.md`).
+- **Not pushed yet:** everything since `9aceb97` (the local skills check): the morning brief design, skill pages and the morning brief. Push only when the user asks.
+- **Next:** the morning brief check, then wake word training, a write-only Keys section and first-run setup, the servo check, in-page controls, or M9 expressions.
+
 ## 2026-11-26 — Local skills done (user check passed)
 
 - **Built:**
