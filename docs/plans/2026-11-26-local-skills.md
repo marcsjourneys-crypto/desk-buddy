@@ -75,26 +75,28 @@ CARL runs the user's own Python scripts ("skills") by voice. Examples: "check my
 ## Part 2: Running a skill
 
 **Setup on approval (dashboard only, never during a turn):**
-- `POST /api/skills/<slug>/approve` runs `[uv, "sync"]` in the folder, with a 300 s timeout, the cleaned environment, and no window;
+- `POST /api/skills/<slug>/approve` runs `sync_command(uv)` (`[uv, "sync", "--no-config", "--no-editable"]`, after `outside_project` passes) in the folder, with a 300 s timeout, the cleaned environment, and no window;
 - the fingerprint is computed **after** the sync, because `uv.lock` may appear;
 - a failed sync returns its last 1000 chars of output to the page, and the skill stays off;
 - the route needs the page token, like every change;
 - a skill with no `pyproject.toml` skips the sync.
 
 **`uv`:**
-- found once at startup with `shutil.which("uv")`, and the full path is stored;
+- found once at startup by `find_uv()`, and the full path is stored: a walk over `PATH` that takes only absolute entries and only a `uv.exe` file (unlike `shutil.which`, the current folder is never searched and no `.bat`/`.cmd` counts);
 - if it isn't found, skills are off, with a warning and a banner.
 
 **The run:**
-- `subprocess.Popen([uv_path, "run", "--no-sync", "--no-config", "--no-python-downloads", "--offline", "main.py"], cwd=folder, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=clean_env, creationflags=CREATE_NO_WINDOW)`, never `shell=True`;
+- `subprocess.Popen([uv_path, "run", "--no-sync", "--no-config", "--no-python-downloads", "--offline", "main.py"], cwd=folder, stdin=PIPE, stdout=PIPE, stderr=PIPE, env=clean_env, creationflags=CREATE_NO_WINDOW)` for a skill with a `pyproject.toml` (one without runs as `[python, "-s", "main.py"]`, below), never `shell=True`;
 - stdin: `json.dumps({<choice>: <value>, …, "text": <text if given>})` in UTF-8, then closed;
 - **Nothing unhashed in the folder gets executed** (added after the Task 1 review):
   - the skill's environment lives outside its folder: CARL sets `UV_PROJECT_ENVIRONMENT=%LOCALAPPDATA%\desk-buddy\skill-envs\<slug>` itself (for both `uv sync` and `uv run`), so a `.venv` in the folder is never used;
   - `PYTHONPYCACHEPREFIX` points at a CARL-owned folder (`%LOCALAPPDATA%\desk-buddy\skill-cache\<slug>`), so a planted `__pycache__` `.pyc` is never loaded;
   - uv gets `--no-config` (both commands), so no `uv.toml` in the folder or its parents can redirect anything;
   - `uv run` also gets `--no-python-downloads` and `--offline`.
-  - a skill **without** a `pyproject.toml` (found in Task 2): uv isn't in project mode there, so it would use any `.venv` in the folder or a parent (tested), and `UV_PROJECT_ENVIRONMENT` doesn't apply. Such a skill runs as `[uv, "run", "--no-project", "--no-config", "--no-python-downloads", "--offline", "--python", <CARL's base python.exe>, "main.py"]` instead (`--no-sync` has no effect there); the integration test plants a `.venv` and checks it's ignored.
-- `clean_env` is built from an allowlist only: `SystemRoot`, `SystemDrive`, `WINDIR`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `COMPUTERNAME`, `USERNAME`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`, `COMSPEC`, plus `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`. Every `UV_*` variable is dropped.
+  - a skill **without** a `pyproject.toml` (found in Task 2 and its review): `uv run` isn't in project mode there, so it would use any `.venv` in the folder or a parent (tested), would build an environment from a PEP 723 header during a turn, and `UV_PROJECT_ENVIRONMENT` doesn't apply. Such a skill runs **without uv**, as `[<CARL's base python.exe>, "-s", "main.py"]` (`sys.base_prefix`, a uv-managed Python), with the same `clean_env`; `python_ok(python)` lets startup warn if it's missing. The integration test plants a `.venv` and a PEP 723 header and checks both are ignored.
+  - a skill **with** a `pyproject.toml` must not sit inside another uv project: a `pyproject.toml` in any folder above it, up to the drive root (e.g. a `[tool.uv.workspace]` naming `skills/*`, with a path source), would make `uv sync` install code from outside the folder and write `uv.lock` there. `outside_project(folder)` returns "The skill is inside another uv project (<path>)."; the approve route checks it before syncing (Task 3), and the run checks it before running a project skill (Task 4).
+  - `uv sync` is `[uv, "sync", "--no-config", "--no-editable"]` (`sync_command`), so path dependencies are copied into the environment and frozen at approval.
+- `clean_env` is built from an allowlist only: `SystemRoot`, `SystemDrive`, `WINDIR`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `COMPUTERNAME`, `USERNAME`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`, `COMSPEC`, plus `PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1` and `PYTHONNOUSERSITE=1` (no user site-packages). Every `UV_*` variable is dropped (CARL sets only its own `UV_PROJECT_ENVIRONMENT`), and any `PATH` entry inside CARL's own `sys.prefix` (its venv's `Scripts`) is removed.
 - **The timeout:** `communicate(timeout=…)`. When it's reached, the whole process tree is killed with `[%SystemRoot%\System32\taskkill.exe, "/PID", pid, "/T", "/F"]`, and the run is `failed: timed out`.
 - **One at a time:** a lock, and a second call while one is running is refused ("another skill is running"). Each run happens on a worker thread, so the voice loop never blocks.
 - **Results:**

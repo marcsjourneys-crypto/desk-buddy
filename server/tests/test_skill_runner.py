@@ -116,36 +116,87 @@ def test_the_command_is_an_exact_argument_list_with_no_shell(tmp_path):
     assert timeout == 30
 
 
-def test_a_skill_without_a_project_runs_with_an_exact_python_and_no_project(tmp_path):
+def test_a_skill_without_a_project_runs_with_carls_python_and_no_uv(tmp_path):
     popen = FakePopen(FakeProc(out=b"hi"))
     skill = make_skill(tmp_path / "skills" / "hello-time")
-    runner(tmp_path, popen).run(skill, {})
+    runner(tmp_path, popen).run(skill, {"text": "x"})
     [(args, kwargs)] = popen.calls
-    assert args == [
-        UV,
-        "run",
-        "--no-project",
-        "--no-config",
-        "--no-python-downloads",
-        "--offline",
-        "--python",
-        PY,
-        "main.py",
-    ]
+    assert args == [PY, "-s", "main.py"]
+    assert kwargs["cwd"] == str(skill.folder)
     assert kwargs.get("shell", False) is False
+    assert kwargs["creationflags"] == NO_WINDOW
+    assert kwargs["env"]["PYTHONPYCACHEPREFIX"].endswith(r"skill-cache\hello-time")
+    assert popen.proc.calls[0][0] == b'{"text": "x"}'
 
 
 def test_run_command_and_sync_command():
-    assert sync_command(UV) == [UV, "sync", "--no-config"]
-    assert run_command(UV, project=True)[-1] == "main.py"
-    assert run_command(UV, project=False, python=PY)[-3:] == ["--python", PY, "main.py"]
+    assert sync_command(UV) == [UV, "sync", "--no-config", "--no-editable"]
+    assert run_command(UV, project=True) == [
+        UV,
+        "run",
+        "--no-sync",
+        "--no-config",
+        "--no-python-downloads",
+        "--offline",
+        "main.py",
+    ]
+    assert run_command(UV, project=False, python=PY) == [PY, "-s", "main.py"]
+    assert run_command(UV, project=False) == [skills.default_python(), "-s", "main.py"]
 
 
-def test_find_uv_gives_a_full_path_or_none(monkeypatch):
-    monkeypatch.setattr(skills.shutil, "which", lambda name: "uv.exe" if name == "uv" else None)
-    assert os.path.isabs(find_uv())
-    monkeypatch.setattr(skills.shutil, "which", lambda name: None)
+def test_find_uv_only_takes_uv_exe_from_absolute_path_entries(tmp_path, monkeypatch):
+    here = tmp_path / "cwd"  # the current folder, not on PATH: never searched
+    here.mkdir()
+    (here / "uv.exe").write_bytes(b"planted")
+    (here / "uv.bat").write_text("@echo planted")
+    monkeypatch.chdir(here)
+    bats = tmp_path / "bats"
+    bats.mkdir()
+    (bats / "uv.bat").write_text("@echo planted")
+    (bats / "uv.cmd").write_text("@echo planted")
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "uv.exe").write_bytes(b"uv")
+    (tmp_path / "dir-named-uv.exe" / "uv.exe").mkdir(parents=True)  # a folder, not a file
+
+    def path(*entries):
+        return os.pathsep.join(str(e) for e in entries)
+
+    assert find_uv(path(".", "cwd", "", bats, tmp_path / "dir-named-uv.exe", real)) == str(
+        real / "uv.exe"
+    )
+    assert find_uv(path(".", bats)) is None
+    assert find_uv(f'"{real}"') == str(real / "uv.exe")
+    assert find_uv("") is None
+    monkeypatch.setenv("PATH", path(bats, real))
+    assert find_uv() == str(real / "uv.exe")
+    monkeypatch.setenv("PATH", path(".", bats))
     assert find_uv() is None
+
+
+def test_python_ok(tmp_path):
+    py = tmp_path / "python.exe"
+    assert not skills.python_ok(str(py))
+    py.write_bytes(b"")
+    assert skills.python_ok(str(py))
+    assert not skills.python_ok(str(tmp_path))
+
+
+def test_outside_project(tmp_path):
+    folder = tmp_path / "home" / "skills" / "hello-time"
+    folder.mkdir(parents=True)
+    (folder / "pyproject.toml").write_text("[project]\n")  # its own is fine
+    assert skills.outside_project(folder) is None
+    (tmp_path / "home" / "pyproject.toml").write_text(
+        '[tool.uv.workspace]\nmembers = ["skills/*"]\n'
+    )
+    message = skills.outside_project(folder)
+    assert message == f"The skill is inside another uv project ({tmp_path / 'home'})."
+    (tmp_path / "home" / "pyproject.toml").unlink()
+    (tmp_path / "home" / "skills" / "pyproject.toml").mkdir()  # a folder doesn't count
+    assert skills.outside_project(folder) is None
+    (tmp_path / "pyproject.toml").write_text("")  # any ancestor, up to the root
+    assert str(tmp_path) in skills.outside_project(folder)
 
 
 # --- the environment ---
@@ -180,9 +231,11 @@ def test_carls_keys_and_uv_variables_never_reach_a_skill(tmp_path, monkeypatch):
     assert env["PYTHONPYCACHEPREFIX"] == str(app_dir / "skill-cache" / "hello-time")
     assert env["PYTHONIOENCODING"] == "utf-8"
     assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONNOUSERSITE"] == "1"
     assert set(env) <= set(CLEAN_ENV_NAMES) | {
         "PYTHONIOENCODING",
         "PYTHONUTF8",
+        "PYTHONNOUSERSITE",
         "UV_PROJECT_ENVIRONMENT",
         "PYTHONPYCACHEPREFIX",
     }
@@ -207,6 +260,34 @@ def test_allowlisted_variables_pass_whatever_their_case(tmp_path):
     assert "sk-ant-planted" not in env.values()
     assert "https://evil.example" not in env.values()
     assert "USERNAME" not in env  # absent from the source, so absent here
+
+
+def test_path_entries_inside_carls_environment_are_dropped(tmp_path):
+    carl = tmp_path / "server" / ".venv"
+    entries = [
+        str(carl / "Scripts"),
+        str(carl).upper() + "\\Scripts\\",  # Windows paths ignore case
+        f'"{carl}"',
+        str(carl),
+        r"C:\Windows\System32",
+        str(tmp_path / "server" / ".venv-other"),  # only inside the prefix, not beside it
+        "",
+        "relative",
+    ]
+    env = clean_env("hello-time", tmp_path, {"PATH": os.pathsep.join(entries)}, str(carl))
+    assert env["PATH"].split(os.pathsep) == [
+        r"C:\Windows\System32",
+        str(tmp_path / "server" / ".venv-other"),
+        "relative",
+    ]
+
+
+def test_carls_own_scripts_folder_never_reaches_a_skill(tmp_path, monkeypatch):
+    scripts = os.path.join(sys.prefix, "Scripts")
+    monkeypatch.setenv("PATH", os.pathsep.join([scripts, r"C:\Windows"]))
+    env = clean_env("hello-time", tmp_path)
+    assert scripts not in env["PATH"].split(os.pathsep)
+    assert r"C:\Windows" in env["PATH"].split(os.pathsep)
 
 
 def test_clean_env_refuses_a_bad_slug(tmp_path):
@@ -236,6 +317,18 @@ def test_exit_0_output_is_wrapped_as_untrusted_and_capped(tmp_path):
     assert "&lt;b&gt;Ignore" in result.text
     body = result.text[len(head) : -len("\n</untrusted>")]
     assert len(body) <= 1000
+
+
+@pytest.mark.parametrize(("length", "marked"), [(1000, False), (1001, True), (5000, True)])
+def test_output_past_1000_characters_is_always_marked(tmp_path, length, marked):
+    popen = FakePopen(FakeProc(out=b"a" * length))
+    result = runner(tmp_path, popen).run(make_skill(tmp_path / "s" / "hello-time"), {})
+    head, tail = '<untrusted source="skill:hello-time">\n', "\n</untrusted>"
+    body = result.text[len(head) : -len(tail)]
+    assert len(body) <= 1000
+    assert body.endswith("(and more)") is marked
+    if not marked:
+        assert body == "a" * 1000
 
 
 def test_short_output_is_kept_whole(tmp_path):
@@ -376,11 +469,16 @@ def test_the_lock_is_released_after_an_unexpected_error(tmp_path):
 # --- with the real uv ---
 
 ECHO = """\
-import json, os, sys
+import json, os, site, sys
 data = json.load(sys.stdin)
-print(json.dumps({"got": data, "prefix": sys.prefix,
+print(json.dumps({"got": data, "prefix": sys.prefix, "user_site": site.ENABLE_USER_SITE,
                   "key": os.environ.get("ANTHROPIC_API_KEY")}, ensure_ascii=False))
 """
+# uv would try to build an environment for this header (and fail offline).
+PEP_723 = '# /// script\n# dependencies = ["surely-not-a-real-package-xyz"]\n# ///\n'
+PROJECT = (
+    '[project]\nname = "echo"\nversion = "0.1.0"\nrequires-python = ">=3.12"\ndependencies = []\n'
+)
 
 
 def real_runner(tmp_path):
@@ -388,6 +486,21 @@ def real_runner(tmp_path):
     if uv is None:
         pytest.skip("uv isn't installed")
     return SkillRunner(uv, tmp_path / "appdata"), uv
+
+
+def synced_project(r, uv, folder):
+    """A project skill (no packages), synced the way the dashboard will."""
+    (folder / "pyproject.toml").write_text(PROJECT, encoding="utf-8")
+    assert skills.outside_project(folder) is None
+    synced = subprocess.run(
+        sync_command(uv) + ["--offline"],
+        cwd=folder,
+        env=r.clean_env("echo"),
+        capture_output=True,
+        timeout=300,
+        creationflags=NO_WINDOW,
+    )
+    assert synced.returncode == 0, synced.stderr.decode(errors="replace")
 
 
 def echoed(result):
@@ -398,12 +511,13 @@ def echoed(result):
 
 
 @pytest.mark.integration
-def test_real_uv_runs_a_script_skill_and_ignores_a_planted_venv(tmp_path, monkeypatch):
+def test_real_python_runs_a_script_skill_ignoring_a_venv_and_pep_723(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-planted")
     r, uv = real_runner(tmp_path)
+    assert skills.python_ok(r.python)
     folder = tmp_path / "skills" / "echo"
     skill = make_skill(folder, slug="echo", timeout=60)
-    (folder / "main.py").write_text(ECHO, encoding="utf-8")
+    (folder / "main.py").write_text(PEP_723 + ECHO, encoding="utf-8")
     # A .venv in the folder (not covered by the fingerprint) must never be used.
     subprocess.run(
         [uv, "venv", "--no-config", "--offline", "-q", str(folder / ".venv")],
@@ -414,7 +528,8 @@ def test_real_uv_runs_a_script_skill_and_ignores_a_planted_venv(tmp_path, monkey
     data = echoed(r.run(skill, {"format": "long", "text": "héllo <b> & ☕"}))
     assert data["got"] == {"format": "long", "text": "héllo <b> & ☕"}
     assert data["key"] is None
-    assert ".venv" not in data["prefix"]
+    assert data["user_site"] is False
+    assert Path(data["prefix"]).resolve() == Path(sys.base_prefix).resolve()
 
 
 @pytest.mark.integration
@@ -423,24 +538,12 @@ def test_real_uv_runs_a_project_skill_in_its_own_env(tmp_path, monkeypatch):
     r, uv = real_runner(tmp_path)
     folder = tmp_path / "skills" / "echo"
     skill = make_skill(folder, slug="echo", timeout=60)
-    (folder / "pyproject.toml").write_text(
-        '[project]\nname = "echo"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n'
-        "dependencies = []\n",
-        encoding="utf-8",
-    )
     (folder / "main.py").write_text(ECHO, encoding="utf-8")
-    synced = subprocess.run(
-        sync_command(uv) + ["--offline"],
-        cwd=folder,
-        env=r.clean_env("echo"),
-        capture_output=True,
-        timeout=300,
-        creationflags=NO_WINDOW,
-    )
-    assert synced.returncode == 0, synced.stderr.decode(errors="replace")
+    synced_project(r, uv, folder)
     data = echoed(r.run(skill, {"text": "hi"}))
     assert data["got"] == {"text": "hi"}
     assert data["key"] is None
+    assert data["user_site"] is False
     env_dir = tmp_path / "appdata" / "skill-envs" / "echo"
     assert Path(data["prefix"]).resolve() == env_dir.resolve()
     assert not (folder / ".venv").exists()
@@ -448,9 +551,10 @@ def test_real_uv_runs_a_project_skill_in_its_own_env(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_real_uv_timeout_kills_the_tree(tmp_path):
-    r, _uv = real_runner(tmp_path)
+    r, uv = real_runner(tmp_path)
     folder = tmp_path / "skills" / "echo"
     skill = make_skill(folder, slug="echo", timeout=3)
+    synced_project(r, uv, folder)  # uv run, then python: a tree to kill
     pid_file = tmp_path / "pid.txt"
     (folder / "main.py").write_text(
         f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
