@@ -52,6 +52,7 @@ class FakeProc:
         self.time_out = timeout
         self.calls = []
         self.killed = False
+        self.stdin = self.stdout = self.stderr = None  # pipes, as Popen has them
 
     def communicate(self, input=None, timeout=None):
         self.calls.append((input, timeout))
@@ -612,7 +613,51 @@ def test_default_python_is_carls_base_interpreter():
 # --- uv sync on approval ---
 
 
-class FakeRun:
+class Pipe:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class HangingProc:
+    """A `uv sync` that never finishes until its tree is killed; `stuck` keeps it hanging
+    even then, so only proc.kill() and closing the pipes are left."""
+
+    def __init__(self, out=b"Resolving...", stuck=False, pid=777):
+        self.out, self.stuck, self.pid = out, stuck, pid
+        self.dead = threading.Event()
+        self.started = threading.Event()
+        self.calls = []
+        self.killed = False
+        self.stdin, self.stdout, self.stderr = None, Pipe(), None
+        self.returncode = None
+
+    def communicate(self, input=None, timeout=None):
+        self.calls.append((input, timeout))
+        self.started.set()
+        if not self.dead.wait(min(timeout, 10)) or self.stuck:
+            raise subprocess.TimeoutExpired("uv", timeout)
+        self.returncode = 1
+        return self.out, None
+
+    def kill(self):
+        self.killed = True
+
+
+class TreeKiller:
+    def __init__(self, proc):
+        self.proc, self.pids = proc, []
+
+    def __call__(self, pid):
+        self.pids.append(pid)
+        self.proc.dead.set()
+
+
+class DonePopen:
+    """Popen for a sync that finishes at once with `code` and `out`."""
+
     def __init__(self, code=0, out=b"", error=None):
         self.code, self.out, self.error = code, out, error
         self.calls = []
@@ -621,15 +666,16 @@ class FakeRun:
         self.calls.append((args, kwargs))
         if self.error is not None:
             raise self.error
-        return subprocess.CompletedProcess(args, self.code, self.out, None)
+        return FakeProc(out=self.out, code=self.code)
 
 
 def test_run_sync_runs_uv_sync_in_the_folder_with_no_shell_or_window(tmp_path):
-    run = FakeRun()
+    popen = DonePopen()
     env = clean_env("hello-time", tmp_path / "appdata", environ={"PATH": r"C:\x"})
-    result = skills.run_sync(UV, tmp_path, env, run=run)
+    seen = []
+    result = skills.run_sync(UV, tmp_path, env, popen=popen, on_start=seen.append)
     assert result == skills.SyncResult(True)
-    [(args, kwargs)] = run.calls
+    [(args, kwargs)] = popen.calls
     assert args == [UV, "sync", "--no-config", "--no-editable"]
     assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["env"] == env
@@ -637,21 +683,71 @@ def test_run_sync_runs_uv_sync_in_the_folder_with_no_shell_or_window(tmp_path):
     assert kwargs["stdin"] == subprocess.DEVNULL
     assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.STDOUT
     assert kwargs["creationflags"] == NO_WINDOW
-    assert kwargs["timeout"] == skills.SYNC_TIMEOUT_S == 300
+    assert seen[0] is not None and seen[1] is None  # the live process, then none
 
 
 def test_run_sync_failures_keep_only_the_tail_of_the_output(tmp_path):
     out = ("a" * 2000 + "\r\nerror: no solution found ☕").encode()
-    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(code=2, out=out))
+    result = skills.run_sync(UV, tmp_path, {}, popen=DonePopen(code=2, out=out))
     assert not result.ok
     assert result.error == "The setup (uv sync) failed (exit 2)."
     assert len(result.output) <= skills.SYNC_OUTPUT_LIMIT
     assert result.output.endswith("error: no solution found ☕") and "\r" not in result.output
-
-    timed_out = subprocess.TimeoutExpired("uv", 300, output=b"Resolving...")
-    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(error=timed_out))
-    assert not result.ok and "took over 300 s" in result.error
-    assert result.output == "Resolving..."
-
-    result = skills.run_sync(UV, tmp_path, {}, run=FakeRun(error=FileNotFoundError("uv")))
+    result = skills.run_sync(UV, tmp_path, {}, popen=DonePopen(error=FileNotFoundError("uv")))
     assert result == skills.SyncResult(False, "uv couldn't be started (FileNotFoundError).")
+
+
+def test_a_sync_past_its_timeout_has_its_tree_killed(tmp_path):
+    proc = HangingProc()
+    killer = TreeKiller(proc)
+    result = skills.run_sync(
+        UV, tmp_path, {}, popen=lambda *a, **k: proc, killer=killer, timeout=0.2
+    )
+    assert killer.pids == [777]
+    assert not result.ok and "took over 0 s" in result.error
+    assert result.output == "Resolving..."
+    assert proc.calls[1][1] == skills.KILL_TIMEOUT_S  # then a bounded wait for what's left
+    assert skills.SYNC_TIMEOUT_S == 300
+
+
+def test_a_sync_that_wont_die_is_killed_and_its_pipes_closed(tmp_path):
+    proc = HangingProc(stuck=True)
+    killer = TreeKiller(proc)
+    result = skills.run_sync(
+        UV, tmp_path, {}, popen=lambda *a, **k: proc, killer=killer, timeout=0.2
+    )
+    assert not result.ok and killer.pids == [777]
+    assert proc.killed and proc.stdout.closed
+
+
+def test_stop_kills_a_running_sync_at_once(tmp_path):
+    proc = HangingProc()
+    killer = TreeKiller(proc)
+    r = SkillRunner(UV, tmp_path / "appdata", python=PY, popen=lambda *a, **k: proc, killer=killer)
+    results = []
+    worker = threading.Thread(target=lambda: results.append(r.sync(tmp_path, "hello-time")))
+    worker.start()
+    assert proc.started.wait(5)
+    # A skill can't run while the setup holds the lock.
+    assert r.run(make_skill(tmp_path / "s" / "hello-time"), {}).summary == REFUSED_BUSY
+    r.stop()  # Ctrl+C: no waiting for the sync's 300 s
+    worker.join(5)
+    assert not worker.is_alive()
+    assert killer.pids == [777]
+    assert results[0].ok is False
+    # Nothing new starts once shutdown began.
+    assert r.sync(tmp_path, "hello-time").busy
+    assert not r.run(make_skill(tmp_path / "s2" / "hello-time"), {}).ok
+
+
+def test_a_sync_is_refused_while_a_skill_runs(tmp_path):
+    r = runner(tmp_path, FakePopen())
+    assert r._lock.acquire()  # a run in progress
+    try:
+        calls = []
+        result = r.sync(tmp_path, "hello-time", sync=lambda *a, **k: calls.append(1))
+        assert result.busy and not result.ok and calls == []
+    finally:
+        r._lock.release()
+    result = r.sync(tmp_path, "hello-time", sync=lambda *a, **k: skills.SyncResult(True))
+    assert result.ok

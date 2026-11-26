@@ -211,11 +211,13 @@ def _without_prefix(path: str, prefix: str) -> str:
 @dataclass(frozen=True)
 class SyncResult:
     """`uv sync` for a skill: whether it worked, and (on a failure) the last
-    SYNC_OUTPUT_LIMIT characters of its output for the page."""
+    SYNC_OUTPUT_LIMIT characters of its output for the page. `busy`: nothing was started
+    because a skill (or another setup) was running."""
 
     ok: bool
     error: str = ""
     output: str = ""
+    busy: bool = False
 
 
 def run_sync(
@@ -223,34 +225,76 @@ def run_sync(
     folder: Path,
     env: Mapping[str, str],
     *,
-    run: Callable[..., Any] = subprocess.run,
+    popen: Popen = subprocess.Popen,
+    killer: Killer | None = None,
     timeout: float = SYNC_TIMEOUT_S,
+    on_start: Callable[[Any], None] | None = None,
 ) -> SyncResult:
     """`uv sync` (sync_command) in the skill's folder with its clean environment, no
     window and no shell. Blocking: call it off the event loop, and only from the
-    dashboard (never during a turn). `run` is subprocess.run, or a fake in tests."""
+    dashboard (never during a turn). Past `timeout` the whole tree is killed.
+    `on_start(proc)` gets the live process (so shutdown can kill it), then None."""
     try:
-        done = run(
+        proc = popen(
             sync_command(uv),
             cwd=str(folder),
             env=dict(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
             creationflags=NO_WINDOW,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        output = _tail(exc.output)
-        return SyncResult(False, f"The setup (uv sync) took over {timeout:.0f} s.", output)
     except OSError as exc:
         return SyncResult(False, f"uv couldn't be started ({type(exc).__name__}).")
-    if done.returncode != 0:
+    if on_start is not None:
+        on_start(proc)
+    try:
+        out, _err, timed_out = communicate(
+            proc, None, timeout, killer or kill_tree, reap_timeout=KILL_TIMEOUT_S
+        )
+    finally:
+        if on_start is not None:
+            on_start(None)
+    if timed_out:
+        return SyncResult(False, f"The setup (uv sync) took over {timeout:.0f} s.", _tail(out))
+    if proc.returncode != 0:
         return SyncResult(
-            False, f"The setup (uv sync) failed (exit {done.returncode}).", _tail(done.stdout)
+            False, f"The setup (uv sync) failed (exit {proc.returncode}).", _tail(out)
         )
     return SyncResult(True)
+
+
+def communicate(
+    proc: Any, stdin: bytes | None, timeout: float, killer: Killer, *, reap_timeout: float
+) -> tuple[bytes | None, bytes | None, bool]:
+    """proc.communicate with a timeout: (stdout, stderr, timed_out). Past the timeout the
+    whole tree is killed and what's left collected for `reap_timeout` at most; if even
+    that hangs, the process is killed and its pipes closed."""
+    try:
+        out, err = proc.communicate(input=stdin, timeout=timeout)
+        return out, err, False
+    except subprocess.TimeoutExpired:
+        pass
+    killer(proc.pid)
+    try:
+        out, err = proc.communicate(timeout=reap_timeout)
+        return out, err, True
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        _force_close(proc)
+        return None, None, True
+
+
+def _force_close(proc: Any) -> None:
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for pipe in (getattr(proc, "stdin", None), proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
 
 
 def _tail(data: bytes | str | None) -> str:
@@ -300,7 +344,10 @@ class SkillRunner:
         self._popen = popen
         self._kill = killer
         self._log = logger or log
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # one skill (run or setup) at a time
+        self._live_lock = threading.Lock()
+        self._live: Any = None  # the process running now, for stop()
+        self._stopped = False
 
     def clean_env(self, slug: str) -> dict[str, str]:
         return clean_env(slug, self.app_dir)
@@ -308,8 +355,48 @@ class SkillRunner:
     def command(self, skill: Skill) -> list[str]:
         return run_command(self.uv, project=has_project(skill.folder), python=self.python)
 
+    def sync(
+        self, folder: Path, slug: str, *, sync: Callable[..., SyncResult] = run_sync
+    ) -> SyncResult:
+        """`uv sync` for one skill (the dashboard's approval), holding the same lock as a
+        run: refused (busy) while a skill runs. Blocking: call it on a worker thread."""
+        if self._stopped or not self._lock.acquire(blocking=False):
+            return SyncResult(
+                False, "A skill is running right now; try again when it's done.", busy=True
+            )
+        try:
+            return sync(
+                self.uv,
+                folder,
+                self.clean_env(slug),
+                popen=self._popen,
+                killer=self._kill,
+                on_start=self._track,
+            )
+        finally:
+            self._lock.release()
+
+    def stop(self) -> None:
+        """At shutdown: kill whatever is running (a skill or a setup) with its whole
+        tree, so nothing waits on it; nothing new starts after this."""
+        with self._live_lock:
+            self._stopped = True
+            proc = self._live
+        if proc is not None:
+            self._log.info("Skills: stopping process %d for shutdown", proc.pid)
+            self._kill(proc.pid)
+
+    def _track(self, proc: Any) -> None:
+        with self._live_lock:
+            self._live = proc
+            stopped = self._stopped
+        if proc is not None and stopped:
+            self._kill(proc.pid)  # started just as shutdown began
+
     def run(self, skill: Skill, inputs: Mapping[str, Any]) -> SkillResult:
         """Run `skill` with already-checked `inputs` (its choices and maybe "text")."""
+        if self._stopped:
+            return SkillResult(False, "CARL is shutting down; nothing was run.", REFUSED_BUSY)
         if not self._lock.acquire(blocking=False):
             return SkillResult(
                 False, "Another skill is still running; nothing was run.", REFUSED_BUSY
@@ -348,11 +435,14 @@ class SkillRunner:
             self._log.warning("Skills: %s couldn't start (%s)", slug, type(exc).__name__)
             return SkillResult(False, "The skill couldn't be started.", NOT_STARTED)
         timeout = skill.manifest.timeout_seconds
+        self._track(proc)
         try:
-            out, err = proc.communicate(input=stdin, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._kill(proc.pid)
-            err = self._reap(proc)
+            out, err, timed_out = communicate(
+                proc, stdin, timeout, self._kill, reap_timeout=REAP_TIMEOUT_S
+            )
+        finally:
+            self._track(None)
+        if timed_out:
             self._log_stderr(slug, f"timed out after {timeout} s", err)
             return SkillResult(False, "The skill took too long and was stopped.", TIMED_OUT)
         code = proc.returncode
@@ -361,18 +451,6 @@ class SkillRunner:
             self._log_stderr(slug, summary, err)
             return SkillResult(False, f"The skill {summary}.", summary)
         return SkillResult(True, self._result_text(slug, out), "ok")
-
-    def _reap(self, proc: Any) -> bytes | None:
-        """After the kill: collect what's left, without waiting long."""
-        try:
-            _out, err = proc.communicate(timeout=REAP_TIMEOUT_S)
-            return err
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            return None
 
     def _log_stderr(self, slug: str, what: str, err: bytes | None) -> None:
         tail = _decode(err)[-STDERR_LOG_LIMIT:].strip() if err else ""

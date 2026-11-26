@@ -7,7 +7,7 @@ browser could still try to reach it, so:
 
 - every request must carry our Host (127.0.0.1:<port> or localhost:<port>), which stops
   DNS rebinding from reading anything;
-- every change (PUT/DELETE) must carry our Origin and the X-CARL-Token header, a random
+- every change (PUT/POST/DELETE) must carry our Origin and the X-CARL-Token header, a random
   per-process token put into the page we serve (CSRF);
 - listing Windows' apps (it starts PowerShell) and listing the skills (it reads the
   skill folders) need the X-CARL-Token header too;
@@ -26,6 +26,7 @@ import contextlib
 import hmac
 import json
 import logging
+import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from desk_buddy.events import EventBus
 from desk_buddy.personality_store import PersonalityStore
 from desk_buddy.server import RunningServer, ServerStartError, start_server
 from desk_buddy.settings_store import LiveSettings, SettingsStore
-from desk_buddy.skills_store import SkillsStore, check_slug, taken_names
+from desk_buddy.skills_store import SkillsStore, taken_names
 from desk_buddy.tools.skills import SkillRunner, run_sync
 
 log = logging.getLogger(__name__)
@@ -306,7 +307,9 @@ def create_dashboard(
     # --- skills ---
 
     if skills is not None:
-        approving = asyncio.Lock()  # one approval (and `uv sync`) at a time
+        # One setup at a time, held by the worker thread for the whole approval (its
+        # `uv sync` included); turning a skill off waits for none and is refused meanwhile.
+        setting_up = threading.Lock()
 
         def skills_view() -> dict[str, Any]:
             return skills_setup.skills_view(
@@ -336,42 +339,39 @@ def create_dashboard(
         @app.post("/api/skills/{slug}/approve")
         async def approve_skill(slug: str, request: Request) -> Response:
             await _read_capped(request)  # no body is needed; read it, so it closes cleanly
-            if approving.locked():
-                return JSONResponse(
-                    {"error": "Another skill is being set up; try again when it's done."},
-                    status_code=409,
+            # Off the event loop: `uv sync` can take minutes, and the voice loop must
+            # never wait for it.
+            try:
+                outcome = await asyncio.to_thread(
+                    skills_setup.approve,
+                    skills,
+                    skill_runner,
+                    live.latest.skills_dir,
+                    slug,
+                    other_names,
+                    lock=setting_up,
+                    sync=skill_sync,
                 )
-            async with approving:
-                # Off the event loop: `uv sync` can take minutes, and the voice loop
-                # must never wait for it.
-                try:
-                    outcome = await asyncio.to_thread(
-                        skills_setup.approve,
-                        skills,
-                        skill_runner,
-                        live.latest.skills_dir,
-                        slug,
-                        other_names(),
-                        sync=skill_sync,
-                    )
-                except OSError as exc:
-                    return _store_failed(exc)
-            if outcome.status == 200:
-                log.info("Dashboard: skill %s approved", slug)
+            except OSError as exc:
+                return _store_failed(exc)
             return JSONResponse(outcome.body, status_code=outcome.status)
 
         @app.post("/api/skills/{slug}/disable")
         async def disable_skill(slug: str, request: Request) -> Response:
             await _read_capped(request)
             try:
-                check_slug(slug)
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            try:
-                await asyncio.to_thread(skills.disable, slug)
+                outcome = await asyncio.to_thread(
+                    skills_setup.disable,
+                    skills,
+                    live.latest.skills_dir,
+                    slug,
+                    other_names,
+                    lock=setting_up,
+                    uv_found=skill_runner is not None,
+                )
             except OSError as exc:
                 return _store_failed(exc)
-            return JSONResponse(await asyncio.to_thread(skills_view))
+            return JSONResponse(outcome.body, status_code=outcome.status)
 
     # --- live events ---
 

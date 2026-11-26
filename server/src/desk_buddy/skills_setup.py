@@ -10,6 +10,7 @@ shown is the tail of a failed `uv sync`.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +49,9 @@ class Outcome:
 
     status: int
     body: dict[str, Any]
+
+
+BUSY = Outcome(409, {"error": "Another skill is being set up; try again when it's done."})
 
 
 def skill_view(s: Skill) -> dict[str, Any]:
@@ -100,23 +104,41 @@ def approve(
     runner: SkillRunner | None,
     skills_dir: str,
     slug: str,
-    other_names: Iterable[str],
+    other_names: Callable[[], Iterable[str]],
     *,
+    lock: threading.Lock,
     sync: Sync = run_sync,
 ) -> Outcome:
-    """Approve one skill: it must be valid (clashes included) and, with a project, not
-    inside another uv project; then `uv sync` (a project only), uv.lock must be there, and
-    the fingerprint is taken after the sync. Any failure leaves the skill off."""
-    other = frozenset(other_names)
+    """Approve one skill: it must be valid (clashes included), not on already and, with a
+    project, not inside another uv project; then `uv sync` (a project only), uv.lock must
+    be there, and the skill is checked again: still valid with the names apps and
+    bookmarks use at that moment, and its fingerprint is taken from that state. Any
+    failure leaves the skill off. `lock` allows one setup at a time (409 otherwise)."""
     try:
         check_slug(slug)
     except ValueError as exc:
         return Outcome(400, {"error": str(exc)})
+    if not lock.acquire(blocking=False):
+        return BUSY
+    try:
+        return _approve(store, runner, skills_dir, slug, other_names, sync)
+    finally:
+        lock.release()
+
+
+def _approve(
+    store: SkillsStore,
+    runner: SkillRunner | None,
+    skills_dir: str,
+    slug: str,
+    other_names: Callable[[], Iterable[str]],
+    sync: Sync,
+) -> Outcome:
     if not skills_dir:
         return Outcome(400, {"error": NO_FOLDER})
     if runner is None:
         return Outcome(503, {"error": NO_UV})
-    scan = store.scan(skills_dir, other)
+    scan = store.scan(skills_dir, other_names())
     if scan.error:
         return Outcome(400, {"error": scan.error})
     skill = scan.get(slug)
@@ -124,6 +146,8 @@ def approve(
         return Outcome(404, {"error": "There's no such skill in SKILLS_DIR."})
     if skill.status == INVALID:
         return _invalid(skill)
+    if skill.status == APPROVED:
+        return Outcome(400, {"error": "It's already on."})
     approvals = store.approvals()
     if slug not in approvals and len(approvals) >= MAX_APPROVED:
         return Outcome(400, {"error": f"At most {MAX_APPROVED} skills can be on. Turn one off."})
@@ -132,7 +156,9 @@ def approve(
         if reason is not None:
             return Outcome(400, {"error": reason})
         log.info("Skills: setting up %s (uv sync)", slug)
-        result = sync(runner.uv, skill.folder, runner.clean_env(slug))
+        result = runner.sync(skill.folder, slug, sync=sync)
+        if result.busy:
+            return Outcome(409, {"error": result.error})
         if not result.ok:
             log.warning("Skills: %s setup failed: %s", slug, result.error)
             return Outcome(400, {"error": result.error, "output": result.output})
@@ -140,8 +166,9 @@ def approve(
             return Outcome(
                 400, {"error": f"The setup didn't leave a {LOCK_FILE} in the skill's folder."}
             )
-    # The fingerprint after the sync (uv.lock may be new), from the files as they are now.
-    now = store.check(skills_dir, slug)
+    # Again after the sync: an edit or a new app or bookmark name in the meantime is
+    # refused, and the fingerprint (uv.lock may be new) comes from this state.
+    now = store.scan(skills_dir, other_names()).get(slug)
     if now is None:
         return Outcome(404, {"error": "The skill's folder is gone."})
     if now.status == INVALID or now.fingerprint is None:
@@ -150,7 +177,30 @@ def approve(
         store.approve(slug, now.fingerprint)
     except ValueError as exc:
         return Outcome(400, {"error": str(exc)})
-    return Outcome(200, skills_view(store, skills_dir, other, uv_found=True))
+    return Outcome(200, skills_view(store, skills_dir, other_names(), uv_found=True))
+
+
+def disable(
+    store: SkillsStore,
+    skills_dir: str,
+    slug: str,
+    other_names: Callable[[], Iterable[str]],
+    *,
+    lock: threading.Lock,
+    uv_found: bool,
+) -> Outcome:
+    """Turn one skill off; refused (409) while any skill is being set up."""
+    try:
+        check_slug(slug)
+    except ValueError as exc:
+        return Outcome(400, {"error": str(exc)})
+    if not lock.acquire(blocking=False):
+        return BUSY
+    try:
+        store.disable(slug)
+    finally:
+        lock.release()
+    return Outcome(200, skills_view(store, skills_dir, other_names(), uv_found=uv_found))
 
 
 def _invalid(skill: Skill) -> Outcome:

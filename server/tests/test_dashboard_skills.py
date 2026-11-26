@@ -57,12 +57,15 @@ class FakeSync:
     lock: bool = True
     output: str = ""
     gate: threading.Event | None = None
+    during: object = None  # called while the sync runs
     started: threading.Event = field(default_factory=threading.Event)
     calls: list = field(default_factory=list)
 
-    def __call__(self, uv, folder, env):
+    def __call__(self, uv, folder, env, **kwargs):
         self.calls.append((uv, Path(folder), dict(env)))
         self.started.set()
+        if self.during is not None:
+            self.during()
         if self.gate is not None:
             assert self.gate.wait(10)
         if not self.ok:
@@ -80,6 +83,7 @@ class Dash:
     apps: AppsStore
     sync: FakeSync
     live: LiveSettings
+    runner: SkillRunner | None
 
     @property
     def base(self):
@@ -153,7 +157,7 @@ async def running(tmp_path, *, sync=None, uv=True, skills_dir=True):
     server = await start_dashboard(app, port)
     assert server is not None
     try:
-        yield Dash(port, root, skills, apps, sync, live)
+        yield Dash(port, root, skills, apps, sync, live, runner)
     finally:
         await asyncio.wait_for(server.stop(), 5)
 
@@ -240,6 +244,8 @@ def test_scan_approve_change_and_disable(tmp_path):
             assert skills["hello-time"]["approved"] is True
             status, view, _ = await d.post("hello-time")
             assert status == 200 and by_slug(view)["hello-time"]["status"] == "approved"
+            status, body, _ = await d.post("hello-time")  # on already: nothing to do
+            assert status == 400 and body["error"] == "It's already on."
 
             # Turn it off.
             status, view, _ = await d.post("hello-time", "disable")
@@ -377,7 +383,7 @@ def test_the_21st_approval_is_refused(tmp_path):
             status, body, _ = await d.post("hello-time")
             assert status == 400 and f"At most {MAX_APPROVED}" in body["error"]
             assert "hello-time" not in d.skills.approvals()
-            # Re-approving one that's already on is fine.
+            # Re-approving one that's on but changed is fine.
             make_skill(d.root, "other-0", manifest("Other", ("other",)))
             status, body, _ = await d.post("other-0")
             assert status == 200, body
@@ -385,7 +391,7 @@ def test_the_21st_approval_is_refused(tmp_path):
     asyncio.run(run())
 
 
-def test_one_approval_at_a_time(tmp_path):
+def test_one_approval_at_a_time_and_no_disable_meanwhile(tmp_path):
     gate = threading.Event()
     sync = FakeSync(gate=gate)
 
@@ -393,6 +399,8 @@ def test_one_approval_at_a_time(tmp_path):
         async with running(tmp_path, sync=sync) as d:
             make_skill(d.root, "send-note", project=True)
             make_skill(d.root, "hello-time", manifest("Hi", ("hi",)))
+            make_skill(d.root, "other", manifest("Other", ("other",)))
+            d.skills.approve("other", "c" * 64)
             first = asyncio.create_task(d.post("send-note"))
             try:
                 assert await asyncio.to_thread(sync.started.wait, 5)
@@ -400,11 +408,64 @@ def test_one_approval_at_a_time(tmp_path):
                 assert (await d.get())[0] == 200
                 status, body, _ = await d.post("hello-time")
                 assert status == 409 and "Another skill is being set up" in body["error"]
+                status, body, _ = await d.post("other", "disable")
+                assert status == 409 and "Another skill is being set up" in body["error"]
+                assert "other" in d.skills.approvals()
             finally:
                 gate.set()
             status, body, _ = await first
             assert status == 200, body
-            assert set(d.skills.approvals()) == {"send-note"}
+            assert set(d.skills.approvals()) == {"send-note", "other"}
+            status, body, _ = await d.post("other", "disable")  # free again
+            assert status == 200, body
+
+    asyncio.run(run())
+
+
+def test_no_setup_while_a_skill_is_running(tmp_path):
+    async def run():
+        async with running(tmp_path) as d:
+            make_skill(d.root, "send-note", project=True)
+            runner = d.runner
+            assert runner._lock.acquire()  # a skill run in progress
+            try:
+                status, body, _ = await d.post("send-note")
+            finally:
+                runner._lock.release()
+            assert status == 409 and "A skill is running" in body["error"]
+            assert d.sync.calls == [] and d.skills.approvals() == {}
+            status, body, _ = await d.post("send-note")
+            assert status == 200, body
+
+    asyncio.run(run())
+
+
+def test_a_clash_or_edit_during_the_sync_is_refused(tmp_path):
+    holder = {}
+
+    def bookmark_takes_the_name():
+        assert (
+            holder["d"].apps.update_bookmarks([{"name": "send note", "url": "https://x.example"}])
+            == {}
+        )
+
+    async def run():
+        async with running(tmp_path, sync=FakeSync(during=bookmark_takes_the_name)) as d:
+            holder["d"] = d
+            make_skill(d.root, "send-note", manifest("Send", ("send note",)), project=True)
+            status, body, _ = await d.post("send-note")
+            assert status == 400 and "already used by an app or bookmark" in body["error"]
+            assert d.skills.approvals() == {}
+
+        def bad_edit():
+            (holder["d"].root / "edit-me" / "skill.json").write_text("{", encoding="utf-8")
+
+        async with running(tmp_path / "2", sync=FakeSync(during=bad_edit)) as d:
+            holder["d"] = d
+            make_skill(d.root, "edit-me", project=True)
+            status, body, _ = await d.post("edit-me")
+            assert status == 400 and "skill.json" in body["error"]
+            assert d.skills.approvals() == {}
 
     asyncio.run(run())
 

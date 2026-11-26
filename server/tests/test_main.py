@@ -713,6 +713,36 @@ def test_the_brain_and_the_dashboard_share_one_skills_store_and_runner(
     assert brain.skills.approvals_file == tmp_path / "desk-buddy" / "skills.json"
 
 
+def test_shutdown_kills_a_running_setup_before_the_dashboard_stops(
+    monkeypatch, fakes, calls, tmp_path
+):
+    uv = tmp_path / "bin" / "uv.exe"
+    uv.parent.mkdir()
+    uv.write_bytes(b"")
+    monkeypatch.setenv("PATH", str(uv.parent))
+    monkeypatch.setattr(entry.SkillRunner, "stop", lambda self: calls.append("skills stopped"))
+    monkeypatch.setattr(entry, "load_settings", lambda: Settings(anthropic_api_key="k"))
+    entry.main()
+    # A `uv sync` in progress is killed first, so the dashboard's request (and the
+    # worker thread) never hold up shutdown; the brain stops it again on close.
+    assert calls.index("skills stopped") < calls.index("dashboard stopped")
+    assert calls.count("skills stopped") == 2
+
+
+def test_closing_the_brain_stops_the_skill_runner():
+    stopped = []
+
+    class Runner:
+        def stop(self):
+            stopped.append(1)
+
+    brain = entry.Brain(
+        Settings(anthropic_api_key="k"), bus=entry.EventBus(), skill_runner=Runner()
+    )
+    brain.close()
+    assert stopped == [1]
+
+
 def test_without_uv_skills_are_off_with_a_warning(monkeypatch, fakes, calls, tmp_path, caplog):
     caplog.set_level(logging.INFO)
     monkeypatch.setenv("PATH", "")

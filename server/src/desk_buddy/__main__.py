@@ -225,6 +225,10 @@ async def _run(settings: Settings) -> None:
         dashboard = await start_dashboard(dashboard_app, settings.dashboard_port)
         if dashboard is not None:  # never fatal: CARL runs without it
             stack.push_async_callback(dashboard.stop)
+        if skill_runner is not None:
+            # Runs before the dashboard stops: a `uv sync` (or a skill) in progress is
+            # killed, so neither its request nor shutdown waits on it.
+            stack.callback(skill_runner.stop)
 
         loop = asyncio.get_running_loop()
         on_key = key_handler(switch, events)
@@ -360,6 +364,8 @@ class Brain:
             self.apps_ducker.on_state(state)
 
     def close(self) -> None:
+        if self.skill_runner is not None:
+            self.skill_runner.stop()
         if self.ducker is not None:
             self.ducker.close()
         if self.apps_ducker is not None:
