@@ -285,16 +285,14 @@ def communicate(
 
 
 def _force_close(proc: Any) -> None:
+    """Last resort after the tree kill and the reap both timed out. Only kills the
+    process: closing its pipes would block for as long as Popen's reader thread is stuck
+    in read() (it holds the buffer's lock), e.g. while a grandchild that escaped the tree
+    kill still holds stdout. Those reader threads are daemons and are left behind."""
     try:
         proc.kill()
     except OSError:
         pass
-    for pipe in (getattr(proc, "stdin", None), proc.stdout, proc.stderr):
-        if pipe is not None:
-            try:
-                pipe.close()
-            except (OSError, ValueError):
-                pass
 
 
 def _tail(data: bytes | str | None) -> str:

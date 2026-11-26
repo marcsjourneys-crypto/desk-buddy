@@ -614,11 +614,15 @@ def test_default_python_is_carls_base_interpreter():
 
 
 class Pipe:
+    """Closing a pipe whose reader thread is stuck blocks on Windows, so the code must
+    never try."""
+
     def __init__(self):
         self.closed = False
 
     def close(self):
         self.closed = True
+        raise AssertionError("a stuck pipe must never be closed")
 
 
 class HangingProc:
@@ -710,14 +714,14 @@ def test_a_sync_past_its_timeout_has_its_tree_killed(tmp_path):
     assert skills.SYNC_TIMEOUT_S == 300
 
 
-def test_a_sync_that_wont_die_is_killed_and_its_pipes_closed(tmp_path):
+def test_a_sync_that_wont_die_is_killed_and_its_pipes_left_alone(tmp_path):
     proc = HangingProc(stuck=True)
     killer = TreeKiller(proc)
     result = skills.run_sync(
         UV, tmp_path, {}, popen=lambda *a, **k: proc, killer=killer, timeout=0.2
     )
     assert not result.ok and killer.pids == [777]
-    assert proc.killed and proc.stdout.closed
+    assert proc.killed and not proc.stdout.closed
 
 
 def test_stop_kills_a_running_sync_at_once(tmp_path):
